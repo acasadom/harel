@@ -1,0 +1,38 @@
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Packaging / build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environment
+.venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Sphinx build output
+docs/_build/
+
+# OS / editor cruft
+.DS_Store
+
+# Local agent guidance
+CLAUDE.md
+
+# Internal design log (kept locally, not published)
+design/
+
+# local docker-compose stack state (shared sqlite store)
+.devstack/
+
+# VS Code extension dependencies (bun/npm install)
+editor/vscode/node_modules/

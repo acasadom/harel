@@ -1,0 +1,133 @@
+// Statechart DSL grammar (Lark, earley).
+//
+// Targets the same normalized config dict that `build_definition` consumes, so
+// it is feature-equivalent to the YAML front-end. A `program` is a set of
+// imports + event declarations + machine/fragment declarations.
+
+start: stmt+
+
+?stmt: import_stmt | bind_block | guard_decl | event_decl | machine_decl | fragment_decl
+
+// --- imports ---------------------------------------------------------------
+import_stmt: "import" STRING ("as" NAME)?
+
+// --- action bindings (handler name -> concrete impl) -----------------------
+bind_block: "bind" "{" binding+ "}"
+binding:    NAME "=" impl
+?impl:      NAME | DOTTED
+
+// --- named guards (reusable predicates, referenced by name in `where`) ------
+guard_decl: "guard" NAME "=" predicate
+
+// --- event declarations ----------------------------------------------------
+event_decl: "event" ref "{" field_decl* "}"
+field_decl: ref ":" TYPE OPTIONAL?
+OPTIONAL: "?"
+TYPE: "string" | "int" | "float" | "bool" | "any"
+
+// --- machines & states -----------------------------------------------------
+machine_decl:  "machine" ref "{" item* "}"
+fragment_decl: "fragment" ref param_list? "{" item* "}"
+state_decl:    KIND ref "{" item* "}"
+KIND: "state" | "orthogonal"
+// sugar: a terminal (final) state with its verdict inline; optional body for hooks
+final_decl:    "final" ref ref ("{" item* "}")?
+
+// a fragment's customizable surface: typed parameters filled at the use site
+param_list: "(" param ("," param)* ")"
+param:      NAME ":" PARAM_KIND
+PARAM_KIND: "action" | "state" | "guard" | "value" | "event"
+
+?item: initial | on_enter | on_exit | on_activity | timeout | outcome | carry | nohistory
+     | invoke | invoke_with
+     | use_stmt | state_decl | final_decl | selector_trans | join_trans | transition
+
+initial:     "initial" ref
+on_enter:    "on" "enter"    action
+on_exit:     "on" "exit"     action
+on_activity: "on" "activity" action
+timeout:      "timeout" timeout_spec
+// a literal, a context-key lookup, or a `value` fragment-parameter reference
+timeout_spec: INT             -> timeout_literal
+            | "context" ref   -> timeout_context
+            | NAME            -> timeout_param
+outcome:     "outcome" ref
+// context keys this (region) state propagates on its `Finished` (besides `outcome`)
+carry:       "carry" ref ("," ref)*
+nohistory:   "no" "history"
+// invoke a submachine (black-box): by FQN, or an inline machine body (QML-style).
+// `for V in COLL` fans out ONE child per entry of the context list COLL (V = the entry).
+invoke:         "invoke" (NAME | DOTTED)? invoke_for? inline_machine?
+invoke_for:     "for" ref "in" ref
+inline_machine: "{" item* "}"
+invoke_with:    "with" "{" with_pair+ "}"
+with_pair:      ref ":" ref
+
+// instantiate an imported/local fragment as a child, filling its parameters by
+// name (the fragment name may be namespaced by an import alias, e.g. `r.Retry`)
+use_stmt:     "use" (NAME | DOTTED) arg_list? ("as" ref)?
+// the arg list may be empty — `use Frag()` instantiates a no-parameter fragment
+arg_list:     "(" (arg ("," arg)*)? ")"
+arg:          NAME "=" arg_value
+// an arg is a bare name (action forward / state / guard / value-as-string), a
+// literal action path, a literal value, or a parenthesized predicate (a guard)
+// — disambiguated by the parameter's kind at the use site
+arg_value:    NAME             -> a_name
+         |    DOTTED           -> a_dotted
+         |    value            -> a_value
+         |    "(" predicate ")" -> a_pred
+
+// --- transitions -----------------------------------------------------------
+// every transition is `from SRC to DEST ...`; a selector replaces `to DEST` with
+// `select FN { ... }` (the destination is computed), so each concrete edge — direct
+// or a selector branch — is still `... to <state>` (one meaning for `to`)
+transition:     "from" ref "to" ref trigger?
+selector_trans: "from" ref "select" action enum_decl? trigger? "{" branch+ else_branch? "}"
+// sugar: orthogonal-join aggregation — route by whether all/any region succeeded
+join_trans:     "from" ref "join" "all" "to" ref "else" "to" ref -> join_all
+          |     "from" ref "join" "any" "to" ref "else" "to" ref -> join_any
+enum_decl:      "returns" "{" value ("," value)* "}"
+branch:         value "to" ref
+else_branch:    "else" "to" ref
+trigger:        "on" kinds ("where" predicate)?
+kinds:          ref ("|" ref)*
+
+// --- predicates (composable) ----------------------------------------------
+?predicate: or_expr
+?or_expr:   and_expr | and_expr ("or"  and_expr)+ -> any_expr
+?and_expr:  not_expr | not_expr ("and" not_expr)+ -> all_expr
+?not_expr:  atom | "not" not_expr                 -> neg
+// an atom is a comparison, a parenthesized predicate, or a reference to a named
+// guard (composable with the rest: `where ok and status == "x"`)
+?atom:      comparison | guard_atom | "(" predicate ")"
+guard_atom: NAME
+comparison: ref OP value
+OP: "==" | "!=" | "<=" | ">=" | "<" | ">" | "in"
+
+// --- actions & values ------------------------------------------------------
+// an action reference is a bare handler NAME (bound separately) or a literal
+// DOTTED path (a fully-qualified importable function), with optional inputs
+action:      action_ref ("(" [input ("," input)*] ")")?
+?action_ref: NAME | DOTTED
+input:       ref ":" input_val
+// an input value is a literal, or a `value` fragment-parameter reference
+input_val:   value -> in_literal
+         |   NAME  -> in_param
+
+?value: STRING | SIGNED_NUMBER | BOOL | list
+list:   "[" [value ("," value)*] "]"
+BOOL:   "true" | "false"
+
+?ref: NAME | STRING
+
+// a literal action path: two-or-more dotted segments (single segment => a handler NAME)
+DOTTED: /[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+/
+NAME:   /[A-Za-z_][A-Za-z0-9_]*/
+
+%import common.SIGNED_NUMBER
+%import common.INT
+%import common.ESCAPED_STRING -> STRING
+%import common.WS
+%ignore WS
+%ignore /#[^\n]*/
+%ignore /\/\/[^\n]*/

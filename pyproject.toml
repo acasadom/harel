@@ -1,0 +1,96 @@
+[project]
+name = "harel"
+version = "0.1.0"
+description = "Durable, distributed statecharts for Python"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Alberto Casado" }]
+keywords = ["statechart", "state-machine", "uml", "hsm", "workflow", "durable-execution", "dsl"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+]
+requires-python = ">=3.11,<4"
+dependencies = [
+    "lark>=1.2,<2",
+    "pydantic>=2,<3",
+    "structlog",
+]
+
+[project.optional-dependencies]
+# the RedisTransport / RedisStore backend; the client is injected, so this is only
+# needed to talk to a real Redis (tests use fakeredis from the dev group)
+redis = ["redis>=5,<9"]
+# the PostgresStore backend (distributed-SQL); validated via the docker-compose stack
+postgres = ["psycopg[binary]>=3,<4"]
+# the RqliteStore backend (distributed SQLite over rqlite's HTTP API)
+rqlite = ["requests>=2,<3"]
+# the SqsTransport backend (AWS SQS FIFO; works against LocalStack with no AWS account)
+sqs = ["boto3>=1.26"]
+# the DSL language server (editor diagnostics over parse() + validate()); the
+# VSCode extension in editor/vscode/ launches `python -m harel.lsp`
+lsp = ["pygls>=1.3,<2"]
+
+[project.scripts]
+harel-lsp = "harel.lsp:main"
+harel-fmt = "harel.fmt:main"
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "ruff",
+    "mypy",
+    "sphinx",
+    "myst-parser",
+    "sphinxcontrib-mermaid",
+    "fakeredis>=2.36.0",
+    "pygls>=1.3,<2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/harel"]
+# the DSL grammar is a data file the parser loads at import time
+artifacts = ["src/harel/dsl/grammar.lark"]
+
+[tool.pytest.ini_options]
+# src is the package root; test/ holds modules that import each other by bare name;
+# deploy/ holds demo_actions referenced by the docker-compose stack's machines
+pythonpath = ["src", "test", "deploy"]
+testpaths = ["test"]
+# `stack`-marked tests need the docker-compose stack running (see deploy/README.md);
+# they are opt-in (run as the compose `test` service). The transport/store logic is
+# covered deterministically by the fakeredis tests, which run by default.
+markers = ["stack: end-to-end tests needing the running docker-compose stack (real Redis/Postgres)"]
+addopts = "-m 'not stack'"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+# Long lines are mostly intentional f-string log messages; the formatter wraps real code.
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+# Standard isort layout (ruff defaults, formatter-compatible); just declare the
+# first-party package so the local import section is grouped correctly.
+known-first-party = ["harel"]
+
+[tool.mypy]
+files = ["src"]
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
+# Legacy codebase: start lenient and tighten over time.
+check_untyped_defs = true
