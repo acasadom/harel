@@ -1,0 +1,897 @@
+"""The persistence seam for Executions.
+
+An `ExecutionStore` is how the `Driver` reads and checkpoints the running
+instances, plus a **transactional outbox** for the deferred events an Execution
+emits (e.g. a region's `Finished` to its parent). `commit` writes the Execution
+and its emitted events in the *same* transaction, so a crash can never leave the
+state advanced but the `Finished` unsent (which would deadlock the join). A
+separate relay reads the outbox and delivers it after the commit.
+
+The in-memory `DictStore` (default) keeps everything in dicts/lists — same
+object identity in and out, so it is behaviour-preserving. A durable backend
+(SQL/DBOS/SQS/...) implements the same methods over the JSON-serializable
+`Execution`; the `Driver` then checkpoints at each event boundary and the same
+engine drives durable runs.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Optional, Protocol, Union, runtime_checkable
+
+from harel.engine.execution import Execution
+from harel.spec.states import Event
+
+
+@dataclass
+class OutboxEntry:
+    """A deferred event awaiting delivery: `seq` (monotonic, for ack), the
+    `target_id` Execution to deliver to (None = no target), and the `event`."""
+
+    seq: int
+    target_id: Optional[str]
+    event: Event
+
+
+@dataclass
+class SpawnEntry:
+    """A pending child-Execution creation (an orthogonal fork), committed in the
+    SAME transaction as the parent's advance + join expectations (`children` dict),
+    so the fork is atomic and crash-safe. A relay creates the child afterwards,
+    idempotently (skip if it already exists). Mirrors `OutboxEntry` for events."""
+
+    seq: int
+    parent_id: str
+    child_id: str
+    root_path: str
+    context: dict
+
+
+@dataclass
+class TimerOp:
+    """A durable-timer mutation applied atomically with a `commit`: `schedule`
+    arms (upserts) the timer for `(execution_id, path)` to fire at `fire_at`;
+    `cancel` disarms it. Keyed by `(execution_id, path)` — re-entry replaces."""
+
+    action: str  # "schedule" | "cancel"
+    path: str
+    fire_at: float = 0.0
+
+
+class StoreConflict(RuntimeError):
+    """Raised when a save loses the optimistic-concurrency check: the stored row
+    moved past the version the Execution was loaded at (another writer won). The
+    caller should reload and retry, or drop the stale work."""
+
+    def __init__(self, execution_id: str, expected: int, found: Optional[int]) -> None:
+        super().__init__(f"stale write to {execution_id}: expected version {expected}, found {found}")
+        self.execution_id = execution_id
+        self.expected = expected
+        self.found = found
+
+
+@runtime_checkable
+class ExecutionStore(Protocol):
+    def load(self, execution_id: str) -> Optional[Execution]: ...
+
+    def save(self, exe: Execution) -> None:
+        """Persist `exe`, committing `version+1` iff the stored row is still at
+        `exe.version` (optimistic concurrency); raise `StoreConflict` otherwise.
+        On success `exe.version` is bumped to the committed value."""
+        ...
+
+    def commit(
+        self,
+        exe: Execution,
+        emits: list[tuple[Optional[str], Event]],
+        processed_event_id: Optional[str] = None,
+        timers: "tuple[TimerOp, ...]" = (),
+        spawns: "tuple[tuple[str, str, dict], ...]" = (),
+    ) -> None:
+        """Atomically `save` the Execution, enqueue its emitted events into the
+        outbox, record `processed_event_id` as handled (if given), apply the
+        `timers` mutations, and enqueue the `spawns` (orthogonal child creations,
+        each `(child_id, root_path, context)`). Either all happen or none — so a
+        fork's children + the parent's join expectations commit atomically."""
+        ...
+
+    def is_processed(self, execution_id: str, event_id: str) -> bool:
+        """Whether `execution_id` already processed `event_id` (dedupe under
+        at-least-once delivery)."""
+        ...
+
+    def pending_outbox(self) -> list[OutboxEntry]:
+        """Undelivered outbox entries, oldest first."""
+        ...
+
+    def ack_outbox(self, seq: int) -> None:
+        """Mark the outbox entry `seq` delivered (remove it)."""
+        ...
+
+    def pending_spawns(self) -> "list[SpawnEntry]":
+        """Undelivered child-creation intents, oldest first."""
+        ...
+
+    def ack_spawn(self, seq: int) -> None:
+        """Mark the spawn entry `seq` done (remove it)."""
+        ...
+
+    def due_timers(self, now: float) -> "list[tuple[str, str, float]]":
+        """Timers due at `now` (fire_at <= now), as `(execution_id, path, fire_at)`."""
+        ...
+
+    def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None:
+        """Remove the timer for `(execution_id, path)` — but only if it still holds
+        `fire_at` (so a concurrent re-schedule to a new time survives a stale sweep)."""
+        ...
+
+    def close(self) -> None:
+        """Release any backend resources (connection/client). No-op for in-memory."""
+        ...
+
+
+class DictStore:
+    """In-memory `ExecutionStore`: a plain dict. Returns the same `Execution`
+    object that was saved (no serialization), so callers that hold a reference
+    see mutations — the default for embedded, non-durable runs."""
+
+    def __init__(self) -> None:
+        self._by_id: dict[str, Execution] = {}
+        self._outbox: list[OutboxEntry] = []
+        self._processed: set[tuple[str, str]] = set()
+        self._timers: dict[tuple[str, str], float] = {}  # (execution_id, path) -> fire_at
+        self._spawns: list[SpawnEntry] = []
+        self._seq = 0
+        self._spawn_seq = 0
+
+    def load(self, execution_id: str) -> Optional[Execution]:
+        return self._by_id.get(execution_id)
+
+    def save(self, exe: Execution) -> None:
+        prev = self._by_id.get(exe.id)
+        # CAS only bites when a *different* object is stored under the same id
+        # (a genuine concurrent writer); the common same-object case always wins.
+        if prev is not None and prev is not exe and prev.version != exe.version:
+            raise StoreConflict(exe.id, expected=exe.version, found=prev.version)
+        exe.version += 1
+        self._by_id[exe.id] = exe
+
+    def commit(
+        self,
+        exe: Execution,
+        emits: list[tuple[Optional[str], Event]],
+        processed_event_id: Optional[str] = None,
+        timers: tuple[TimerOp, ...] = (),
+        spawns: tuple[tuple[str, str, dict], ...] = (),
+    ) -> None:
+        self.save(exe)  # CAS first: raises before any emit is enqueued
+        for target_id, event in emits:
+            self._seq += 1
+            self._outbox.append(OutboxEntry(self._seq, target_id, event))
+        if processed_event_id is not None:
+            self._processed.add((exe.id, processed_event_id))
+        for op in timers:
+            if op.action == "schedule":
+                self._timers[(exe.id, op.path)] = op.fire_at
+            else:
+                self._timers.pop((exe.id, op.path), None)
+        for child_id, root_path, context in spawns:
+            self._spawn_seq += 1
+            self._spawns.append(SpawnEntry(self._spawn_seq, exe.id, child_id, root_path, dict(context)))
+
+    def is_processed(self, execution_id: str, event_id: str) -> bool:
+        return (execution_id, event_id) in self._processed
+
+    def pending_outbox(self) -> list[OutboxEntry]:
+        return list(self._outbox)
+
+    def ack_outbox(self, seq: int) -> None:
+        self._outbox = [e for e in self._outbox if e.seq != seq]
+
+    def pending_spawns(self) -> list[SpawnEntry]:
+        return list(self._spawns)
+
+    def ack_spawn(self, seq: int) -> None:
+        self._spawns = [s for s in self._spawns if s.seq != seq]
+
+    def due_timers(self, now: float) -> list[tuple[str, str, float]]:
+        return [(eid, path, fa) for (eid, path), fa in self._timers.items() if fa <= now]
+
+    def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None:
+        if self._timers.get((execution_id, path)) == fire_at:
+            del self._timers[(execution_id, path)]
+
+    def close(self) -> None:
+        pass  # nothing to release; the dict lives with the process
+
+
+class SqliteStore:
+    """A durable `ExecutionStore` over SQLite (stdlib): each Execution is stored
+    as JSON keyed by id, committed on every save. A fresh `SqliteStore` on the
+    same file reads the committed state — so a run survives a process restart and
+    resumes. `:memory:` gives a non-persistent variant for tests."""
+
+    def __init__(self, path: Union[str, Path] = ":memory:") -> None:
+        self._conn = sqlite3.connect(str(path), check_same_thread=False)
+        self._conn.execute("PRAGMA journal_mode=WAL")  # readers don't block the single writer
+        self._conn.execute("PRAGMA busy_timeout=5000")  # wait for the write-lock instead of erroring
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS executions "
+            "(id TEXT PRIMARY KEY, definition_id TEXT NOT NULL, data TEXT NOT NULL, "
+            "version INTEGER NOT NULL)"
+        )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS outbox "
+            "(seq INTEGER PRIMARY KEY AUTOINCREMENT, target_id TEXT, event TEXT NOT NULL)"
+        )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS processed_events "
+            "(execution_id TEXT NOT NULL, event_id TEXT NOT NULL, "
+            "PRIMARY KEY (execution_id, event_id))"
+        )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS timers "
+            "(execution_id TEXT NOT NULL, path TEXT NOT NULL, fire_at REAL NOT NULL, "
+            "PRIMARY KEY (execution_id, path))"
+        )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS spawns "
+            "(seq INTEGER PRIMARY KEY AUTOINCREMENT, parent_id TEXT NOT NULL, child_id TEXT NOT NULL, "
+            "root_path TEXT NOT NULL, context TEXT NOT NULL)"
+        )
+        self._conn.commit()
+
+    def load(self, execution_id: str) -> Optional[Execution]:
+        row = self._conn.execute("SELECT data FROM executions WHERE id = ?", (execution_id,)).fetchone()
+        return Execution.model_validate_json(row[0]) if row is not None else None
+
+    def _write(self, exe: Execution) -> None:
+        """The CAS write of `exe`, WITHOUT committing the transaction (so it can
+        be batched atomically with outbox inserts in `commit`)."""
+        old = exe.version
+        exe.version = old + 1
+        data = exe.model_dump_json()
+        cur = self._conn.execute(
+            "UPDATE executions SET data = ?, version = ? WHERE id = ? AND version = ?",
+            (data, exe.version, exe.id, old),
+        )
+        if cur.rowcount == 0:
+            # no row matched `old`: either a brand-new Execution (no row yet) or a
+            # stale write (the row moved past `old`). Distinguish by existence.
+            found = self._conn.execute("SELECT version FROM executions WHERE id = ?", (exe.id,)).fetchone()
+            if found is None and old == 0:
+                self._conn.execute(
+                    "INSERT INTO executions (id, definition_id, data, version) VALUES (?, ?, ?, ?)",
+                    (exe.id, exe.definition_id, data, exe.version),
+                )
+            else:
+                exe.version = old  # undo the in-memory bump; the commit did not happen
+                raise StoreConflict(exe.id, expected=old, found=found[0] if found else None)
+
+    def save(self, exe: Execution) -> None:
+        try:
+            self._write(exe)
+            self._conn.commit()
+        except StoreConflict:
+            self._conn.rollback()
+            raise
+
+    def commit(
+        self,
+        exe: Execution,
+        emits: list[tuple[Optional[str], Event]],
+        processed_event_id: Optional[str] = None,
+        timers: tuple[TimerOp, ...] = (),
+        spawns: tuple[tuple[str, str, dict], ...] = (),
+    ) -> None:
+        try:
+            self._write(exe)
+            for target_id, event in emits:
+                self._conn.execute(
+                    "INSERT INTO outbox (target_id, event) VALUES (?, ?)",
+                    (target_id, event.model_dump_json()),
+                )
+            if processed_event_id is not None:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO processed_events (execution_id, event_id) VALUES (?, ?)",
+                    (exe.id, processed_event_id),
+                )
+            for child_id, root_path, context in spawns:
+                self._conn.execute(
+                    "INSERT INTO spawns (parent_id, child_id, root_path, context) VALUES (?, ?, ?, ?)",
+                    (exe.id, child_id, root_path, json.dumps(context)),
+                )
+            for op in timers:
+                if op.action == "schedule":
+                    self._conn.execute(
+                        "INSERT INTO timers (execution_id, path, fire_at) VALUES (?, ?, ?) "
+                        "ON CONFLICT(execution_id, path) DO UPDATE SET fire_at = excluded.fire_at",
+                        (exe.id, op.path, op.fire_at),
+                    )
+                else:
+                    self._conn.execute(
+                        "DELETE FROM timers WHERE execution_id = ? AND path = ?", (exe.id, op.path)
+                    )
+            self._conn.commit()
+        except StoreConflict:
+            self._conn.rollback()
+            raise
+
+    def is_processed(self, execution_id: str, event_id: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM processed_events WHERE execution_id = ? AND event_id = ?",
+            (execution_id, event_id),
+        ).fetchone()
+        return row is not None
+
+    def pending_spawns(self) -> list[SpawnEntry]:
+        rows = self._conn.execute(
+            "SELECT seq, parent_id, child_id, root_path, context FROM spawns ORDER BY seq"
+        ).fetchall()
+        return [SpawnEntry(seq, pid, cid, rp, json.loads(ctx)) for seq, pid, cid, rp, ctx in rows]
+
+    def ack_spawn(self, seq: int) -> None:
+        self._conn.execute("DELETE FROM spawns WHERE seq = ?", (seq,))
+        self._conn.commit()
+
+    def due_timers(self, now: float) -> list[tuple[str, str, float]]:
+        rows = self._conn.execute(
+            "SELECT execution_id, path, fire_at FROM timers WHERE fire_at <= ? ORDER BY fire_at", (now,)
+        ).fetchall()
+        return [(eid, path, fa) for eid, path, fa in rows]
+
+    def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None:
+        self._conn.execute(
+            "DELETE FROM timers WHERE execution_id = ? AND path = ? AND fire_at = ?",
+            (execution_id, path, fire_at),
+        )
+        self._conn.commit()
+
+    def pending_outbox(self) -> list[OutboxEntry]:
+        rows = self._conn.execute("SELECT seq, target_id, event FROM outbox ORDER BY seq").fetchall()
+        return [
+            OutboxEntry(seq, target_id, Event.model_validate_json(event)) for seq, target_id, event in rows
+        ]
+
+    def ack_outbox(self, seq: int) -> None:
+        self._conn.execute("DELETE FROM outbox WHERE seq = ?", (seq,))
+        self._conn.commit()
+
+    def close(self) -> None:
+        self._conn.close()
+
+
+class RedisStore:
+    """A durable `ExecutionStore` over Redis — the all-network alternative to
+    `SqliteStore` (no shared filesystem, so it works across machines / containers
+    without a shared volume). Pairs naturally with `RedisTransport` for a pure-
+    Redis deployment. The client is injected (duck-typed), so `redis` stays an
+    optional dependency and tests use fakeredis.
+
+    Keys (under `prefix`): ``exe:{id}`` = the Execution JSON; ``outbox`` = a hash
+    {seq -> emit}; ``outbox:seq`` = the monotonic counter; ``processed:{id}`` = a
+    set of handled event ids. `commit` is atomic via WATCH/MULTI/EXEC on the
+    Execution key (no Lua, so fakeredis supports it): the version CAS is checked
+    under WATCH and the writes go in one EXEC; a concurrent change → `StoreConflict`."""
+
+    def __init__(self, client: Any, prefix: str = "stm") -> None:
+        from redis.exceptions import WatchError
+
+        self._r = client
+        self._prefix = prefix
+        self._WatchError = WatchError
+
+    @classmethod
+    def from_url(cls, url: str, prefix: str = "stm") -> "RedisStore":
+        """Convenience constructor; imports `redis` lazily (the optional dep)."""
+        import redis
+
+        return cls(redis.Redis.from_url(url), prefix)
+
+    def _k(self, suffix: str) -> str:
+        return f"{self._prefix}:{suffix}"
+
+    def load(self, execution_id: str) -> Optional[Execution]:
+        raw = self._r.get(self._k(f"exe:{execution_id}"))
+        return Execution.model_validate_json(raw) if raw is not None else None
+
+    def save(self, exe: Execution) -> None:
+        self.commit(exe, [])
+
+    def commit(
+        self,
+        exe: Execution,
+        emits: list[tuple[Optional[str], Event]],
+        processed_event_id: Optional[str] = None,
+        timers: tuple[TimerOp, ...] = (),
+        spawns: tuple[tuple[str, str, dict], ...] = (),
+    ) -> None:
+        # allocate monotonic outbox seqs up front (INCR can't return its value
+        # inside MULTI; a seq wasted by an aborted txn is harmless)
+        queued = [(int(self._r.incr(self._k("outbox:seq"))), t, e.model_dump_json()) for t, e in emits]
+        queued_spawns = [(int(self._r.incr(self._k("spawns:seq"))), cid, rp, ctx) for cid, rp, ctx in spawns]
+        key = self._k(f"exe:{exe.id}")
+        old = exe.version
+        with self._r.pipeline() as pipe:
+            try:
+                pipe.watch(key)
+                current = pipe.get(key)
+                cur_version = json.loads(current)["version"] if current is not None else None
+                if not (current is None and old == 0) and cur_version != old:
+                    pipe.unwatch()
+                    raise StoreConflict(exe.id, expected=old, found=cur_version)
+                exe.version = old + 1
+                pipe.multi()
+                pipe.set(key, exe.model_dump_json())
+                for seq, target_id, event_json in queued:
+                    pipe.hset(self._k("outbox"), str(seq), json.dumps({"t": target_id, "e": event_json}))
+                if processed_event_id is not None:
+                    pipe.sadd(self._k(f"processed:{exe.id}"), processed_event_id)
+                for seq, cid, rp, ctx in queued_spawns:
+                    pipe.hset(
+                        self._k("spawns"),
+                        str(seq),
+                        json.dumps({"p": exe.id, "c": cid, "r": rp, "x": ctx}),
+                    )
+                for op in timers:
+                    member = f"{exe.id}\x00{op.path}"
+                    if op.action == "schedule":
+                        pipe.zadd(self._k("timers"), {member: op.fire_at})
+                    else:
+                        pipe.zrem(self._k("timers"), member)
+                pipe.execute()
+            except self._WatchError:
+                exe.version = old  # a concurrent writer won between WATCH and EXEC
+                raise StoreConflict(exe.id, expected=old, found=None)
+
+    def is_processed(self, execution_id: str, event_id: str) -> bool:
+        return bool(self._r.sismember(self._k(f"processed:{execution_id}"), event_id))
+
+    def pending_spawns(self) -> list[SpawnEntry]:
+        entries = []
+        for seq_raw, val_raw in self._r.hgetall(self._k("spawns")).items():
+            p = json.loads(val_raw)
+            entries.append(SpawnEntry(int(seq_raw), p["p"], p["c"], p["r"], p["x"]))
+        return sorted(entries, key=lambda s: s.seq)
+
+    def ack_spawn(self, seq: int) -> None:
+        self._r.hdel(self._k("spawns"), str(seq))
+
+    def due_timers(self, now: float) -> list[tuple[str, str, float]]:
+        out: list[tuple[str, str, float]] = []
+        for member_raw, score in self._r.zrangebyscore(self._k("timers"), "-inf", now, withscores=True):
+            member = member_raw.decode() if isinstance(member_raw, (bytes, bytearray)) else member_raw
+            execution_id, _, path = member.partition("\x00")
+            out.append((execution_id, path, float(score)))
+        return out
+
+    def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None:
+        member = f"{execution_id}\x00{path}"
+        score = self._r.zscore(self._k("timers"), member)
+        if score is not None and float(score) == fire_at:
+            self._r.zrem(self._k("timers"), member)
+
+    def pending_outbox(self) -> list[OutboxEntry]:
+        entries = []
+        for seq_raw, val_raw in self._r.hgetall(self._k("outbox")).items():
+            payload = json.loads(val_raw)
+            entries.append(OutboxEntry(int(seq_raw), payload["t"], Event.model_validate_json(payload["e"])))
+        return sorted(entries, key=lambda e: e.seq)
+
+    def ack_outbox(self, seq: int) -> None:
+        self._r.hdel(self._k("outbox"), str(seq))
+
+    def close(self) -> None:
+        self._r.close()
+
+
+class PostgresStore:
+    """A durable `ExecutionStore` over PostgreSQL (psycopg) — a real SQL server
+    for the distributed-SQL deployment (state shared across machines without a
+    filesystem). Same contract as SqliteStore: version/CAS, transactional outbox,
+    dedupe; the whole `commit` is one Postgres transaction.
+
+    The connection is injected (duck-typed) so `psycopg` is an optional extra. CAS
+    is a plain `UPDATE ... WHERE version = old`: Postgres row-locks serialize
+    concurrent writers, so exactly one wins (rowcount 1) and the loser (rowcount 0)
+    raises `StoreConflict` — no app-level locking needed."""
+
+    def __init__(self, conn: Any) -> None:
+        self._conn = conn
+        with conn.cursor() as cur:
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS executions "
+                "(id TEXT PRIMARY KEY, definition_id TEXT NOT NULL, data TEXT NOT NULL, version INT NOT NULL)"
+            )
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS outbox "
+                "(seq BIGSERIAL PRIMARY KEY, target_id TEXT, event TEXT NOT NULL)"
+            )
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS processed_events "
+                "(execution_id TEXT NOT NULL, event_id TEXT NOT NULL, PRIMARY KEY (execution_id, event_id))"
+            )
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS timers "
+                "(execution_id TEXT NOT NULL, path TEXT NOT NULL, fire_at DOUBLE PRECISION NOT NULL, "
+                "PRIMARY KEY (execution_id, path))"
+            )
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS spawns "
+                "(seq BIGSERIAL PRIMARY KEY, parent_id TEXT NOT NULL, child_id TEXT NOT NULL, "
+                "root_path TEXT NOT NULL, context TEXT NOT NULL)"
+            )
+        conn.commit()
+
+    @classmethod
+    def from_dsn(cls, dsn: str, connect_retries: int = 15, retry_delay: float = 1.0) -> "PostgresStore":
+        """Convenience constructor; imports `psycopg` lazily (the optional dep).
+        Retries the connection so a worker starting alongside Postgres (compose)
+        waits for it to accept connections rather than crashing."""
+        import time
+
+        import psycopg
+
+        last: Exception | None = None
+        for _ in range(connect_retries):
+            try:
+                return cls(psycopg.connect(dsn))
+            except psycopg.OperationalError as exc:
+                last = exc
+                time.sleep(retry_delay)
+        raise last if last is not None else RuntimeError("postgres connect failed")
+
+    def load(self, execution_id: str) -> Optional[Execution]:
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT data FROM executions WHERE id = %s", (execution_id,))
+            row = cur.fetchone()
+        self._conn.commit()  # end the read transaction so the next read sees fresh data
+        return Execution.model_validate_json(row[0]) if row is not None else None
+
+    def save(self, exe: Execution) -> None:
+        self.commit(exe, [])
+
+    def commit(
+        self,
+        exe: Execution,
+        emits: list[tuple[Optional[str], Event]],
+        processed_event_id: Optional[str] = None,
+        timers: tuple[TimerOp, ...] = (),
+        spawns: tuple[tuple[str, str, dict], ...] = (),
+    ) -> None:
+        old = exe.version
+        exe.version = old + 1
+        data = exe.model_dump_json()
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE executions SET data = %s, version = %s WHERE id = %s AND version = %s",
+                    (data, exe.version, exe.id, old),
+                )
+                if cur.rowcount == 0:
+                    cur.execute("SELECT version FROM executions WHERE id = %s", (exe.id,))
+                    row = cur.fetchone()
+                    if row is None and old == 0:
+                        cur.execute(
+                            "INSERT INTO executions (id, definition_id, data, version) VALUES (%s, %s, %s, %s)",
+                            (exe.id, exe.definition_id, data, exe.version),
+                        )
+                    else:
+                        exe.version = old
+                        self._conn.rollback()
+                        raise StoreConflict(exe.id, expected=old, found=row[0] if row else None)
+                for target_id, event in emits:
+                    cur.execute(
+                        "INSERT INTO outbox (target_id, event) VALUES (%s, %s)",
+                        (target_id, event.model_dump_json()),
+                    )
+                if processed_event_id is not None:
+                    cur.execute(
+                        "INSERT INTO processed_events (execution_id, event_id) VALUES (%s, %s) "
+                        "ON CONFLICT DO NOTHING",
+                        (exe.id, processed_event_id),
+                    )
+                for child_id, root_path, context in spawns:
+                    cur.execute(
+                        "INSERT INTO spawns (parent_id, child_id, root_path, context) "
+                        "VALUES (%s, %s, %s, %s)",
+                        (exe.id, child_id, root_path, json.dumps(context)),
+                    )
+                for op in timers:
+                    if op.action == "schedule":
+                        cur.execute(
+                            "INSERT INTO timers (execution_id, path, fire_at) VALUES (%s, %s, %s) "
+                            "ON CONFLICT (execution_id, path) DO UPDATE SET fire_at = EXCLUDED.fire_at",
+                            (exe.id, op.path, op.fire_at),
+                        )
+                    else:
+                        cur.execute(
+                            "DELETE FROM timers WHERE execution_id = %s AND path = %s", (exe.id, op.path)
+                        )
+            self._conn.commit()
+        except StoreConflict:
+            raise
+        except Exception:
+            exe.version = old
+            self._conn.rollback()
+            raise
+
+    def is_processed(self, execution_id: str, event_id: str) -> bool:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM processed_events WHERE execution_id = %s AND event_id = %s",
+                (execution_id, event_id),
+            )
+            found = cur.fetchone() is not None
+        self._conn.commit()
+        return found
+
+    def pending_outbox(self) -> list[OutboxEntry]:
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT seq, target_id, event FROM outbox ORDER BY seq")
+            rows = cur.fetchall()
+        self._conn.commit()
+        return [
+            OutboxEntry(seq, target_id, Event.model_validate_json(event)) for seq, target_id, event in rows
+        ]
+
+    def ack_outbox(self, seq: int) -> None:
+        with self._conn.cursor() as cur:
+            cur.execute("DELETE FROM outbox WHERE seq = %s", (seq,))
+        self._conn.commit()
+
+    def pending_spawns(self) -> list[SpawnEntry]:
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT seq, parent_id, child_id, root_path, context FROM spawns ORDER BY seq")
+            rows = cur.fetchall()
+        self._conn.commit()
+        return [SpawnEntry(seq, pid, cid, rp, json.loads(ctx)) for seq, pid, cid, rp, ctx in rows]
+
+    def ack_spawn(self, seq: int) -> None:
+        with self._conn.cursor() as cur:
+            cur.execute("DELETE FROM spawns WHERE seq = %s", (seq,))
+        self._conn.commit()
+
+    def due_timers(self, now: float) -> list[tuple[str, str, float]]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT execution_id, path, fire_at FROM timers WHERE fire_at <= %s ORDER BY fire_at", (now,)
+            )
+            rows = cur.fetchall()
+        self._conn.commit()
+        return [(eid, path, float(fa)) for eid, path, fa in rows]
+
+    def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM timers WHERE execution_id = %s AND path = %s AND fire_at = %s",
+                (execution_id, path, fire_at),
+            )
+        self._conn.commit()
+
+    def close(self) -> None:
+        self._conn.close()
+
+
+class RqliteStore:
+    """A durable `ExecutionStore` over **rqlite** — distributed SQLite with Raft
+    (HA, strong reads), spoken over its HTTP API. Same contract as SqliteStore.
+
+    rqlite has no interactive (multi-roundtrip) transactions, so `commit` is one
+    transactional request whose writes are all **guarded on the CAS succeeding**:
+    the Execution upsert applies only `WHERE version = old`, and each outbox/dedupe
+    insert runs only `WHERE EXISTS(... version = new)`. So a version mismatch makes
+    the whole request a no-op, detected by the upsert's `rows_affected == 0`
+    (→ `StoreConflict`). Reads use `level=strong` (linearizable, via the leader)."""
+
+    def __init__(self, base_url: str, timeout: float = 10.0) -> None:
+        import requests
+
+        self._base = base_url.rstrip("/")
+        self._timeout = timeout
+        self._session = requests.Session()
+        self._execute(
+            [
+                "CREATE TABLE IF NOT EXISTS executions (id TEXT PRIMARY KEY, definition_id TEXT NOT NULL, "
+                "data TEXT NOT NULL, version INTEGER NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS outbox (seq INTEGER PRIMARY KEY AUTOINCREMENT, target_id TEXT, "
+                "event TEXT NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS processed_events (execution_id TEXT NOT NULL, event_id TEXT NOT NULL, "
+                "PRIMARY KEY (execution_id, event_id))",
+                "CREATE TABLE IF NOT EXISTS timers (execution_id TEXT NOT NULL, path TEXT NOT NULL, "
+                "fire_at REAL NOT NULL, PRIMARY KEY (execution_id, path))",
+                "CREATE TABLE IF NOT EXISTS spawns (seq INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "parent_id TEXT NOT NULL, child_id TEXT NOT NULL, root_path TEXT NOT NULL, context TEXT NOT NULL)",
+            ]
+        )
+
+    @classmethod
+    def from_url(cls, url: str, connect_retries: int = 30, retry_delay: float = 1.0) -> "RqliteStore":
+        """Build a store, retrying until rqlite is up and has elected a leader (a
+        worker starting alongside rqlite in compose waits rather than crashing)."""
+        import time
+
+        import requests
+
+        last: Exception | None = None
+        for _ in range(connect_retries):
+            try:
+                return cls(url)
+            except requests.exceptions.RequestException as exc:
+                last = exc
+                time.sleep(retry_delay)
+        raise last if last is not None else RuntimeError("rqlite connect failed")
+
+    def _execute(self, statements: list, transaction: bool = False) -> list:
+        params = {"transaction": ""} if transaction else {}
+        resp = self._session.post(
+            f"{self._base}/db/execute", params=params, json=statements, timeout=self._timeout
+        )
+        resp.raise_for_status()
+        results = resp.json()["results"]
+        for res in results:
+            if "error" in res:
+                raise RuntimeError(f"rqlite execute error: {res['error']}")
+        return results
+
+    def _query(self, sql: str, params: tuple) -> list:
+        resp = self._session.post(
+            f"{self._base}/db/query", params={"level": "strong"}, json=[[sql, *params]], timeout=self._timeout
+        )
+        resp.raise_for_status()
+        result = resp.json()["results"][0]
+        if "error" in result:
+            raise RuntimeError(f"rqlite query error: {result['error']}")
+        return result.get("values") or []
+
+    def load(self, execution_id: str) -> Optional[Execution]:
+        rows = self._query("SELECT data FROM executions WHERE id = ?", (execution_id,))
+        return Execution.model_validate_json(rows[0][0]) if rows else None
+
+    def save(self, exe: Execution) -> None:
+        self.commit(exe, [])
+
+    def commit(
+        self,
+        exe: Execution,
+        emits: list[tuple[Optional[str], Event]],
+        processed_event_id: Optional[str] = None,
+        timers: tuple[TimerOp, ...] = (),
+        spawns: tuple[tuple[str, str, dict], ...] = (),
+    ) -> None:
+        old = exe.version
+        exe.version = old + 1  # bump BEFORE dumping so the stored JSON carries the new version
+        new = exe.version
+        data = exe.model_dump_json()
+        # the upsert applies only WHERE version=old; every other write is guarded on
+        # the row holding our `data` — so a CAS miss leaves the whole txn a no-op
+        statements: list = [
+            [
+                "INSERT INTO executions (id, definition_id, data, version) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET data = excluded.data, version = excluded.version "
+                "WHERE executions.version = ?",
+                exe.id,
+                exe.definition_id,
+                data,
+                new,
+                old,
+            ]
+        ]
+        # guard each side-write on the row holding *our* exact `data` (not just
+        # version=new): that is true iff our upsert won the CAS, so a concurrent
+        # writer that reached the same version with different state can't make our
+        # outbox leak. (Two byte-identical writes are idempotent; the target dedupes.)
+        for target_id, event in emits:
+            statements.append(
+                [
+                    "INSERT INTO outbox (target_id, event) SELECT ?, ? "
+                    "WHERE EXISTS (SELECT 1 FROM executions WHERE id = ? AND data = ?)",
+                    target_id,
+                    event.model_dump_json(),
+                    exe.id,
+                    data,
+                ]
+            )
+        if processed_event_id is not None:
+            statements.append(
+                [
+                    "INSERT OR IGNORE INTO processed_events (execution_id, event_id) SELECT ?, ? "
+                    "WHERE EXISTS (SELECT 1 FROM executions WHERE id = ? AND data = ?)",
+                    exe.id,
+                    processed_event_id,
+                    exe.id,
+                    data,
+                ]
+            )
+        # timer ops, also guarded on our data winning the CAS. Schedule = delete+insert
+        # (upsert), so re-entry replaces the fire_at; cancel = delete.
+        for op in timers:
+            statements.append(
+                [
+                    "DELETE FROM timers WHERE execution_id = ? AND path = ? "
+                    "AND EXISTS (SELECT 1 FROM executions WHERE id = ? AND data = ?)",
+                    exe.id,
+                    op.path,
+                    exe.id,
+                    data,
+                ]
+            )
+            if op.action == "schedule":
+                statements.append(
+                    [
+                        "INSERT INTO timers (execution_id, path, fire_at) SELECT ?, ?, ? "
+                        "WHERE EXISTS (SELECT 1 FROM executions WHERE id = ? AND data = ?)",
+                        exe.id,
+                        op.path,
+                        op.fire_at,
+                        exe.id,
+                        data,
+                    ]
+                )
+        # spawns, guarded on our data winning the CAS (like the outbox)
+        for child_id, root_path, context in spawns:
+            statements.append(
+                [
+                    "INSERT INTO spawns (parent_id, child_id, root_path, context) SELECT ?, ?, ?, ? "
+                    "WHERE EXISTS (SELECT 1 FROM executions WHERE id = ? AND data = ?)",
+                    exe.id,
+                    child_id,
+                    root_path,
+                    json.dumps(context),
+                    exe.id,
+                    data,
+                ]
+            )
+        results = self._execute(statements, transaction=True)
+        if results[0].get("rows_affected", 0) == 0:
+            exe.version = old  # CAS missed: undo the in-memory bump (nothing was written)
+            found = self._query("SELECT version FROM executions WHERE id = ?", (exe.id,))
+            raise StoreConflict(exe.id, expected=old, found=found[0][0] if found else None)
+        # success: exe.version is already `new`
+
+    def is_processed(self, execution_id: str, event_id: str) -> bool:
+        rows = self._query(
+            "SELECT 1 FROM processed_events WHERE execution_id = ? AND event_id = ?",
+            (execution_id, event_id),
+        )
+        return bool(rows)
+
+    def pending_outbox(self) -> list[OutboxEntry]:
+        rows = self._query("SELECT seq, target_id, event FROM outbox ORDER BY seq", ())
+        return [
+            OutboxEntry(seq, target_id, Event.model_validate_json(event)) for seq, target_id, event in rows
+        ]
+
+    def ack_outbox(self, seq: int) -> None:
+        self._execute([["DELETE FROM outbox WHERE seq = ?", seq]])
+
+    def pending_spawns(self) -> list[SpawnEntry]:
+        rows = self._query("SELECT seq, parent_id, child_id, root_path, context FROM spawns ORDER BY seq", ())
+        return [SpawnEntry(seq, pid, cid, rp, json.loads(ctx)) for seq, pid, cid, rp, ctx in rows]
+
+    def ack_spawn(self, seq: int) -> None:
+        self._execute([["DELETE FROM spawns WHERE seq = ?", seq]])
+
+    def due_timers(self, now: float) -> list[tuple[str, str, float]]:
+        rows = self._query(
+            "SELECT execution_id, path, fire_at FROM timers WHERE fire_at <= ? ORDER BY fire_at", (now,)
+        )
+        return [(eid, path, float(fa)) for eid, path, fa in rows]
+
+    def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None:
+        self._execute(
+            [
+                [
+                    "DELETE FROM timers WHERE execution_id = ? AND path = ? AND fire_at = ?",
+                    execution_id,
+                    path,
+                    fire_at,
+                ]
+            ]
+        )
+
+    def close(self) -> None:
+        self._session.close()
