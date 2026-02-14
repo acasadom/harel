@@ -1,0 +1,93 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "harel DSL",
+  "scopeName": "source.stm",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#declarations" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#constants" },
+    { "include": "#numbers" },
+    { "include": "#dotted" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.number-sign.stm",
+          "match": "#.*$"
+        },
+        {
+          "name": "comment.line.double-slash.stm",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.stm",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [{ "name": "constant.character.escape.stm", "match": "\\\\." }]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(machine|fragment)\\b\\s+(\"[^\"]*\"|[A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.control.stm" },
+            "2": { "name": "entity.name.type.machine.stm" }
+          }
+        },
+        {
+          "match": "\\b(state|orthogonal)\\b\\s+(\"[^\"]*\"|[A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.control.stm" },
+            "2": { "name": "entity.name.type.state.stm" }
+          }
+        },
+        {
+          "match": "\\b(final)\\b\\s+(\"[^\"]*\"|[A-Za-z_][A-Za-z0-9_]*)\\s+(\"[^\"]*\"|[A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.control.stm" },
+            "2": { "name": "entity.name.type.state.stm" },
+            "3": { "name": "support.constant.outcome.stm" }
+          }
+        },
+        {
+          "match": "\\b(event|guard)\\b\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.control.stm" },
+            "2": { "name": "entity.name.function.stm" }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "name": "keyword.control.stm",
+      "match": "\\b(machine|fragment|state|orthogonal|final|initial|from|to|on|enter|exit|activity|where|select|returns|join|all|any|else|invoke|for|in|with|use|as|import|event|guard|bind|timeout|context|outcome|carry|no|history|and|or|not)\\b"
+    },
+    "types": {
+      "name": "storage.type.stm",
+      "match": "\\b(action|value|string|int|float|bool|any)\\b"
+    },
+    "constants": {
+      "name": "constant.language.stm",
+      "match": "\\b(true|false)\\b"
+    },
+    "numbers": {
+      "name": "constant.numeric.stm",
+      "match": "-?\\b\\d+(\\.\\d+)?\\b"
+    },
+    "dotted": {
+      "name": "support.function.dotted.stm",
+      "match": "\\b[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)+\\b"
+    },
+    "operators": {
+      "name": "keyword.operator.stm",
+      "match": "==|!=|<=|>=|<|>|\\||="
+    }
+  }
+}

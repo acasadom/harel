@@ -1,0 +1,84 @@
+{
+  "name": "harel",
+  "displayName": "harel statechart DSL",
+  "description": "Syntax highlighting and live diagnostics for the harel statechart DSL (.stm).",
+  "version": "0.1.0",
+  "publisher": "harel",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": ["Programming Languages", "Linters"],
+  "main": "./src/extension.js",
+  "activationEvents": ["onLanguage:stm"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "stm",
+        "aliases": ["harel DSL", "stm"],
+        "extensions": [".stm"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "stm",
+        "scopeName": "source.stm",
+        "path": "./syntaxes/stm.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "harel.showPreview",
+        "title": "Open Statechart Preview",
+        "category": "harel",
+        "icon": "$(preview)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "harel.showPreview",
+          "when": "resourceLangId == stm",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "harel.showPreview",
+          "when": "resourceLangId == stm"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "harel DSL",
+      "properties": {
+        "harel.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Python interpreter used to launch the language server (`-m harel.lsp`). Point it at the venv that has harel[lsp] installed (e.g. .venv/bin/python)."
+        },
+        "harel.serverCommand": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Override the full language-server command. When set (non-empty), it is used verbatim instead of `<pythonPath> -m harel.lsp` (e.g. [\"uv\", \"run\", \"harel-lsp\"])."
+        },
+        "harel.enableLanguageServer": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start the diagnostics language server. Disable to keep syntax highlighting only."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.75.0",
+    "mermaid": "^11.15.0"
+  }
+}
