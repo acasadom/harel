@@ -1,0 +1,18 @@
+# A small reviewer machine, invoked as a submachine by invoke.stm / fanout.stm.
+# It declares what it propagates back to its caller with `carry` (besides the
+# `outcome` every terminal carries). Kept in its own file so the callers pull it
+# in with `import`, which registers it as a resolvable `invoke` target.
+
+machine review {
+  carry score
+  initial Decide
+
+  state Decide {}
+  final Won success
+  final Lost failed
+
+  from Decide select scenarios.decide {
+    "won" to Won
+    "lost" to Lost
+  }
+}

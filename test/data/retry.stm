@@ -1,0 +1,22 @@
+# A generic retry-with-backoff loop, as a reusable fragment. The consumer
+# supplies the work, the success/failure check, and the backoff policy. The
+# overall *budget* and where to go on success / give-up live on the consumer's
+# composite (its own `timeout` + a `Timeout` transition), so the fragment is just
+# the attempt↺backoff loop.
+
+fragment Retry(work: action, check: action, backoff: action, base: value, cap: value) {
+  initial Attempt
+
+  state Attempt { on enter work }
+  state Waiting {
+    on enter backoff(base: base, cap: cap)   # value params tune the backoff policy
+    timeout context backoff                   # the per-retry wait, read from context
+  }
+  state Succeeded {}            # inner sink → the composite completes (consumer's completion edge fires)
+
+  from Attempt select check {
+    "ok"   to Succeeded
+    "fail" to Waiting
+  }
+  from Waiting to Attempt on Timeout
+}

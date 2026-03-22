@@ -1,0 +1,77 @@
+# A realistic distributed stack: Redis as the event transport + N worker replicas
+# that wait for events, sharing the durable store. The integration test runs as
+# its OWN container (the `test` service) so it shares the same VM kernel + volume
+# as the workers — sqlite WAL works there (a macOS bind mount over virtiofs does
+# not). Bring up the infra + workers, then run the test:
+#
+#   docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 redis worker
+#   docker compose -f deploy/docker-compose.yml run --rm test
+#   docker compose -f deploy/docker-compose.yml down -v
+#
+# STM_STORE_BACKEND picks the durable store: sqlite (default, shared volume),
+# redis or postgres (all-network). For postgres also bring up the `postgres`
+# service. See deploy/README.md.
+services:
+  redis:
+    image: redis:7-alpine
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: stm
+      POSTGRES_PASSWORD: stm
+      POSTGRES_DB: stm
+
+  rqlite:
+    image: rqlite/rqlite:8.43.4
+
+  localstack:
+    image: localstack/localstack:4.14
+    environment:
+      SERVICES: sqs
+
+
+  worker:
+    image: harel_stack
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    depends_on:
+      - redis
+    environment:
+      STM_STORE_BACKEND: ${STM_STORE_BACKEND:-sqlite}
+      STM_TRANSPORT_BACKEND: ${STM_TRANSPORT_BACKEND:-redis}
+      STM_REDIS_URL: redis://redis:6379/0
+      STM_STORE_DB: /state/stm.db
+      STM_TRANSPORT_DB: /state/queue.db
+      STM_POSTGRES_DSN: postgresql://stm:stm@postgres:5432/stm
+      STM_RQLITE_URL: http://rqlite:4001
+      STM_SQS_ENDPOINT: http://localstack:4566
+      STM_VISIBILITY: "30"
+    volumes:
+      - state:/state
+
+  test:
+    image: harel_stack
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    depends_on:
+      - redis
+      - worker
+    environment:
+      STM_STACK: "1"
+      STM_STORE_BACKEND: ${STM_STORE_BACKEND:-sqlite}
+      STM_TRANSPORT_BACKEND: ${STM_TRANSPORT_BACKEND:-redis}
+      STM_REDIS_URL: redis://redis:6379/0
+      STM_STORE_DB: /state/stm.db
+      STM_TRANSPORT_DB: /state/queue.db
+      STM_POSTGRES_DSN: postgresql://stm:stm@postgres:5432/stm
+      STM_RQLITE_URL: http://rqlite:4001
+      STM_SQS_ENDPOINT: http://localstack:4566
+    volumes:
+      - state:/state
+    command: ["uv", "run", "pytest", "-m", "stack", "-v"]
+
+volumes:
+  state:

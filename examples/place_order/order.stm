@@ -1,0 +1,52 @@
+# The canonical e-commerce order lifecycle as a statechart.
+#
+#   Cart --PlaceOrder--> AwaitingPayment
+#   AwaitingPayment --PaymentAuthorized--> Paid
+#                   --PaymentDeclined--> (retry?) Retrying --> AwaitingPayment | Cancelled
+#                   --CancelOrder--> Cancelled
+#   Paid --(auto)--> Fulfilling [ Picking -> Packing -> ReadyToShip ]
+#   ReadyToShip --Dispatched--> Shipped --Delivered--> Delivered
+#
+# Delivered and Cancelled are sinks (the order is Done). Actions are literal
+# dotted paths resolved by the engine at run time.
+machine order {
+  initial Cart
+
+  state Cart { on enter examples.place_order.actions.on_cart }
+
+  state AwaitingPayment { on enter examples.place_order.actions.request_payment }
+
+  state Retrying { on enter examples.place_order.actions.on_retry }
+
+  state Paid { on enter examples.place_order.actions.capture_payment }
+
+  state Fulfilling {
+    on enter examples.place_order.actions.start_fulfilment
+    initial Picking
+    state Picking { on enter examples.place_order.actions.pick }
+    state Packing { on enter examples.place_order.actions.pack }
+    state ReadyToShip { on enter examples.place_order.actions.ready }
+
+    from Picking to Packing on Picked
+    from Packing to ReadyToShip on Packed
+    from ReadyToShip to Shipped on Dispatched
+  }
+
+  state Shipped { on enter examples.place_order.actions.ship }
+  final Delivered success { on enter examples.place_order.actions.deliver }
+  final Cancelled cancelled { on enter examples.place_order.actions.cancel_order }
+
+  from Cart to AwaitingPayment on PlaceOrder
+  from AwaitingPayment to Paid on PaymentAuthorized
+  # the selector counts the attempt and routes retry/giveup
+  from AwaitingPayment select examples.place_order.actions.payment_retry on PaymentDeclined {
+    "retry" to Retrying
+    "giveup" to Cancelled
+  }
+  # NOTE: the domain event is `CancelOrder`, not `Cancel` — `Cancel` is a
+  # reserved engine control event and would not reach this modelled transition.
+  from AwaitingPayment to Cancelled on CancelOrder
+  from Retrying to AwaitingPayment
+  from Paid to Fulfilling
+  from Shipped to Delivered on Delivered
+}

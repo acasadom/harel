@@ -1,0 +1,24 @@
+# Fan-out invoke (the data-parallel sibling of a single invoke): ONE addressed
+# child instance per entry of a context collection, joined on completion.
+# `for item in items` forks one `jobs.review` per element of the `items` list,
+# seeding each instance from its slice (`with { ok: item }`). The target machine
+# comes from review.stm via `import` (registered as a resolvable submachine).
+# Unlike a single invoke, a fan-out routes automatically via the join: `join all`
+# reaches Done only if every instance succeeded (`join any` = at least one);
+# `else` catches the rest.
+
+import "review.stm" as jobs
+
+machine batch {
+  initial Process
+
+  state Process {
+    invoke jobs.review for item in items
+    with { ok: item }
+  }
+
+  final Done success
+  final Failed failed
+
+  from Process join all to Done else to Failed
+}

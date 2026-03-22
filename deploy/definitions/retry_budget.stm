@@ -1,0 +1,29 @@
+machine retry_budget {
+  initial Retrying
+
+  state Retrying {
+    timeout 3
+    initial Send
+
+    state Send { on enter demo_actions.rec(at: "send") }
+    state Waiting {
+      on enter harel.lib.exponential_backoff(base: 0.5, factor: 2, cap: 2, into: "backoff")
+      timeout context backoff
+    }
+    state Succeeded { on enter demo_actions.rec(at: "ok") }
+
+    from Send select demo_actions.always_retry {
+      "ok" to Succeeded
+      "retry" to Waiting
+    }
+    from Waiting to Send on Timeout
+  }
+  final Done success { on enter demo_actions.rec(at: "done") }
+  state Failed {
+    on enter demo_actions.rec(at: "failed")
+    outcome failed
+  }
+
+  from Retrying to Done
+  from Retrying to Failed on Timeout
+}

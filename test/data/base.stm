@@ -1,0 +1,25 @@
+# base.yaml as DSL — exercises a nested composite + a flat top-level graph.
+
+machine base {
+  initial Start
+
+  state Start { on enter module.enter }
+
+  state Processing {
+    initial Screening
+    state Screening { on enter module.screen }
+    state Validation { on enter module.validation }
+
+    from Screening to Validation on Notification where status == "Success"
+    from Validation to End on Notification where status == "Success"
+  }
+
+  state Fail  { on enter module.fail }
+  final Error errored { on enter module.error }
+  final End success { on enter module.end }
+
+  from Start to Processing
+  from Processing to Error on Notification where status == "Error"
+  from Processing to Fail  on Notification where status == "Fail"
+  from Fail  to Error
+}

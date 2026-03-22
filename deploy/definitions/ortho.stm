@@ -1,0 +1,21 @@
+machine ortho {
+  initial Fork
+
+  orthogonal Fork {
+    state A {
+      initial A1
+      state A1 { on enter demo_actions.rec(at: "A1") }
+      final A2 success { on enter demo_actions.rec(at: "A2") }
+      from A1 to A2 on Go
+    }
+    state B {
+      initial B1
+      state B1 { on enter demo_actions.rec(at: "B1") }
+      final B2 success { on enter demo_actions.rec(at: "B2") }
+      from B1 to B2 on Go
+    }
+  }
+  final Done success { on enter demo_actions.rec(at: "Done") }
+
+  from Fork to Done
+}

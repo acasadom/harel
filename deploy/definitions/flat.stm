@@ -1,0 +1,10 @@
+machine flat {
+  initial A
+
+  state A { on enter demo_actions.rec(at: "A.enter") }
+  state B { on enter demo_actions.rec(at: "B.enter") }
+  final C success { on enter demo_actions.rec(at: "C.enter") }
+
+  from A to B
+  from B to C on Go
+}

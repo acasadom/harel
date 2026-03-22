@@ -1,0 +1,8 @@
+machine boom {
+  initial A
+
+  state A { on enter demo_actions.rec(at: "a") }
+  final Boom failed { on enter demo_actions.boom }
+
+  from A to Boom on Go
+}

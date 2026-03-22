@@ -1,0 +1,36 @@
+# The charge, rebuilt on the generic Retry fragment. `prepare` sits at the same level
+# as the retry instance (it is not part of the retriable loop), and the retry loop
+# (submit → check → wait → resubmit) is the imported fragment.
+
+import "retry.stm"
+
+bind {
+  prepare = pay.on_prepare
+  submit  = pay.on_submit
+  check   = pay.was_approved
+  backoff = harel.lib.exponential_backoff
+  on_paid = pay.on_paid
+}
+
+event PaymentResult { status: string }
+
+machine charge {
+  initial Charging
+
+  state Charging {
+    timeout 8700                # the overall retry budget
+    initial Prepare
+
+    state Prepare { on enter prepare }
+    use Retry(work = submit, check = check, backoff = backoff, base = 5, cap = 600) as Authorize
+
+    from Prepare to Authorize    # automatic: start the retry loop
+    from Authorize to Paid       # automatic completion: Retry reached its inner sink (Succeeded)
+  }
+
+  final Paid     success { on enter on_paid }
+  final Declined failed
+
+  from Charging to Declined on Timeout                       # budget exceeded → failed terminal
+  from Charging to Paid     on PaymentResult where status == "Success"
+}

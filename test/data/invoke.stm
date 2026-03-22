@@ -1,0 +1,28 @@
+# Submachine invoke (black-box composition): a state runs ANOTHER machine as a
+# child Execution and routes on its completion. The target `review` is defined in
+# review.stm and pulled in with `import ... as jobs`, so `invoke jobs.review`
+# resolves with no external resolver — `import` registers the imported file's
+# machines as resolvable submachines (the same seam an inline invoke uses; an
+# injected runtime resolver still overrides). Input is projected in with `with {}`;
+# the child returns a `Returned` event carrying its `outcome` plus any context it
+# declares with `carry`, routed with `on Returned where ...`. A single invoke must
+# be a leaf with no automatic exit.
+
+import "review.stm" as jobs
+
+machine approval {
+  initial Run
+
+  state Run {
+    invoke jobs.review
+    with { ok: approved  score: points }   # child context <- parent context
+  }
+
+  final Approved success
+  final Weak passed
+  final Rejected failed
+
+  from Run to Approved on Returned where outcome == "success" and score >= 50
+  from Run to Weak on Returned where outcome == "success"
+  from Run to Rejected on Returned where outcome == "failed"
+}

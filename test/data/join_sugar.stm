@@ -1,0 +1,28 @@
+# Sugar showcase: `final Name outcome` terminals + `join all/any` aggregation.
+# Two regions report a verdict; the parent routes out of the join with `join all`
+# (success iff every region succeeded), landing on a `final` terminal. This is the
+# common case the sugar replaces — no hand-written join selector.
+
+machine M {
+  initial Fork
+  orthogonal Fork {
+    state A {
+      initial A1
+      state A1 {}
+      final Aok  success
+      final Abad failed
+      from A1 to Aok  on Pass
+      from A1 to Abad on Fail
+    }
+    state B {
+      initial B1
+      state B1 {}
+      final Bok success
+      from B1 to Bok on Pass
+      from B1 to Bok on Fail
+    }
+  }
+  final Done   success
+  final Failed failed
+  from Fork join all to Done else to Failed
+}

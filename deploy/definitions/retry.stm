@@ -1,0 +1,13 @@
+machine retry {
+  initial Trying
+
+  state Trying {
+    on enter demo_actions.rec(at: "trying")
+    timeout 1
+  }
+  final Ok success { on enter demo_actions.rec(at: "ok") }
+  final Failed failed { on enter demo_actions.rec(at: "failed") }
+
+  from Trying to Ok on Success
+  from Trying to Failed on Timeout
+}

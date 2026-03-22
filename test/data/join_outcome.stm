@@ -1,0 +1,30 @@
+# An orthogonal join that consumes its regions' results. Region A declares
+# `carry note`: its `Finished` carries that context key alongside its terminal
+# `outcome` (the region's "return value"). The parent routes out of the join with
+# a selector reading the engine-exposed `region_results`, and lands on a terminal
+# whose own `outcome` overrides the aggregated default.
+
+machine Join {
+  initial Fork
+  orthogonal Fork {
+    state A {
+      initial A1
+      carry note
+      state A1 { on enter scenarios.set_note }
+      state Bad { outcome failed }
+      from A1 to Bad on Go
+    }
+    state B {
+      initial B1
+      state B1 {}
+      state B2 { outcome success }
+      from B1 to B2 on Go
+    }
+  }
+  state Cleanup { outcome aborted }
+  state Done { outcome success }
+  from Fork select scenarios.join_route {
+    "failed" to Cleanup
+    "ok"     to Done
+  }
+}

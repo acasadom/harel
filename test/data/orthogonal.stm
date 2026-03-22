@@ -1,0 +1,23 @@
+# Orthogonal (AND-state) machines in the DSL. Regions are auto-promoted to
+# ParallelState (composite children of an `orthogonal` block). Data-parallel
+# fan-out is a `fan-out invoke`, not an orthogonal state — see join_sugar.stm.
+
+machine Join {
+  initial Fork
+  orthogonal Fork {
+    state A {
+      initial A1
+      state A1 { on enter scenarios.o_in1 }
+      final A2 success { on enter scenarios.o_in2 }
+      from A1 to A2 on Go
+    }
+    state B {
+      initial B1
+      state B1 { on enter scenarios.h_in1 }
+      final B2 success { on enter scenarios.h_in2 }
+      from B1 to B2 on Go
+    }
+  }
+  final Done success { on enter scenarios.f_done }
+  from Fork to Done
+}

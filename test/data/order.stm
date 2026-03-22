@@ -1,0 +1,96 @@
+# A full-feature showcase machine in the order/fulfilment domain: nested composites,
+# literal dotted actions, kind alternation (A|B|C), `in`-list predicates, multi-predicate
+# AND, a selector with a trigger, and a retry sub-composite. (Actions here are literal
+# paths; charge.stm shows the handler/bind alternative.)
+
+# Two event families that deliberately do NOT share a field: the fulfilment
+# notifications report a `status` (+ an optional `result`); the carrier update reports a
+# `carrier_status` instead — so an error/fail guard must be split by family (a single
+# event never carries both vocabularies). Declaring them turns on validate's field
+# checking, which is what flags a guard referencing a field the event lacks.
+event InventoryResult { status: string  result: string? }
+event PaymentResult   { status: string  result: string? }
+event PackingResult   { status: string  result: string? }
+event LabelResult     { status: string  result: string? }
+event Notification    { status: string  result: string? }
+event CarrierUpdate   { carrier_status: string }
+
+machine order {
+  initial Processing
+
+  state Processing {
+    initial Received
+
+    state Received { on enter order_actions.on_received }
+
+    state Validating {
+      on enter order_actions.on_validating
+      on exit  order_actions.record_status
+      timeout 18000
+    }
+    state "Reserving Stock" {
+      on enter order_actions.on_reserving_stock
+      on exit  order_actions.on_reserving_stock_exit
+      timeout 3600
+    }
+    state Authorizing { on enter order_actions.on_authorizing }
+    state Charging {
+      on enter    order_actions.on_charging
+      on activity order_actions.on_charging_activity
+      on exit     order_actions.record_status
+      timeout 1800
+    }
+    state Packing {
+      on enter order_actions.on_packing
+      on exit  order_actions.record_status
+      timeout 1800
+    }
+
+    state Shipping {
+      on enter order_actions.on_shipping_enter
+      on exit  order_actions.on_shipping_exit
+      timeout 8700
+      initial "Prepare Label"
+
+      state "Prepare Label"    { on enter order_actions.on_prepare_label }
+      state "Notify Carrier"   { on enter order_actions.on_notify_carrier }
+      state "Awaiting Carrier" { on enter order_actions.on_awaiting_carrier }
+      state "Carrier Confirmed" { on enter order_actions.on_carrier_confirmed }
+
+      from "Prepare Label" to "Notify Carrier"
+      from "Notify Carrier" select order_actions.carrier_confirmed {
+        true  to "Carrier Confirmed"
+        false to "Awaiting Carrier"
+      }
+      from "Awaiting Carrier" to "Notify Carrier" on Timeout
+    }
+
+    from Received to Validating
+    from Validating to "Reserving Stock" on InventoryResult where status == "started"
+    from "Reserving Stock" to Authorizing on InventoryResult where status == "done" and result == "reserved"
+    from Authorizing to Charging
+    from Charging to Packing on PaymentResult where status == "done" and result == "captured"
+    from Packing select order_actions.needs_carrier on PackingResult where status == "done" and result == "packed" {
+      true  to Shipping
+      false to Delivered
+    }
+    from Shipping to Delivered on CarrierUpdate where carrier_status in ["Confirmed", "PASS", "SUCCESS"]
+  }
+
+  # distinct verdicts (UML named FinalStates): the surrounding model routes on these
+  final Rejected  errored    { on enter order_actions.on_rejected }
+  final Failed    failed      { on enter order_actions.on_failed }
+  final Cancelled cancelled   { on enter order_actions.on_cancelled }
+  final Delivered success     { on enter order_actions.on_delivered }
+
+  # error/fail are split by event family: the status/result notifications and the
+  # carrier update (carrier_status) carry different vocabularies, so a single guard
+  # cannot AND across them — under strict missing-field semantics it would never fire.
+  from Processing to Rejected on Notification|InventoryResult|PaymentResult|PackingResult|LabelResult where status in ["Error", "ERROR"] and result in ["failed", "errored"]
+  from Processing to Rejected on CarrierUpdate where carrier_status in ["ERROR", "Error"]
+  # a deadline (any inner state's timeout, bubbling up to Processing) ends the order rejected
+  from Processing to Rejected on Timeout
+  from Processing to Failed on Notification where status in ["Failed", "FAIL"]
+  from Processing to Failed on CarrierUpdate where carrier_status == "FAIL"
+  from Processing to Cancelled on Cancel
+}

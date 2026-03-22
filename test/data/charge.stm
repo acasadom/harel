@@ -1,0 +1,43 @@
+# The charge machine (DSL surface). Showcases the action model: the body references
+# abstract *handlers* (bare names); a `bind` block maps them to concrete
+# implementations. Swapping the bind block (or passing actions=) reuses this machine
+# with different actions. (order.stm shows the literal-dotted-path alternative.)
+
+event PaymentResult { status: string }
+
+bind {
+  enter    = order_actions.on_charging
+  prepare  = order_actions.on_prepare_label
+  submit   = order_actions.on_notify_carrier
+  wait     = order_actions.on_awaiting_carrier
+  approved = order_actions.carrier_confirmed
+  on_paid  = order_actions.on_delivered
+}
+
+machine charge {
+  initial Charging
+
+  state Charging {
+    on enter enter
+    timeout 8700
+    initial Prepare
+
+    state Prepare  { on enter prepare }
+    state Submit   { on enter submit }
+    state Awaiting { on enter wait }
+    state Approved {}
+
+    from Prepare to Submit
+    from Submit select approved {
+      true  to Approved
+      false to Awaiting
+    }
+    from Awaiting to Submit on Timeout
+  }
+
+  final Paid     success { on enter on_paid }
+  final Declined failed
+
+  from Charging to Paid on PaymentResult where status == "Success"
+  from Charging to Declined on Timeout
+}
