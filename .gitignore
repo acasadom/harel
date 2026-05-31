@@ -25,8 +25,6 @@ docs/_build/
 # OS / editor cruft
 .DS_Store
 
-# Local agent guidance
-CLAUDE.md
 
 # Internal design log (kept locally, not published)
 design/

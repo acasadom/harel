@@ -2,8 +2,7 @@
 
 *Durable, distributed statecharts for Python.*
 
-<!-- TODO: replace OWNER/REPO once the GitHub remote exists -->
-[![CI](https://github.com/OWNER/harel/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/harel/actions/workflows/ci.yml)
+[![CI](https://github.com/acasadom/harel/actions/workflows/ci.yml/badge.svg)](https://github.com/acasadom/harel/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)
 
