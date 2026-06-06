@@ -48,6 +48,7 @@ pip install harel        # core: DSL + engine + in-memory/sqlite durability
 # optional backends, pick what you need:
 pip install "harel[redis]"     # Redis store + transport
 pip install "harel[postgres]"  # Postgres store + transport
+pip install "harel[mongo]"     # MongoDB store + transport
 pip install "harel[lsp]"       # DSL language server (editor tooling)
 ```
 
@@ -155,7 +156,8 @@ order with retries", a workflow engine is the better fit — this is not trying 
 - **Durable & distributed execution**: optimistic-concurrency (CAS) checkpointing, a
   transactional outbox, event dedupe, durable timers, and a control plane
   (`cancel`/`suspend`/`resume`/`terminate`). Stores: in-memory, SQLite, Redis, Postgres,
-  rqlite. Transports: in-memory, SQLite, Redis, Postgres, rqlite, SQS — mix freely.
+  rqlite, MongoDB. Transports: in-memory, SQLite, Redis, Postgres, rqlite, MongoDB, SQS —
+  mix freely.
 - **Static validation** (`validate`): unreachable states, non-deterministic transitions,
   unresolved selector targets, missing terminal verdicts, timeout shape — surface-independent,
   run it before you execute.

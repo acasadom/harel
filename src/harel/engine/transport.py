@@ -610,3 +610,127 @@ class SqsTransport:
 
     def close(self) -> None:
         self._sqs.close()
+
+
+class MongoTransport:
+    """`Transport` over MongoDB — a multi-machine queue (the document-store
+    sibling of the SQL queues), no Redis. MongoDB has no native message groups,
+    so — like `RedisTransport` — the per-group exclusivity is built by hand with a
+    **per-group lock document**:
+
+    - ``{prefix}_messages`` — the FIFO, one document per message keyed by a
+      monotonic `_id` seq (oldest = smallest seq).
+    - ``{prefix}_locks`` — one document per group; held via an atomic
+      `find_one_and_update(..., upsert=True)` whose filter only matches a free or
+      expired lock, so a `DuplicateKeyError` on the upsert means "another worker
+      holds it" (skip). `lock_expiry` is the lease — a crashed worker's lock
+      expires and the group becomes claimable again.
+
+    `claim` walks the groups ordered by their oldest message, takes the first
+    group whose lock is free, and returns its head without removing it; `ack`
+    (lock still owned) deletes the message + releases; `nack` releases (or, with
+    `delay>0`, extends the lock = park). The client is injected (duck-typed), so
+    `pymongo` is an optional extra and tests use mongomock. NOTE: like the other
+    lease backends, a lock that expires mid-ack can let two workers touch one
+    group; the store's version/CAS is the backstop."""
+
+    def __init__(
+        self, client: Any, db_name: str = "harel", prefix: str = "stm", clock: Callable[[], float] = time.time
+    ) -> None:
+        from pymongo import ReturnDocument
+        from pymongo.errors import DuplicateKeyError
+
+        self._client = client
+        self._db = client[db_name]
+        self._msgs = self._db[f"{prefix}_messages"]
+        self._locks = self._db[f"{prefix}_locks"]
+        self._counters = self._db[f"{prefix}_counters"]
+        self._after = ReturnDocument.AFTER
+        self._DuplicateKeyError = DuplicateKeyError
+        self._clock = clock
+
+    @classmethod
+    def from_url(
+        cls, url: str, db_name: str = "harel", connect_retries: int = 30, retry_delay: float = 1.0
+    ) -> "MongoTransport":
+        import time as _time
+
+        import pymongo
+        from pymongo.errors import PyMongoError
+
+        last: Exception | None = None
+        for _ in range(connect_retries):
+            try:
+                client: Any = pymongo.MongoClient(url)
+                client.admin.command("ping")
+                return cls(client, db_name)
+            except PyMongoError as exc:
+                last = exc
+                _time.sleep(retry_delay)
+        raise last if last is not None else RuntimeError("mongo connect failed")
+
+    def _next_seq(self) -> int:
+        doc = self._counters.find_one_and_update(
+            {"_id": "seq"}, {"$inc": {"n": 1}}, upsert=True, return_document=self._after
+        )
+        return int(doc["n"])
+
+    def publish(self, group_id: str, event: Event) -> None:
+        self._msgs.insert_one(
+            {"_id": self._next_seq(), "group_id": group_id, "event": event.model_dump_json()}
+        )
+
+    def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
+        now = self._clock()
+        # groups that still have messages, ordered by their oldest message
+        groups = self._msgs.aggregate(
+            [{"$group": {"_id": "$group_id", "head": {"$min": "$_id"}}}, {"$sort": {"head": 1}}]
+        )
+        for g in groups:
+            group_id = g["_id"]
+            token = f"{worker_id}:{uuid.uuid4().hex}"
+            try:
+                # acquire iff free/expired; an existing live lock makes the upsert
+                # collide on _id -> DuplicateKeyError -> held by another worker
+                self._locks.find_one_and_update(
+                    {
+                        "_id": group_id,
+                        "$or": [{"lock_expiry": {"$lte": now}}, {"lock_expiry": {"$exists": False}}],
+                    },
+                    {"$set": {"token": token, "lock_expiry": now + visibility}},
+                    upsert=True,
+                )
+            except self._DuplicateKeyError:
+                continue
+            head = self._msgs.find_one({"group_id": group_id}, sort=[("_id", 1)])
+            if head is None:
+                self._locks.delete_one({"_id": group_id, "token": token})  # stale group, release
+                continue
+            return Lease(head["_id"], group_id, Event.model_validate_json(head["event"]), token=token)
+        return None
+
+    def _owns(self, group_id: str, token: str) -> bool:
+        doc = self._locks.find_one({"_id": group_id})
+        return doc is not None and doc.get("token") == token
+
+    def ack(self, lease: Lease) -> None:
+        if not self._owns(lease.group_id, lease.token):
+            return  # fencing: only the current lock holder removes + releases
+        self._msgs.delete_one({"_id": lease.seq})
+        self._locks.delete_one({"_id": lease.group_id, "token": lease.token})
+
+    def nack(self, lease: Lease, delay: float = 0.0) -> None:
+        if not self._owns(lease.group_id, lease.token):
+            return
+        if delay > 0:
+            # park: keep the lock held for `delay` so the still-present head is not
+            # re-claimed until it expires
+            self._locks.update_one(
+                {"_id": lease.group_id, "token": lease.token},
+                {"$set": {"lock_expiry": self._clock() + delay}},
+            )
+        else:
+            self._locks.delete_one({"_id": lease.group_id, "token": lease.token})
+
+    def close(self) -> None:
+        self._client.close()

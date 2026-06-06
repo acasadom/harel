@@ -12,10 +12,10 @@ COPY src ./src
 COPY test ./test
 COPY deploy ./deploy
 
-# runtime + the redis/postgres extras (RedisTransport/RedisStore/PostgresStore
-# clients) + dev group (pytest, for the test service). One image keeps the stack
-# simple; it's a dev/integration stack.
-RUN uv sync --frozen --extra redis --extra postgres --extra rqlite --extra sqs
+# runtime + the redis/postgres/rqlite/mongo/sqs extras (the backend clients) +
+# dev group (pytest, for the test service). One image keeps the stack simple;
+# it's a dev/integration stack.
+RUN uv sync --frozen --extra redis --extra postgres --extra rqlite --extra mongo --extra sqs
 
 # demo_actions resolves from deploy/ at worker runtime; the registry is baked in
 ENV PYTHONPATH=/app/deploy
