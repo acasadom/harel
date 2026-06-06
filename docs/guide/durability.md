@@ -27,7 +27,8 @@ identical.
 ## Surviving a restart
 
 Point a `SqliteStore` at a file, and an execution created by one runner is picked up by another
-— a stand-in for "the process died and came back":
+**using only its id** — the state lives in the store, the id is the handle that crosses the
+process boundary. A stand-in for "the process died and came back":
 
 ```python
 import tempfile
@@ -47,11 +48,14 @@ machine order {
 defn = definition_from_dsl(SOURCE, "order")
 db = str(Path(tempfile.mkdtemp()) / "stm.db")
 
-# process #1: create the execution, then "crash"
-exe = DurableRunner(SqliteStore(db), {defn.id: defn}).create(defn.id)
+# process #1: a runner creates the execution (persisting it) and then "crashes".
+# create() returns the Execution; its `.id` is the ONLY handle that outlives the
+# process — you keep it (in a URL, a queue message, another table) to refer back.
+execution_id = DurableRunner(SqliteStore(db), {defn.id: defn}).create(defn.id).id
 
-# process #2: a brand-new runner over the same file picks it up and finishes it
-exe = DurableRunner(SqliteStore(db), {defn.id: defn}).process(exe.id, Event(kind="Finish"))
+# process #2: a brand-new runner — shares nothing with the first but the file —
+# reloads that execution by id from the store and drives it to completion.
+exe = DurableRunner(SqliteStore(db), {defn.id: defn}).process(execution_id, Event(kind="Finish"))
 print("survived restart ->", exe.active_path, "/", exe.outcome)
 ```
 
