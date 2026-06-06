@@ -120,3 +120,27 @@ STM_STORE_BACKEND=dynamodb STM_TRANSPORT_BACKEND=sqs \
 
 Store and transport are independent: mix them (e.g. `STM_STORE_BACKEND=postgres`
 with the default Redis transport) or unify on one backend.
+
+### FaaS remote actions (Lambda on LocalStack)
+
+The `faas` extra runs an action's impl as a remote function (see
+`docs/guide/faas.md`). `test/integration/test_faas_lambda.py` invokes a **real**
+Lambda on LocalStack to cover the boto3 transport end to end. The action
+(`deploy/faas_function.py` = `handler(charge)`) is zip-packaged on the Lambda base
+image so pydantic-core's binary matches the runtime (LocalStack community doesn't
+support image packaging — Pro only):
+
+```bash
+# 1. build the deployment zip (linux/amd64 so it matches the x86_64 Lambda)
+docker build --platform=linux/amd64 -f deploy/Dockerfile.lambda \
+  --target export --output deploy/build .
+
+# 2. bring up localstack (it launches the Lambda container via the mounted docker
+#    socket) and run the stack tests — the test uploads deploy/build/function.zip
+docker compose -f deploy/docker-compose.yml up -d localstack
+docker compose -f deploy/docker-compose.yml run --rm test
+```
+
+Skips automatically if the zip isn't built / `STM_LAMBDA_*` aren't set. The HTTP
+transport (OpenFaaS / Spin / Cloudflare / Knative) is covered deterministically by a
+real in-thread HTTP server in `test/unit/faas/` — no Docker needed.

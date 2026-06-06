@@ -53,6 +53,7 @@ guide/visualization
 guide/durability
 guide/distribution
 guide/control-plane
+guide/faas
 guide/dsl-reference
 guide/api-reference
 ```

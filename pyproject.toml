@@ -46,6 +46,10 @@ dynamodb = ["boto3>=1.26"]
 # the DSL language server (editor diagnostics over parse() + validate()); the
 # VSCode extension in editor/vscode/ launches `python -m harel.lsp`
 lsp = ["pygls>=1.3,<2"]
+# remote actions: lambda_action (boto3) + openfaas_action (requests). The client is
+# what this process needs; the function side imports only harel.faas.handler. Unit
+# tests use a fake in-process invoke (no Docker); RIE/LocalStack are opt-in `stack`.
+faas = ["boto3>=1.26", "requests>=2,<3"]
 
 [project.scripts]
 harel = "harel.cli:main"
