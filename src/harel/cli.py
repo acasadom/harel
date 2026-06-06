@@ -148,6 +148,9 @@ def build_parser() -> argparse.ArgumentParser:
     # only so they show up in `harel -h`.
     sub.add_parser("fmt", help="format .stm files (passthrough to the formatter; `harel fmt -h`)")
     sub.add_parser("lsp", help="start the DSL language server (stdio)")
+    sub.add_parser(
+        "monitor", help="monitor executions in a TUI (requires the `tui` extra; `harel monitor -h`)"
+    )
 
     return parser
 
@@ -168,6 +171,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 
         lsp_main()
         return 0
+    if raw and raw[0] in ("monitor", "tui"):
+        from harel.tui import main as tui_main
+
+        return tui_main(raw[1:])
 
     args = build_parser().parse_args(raw)
     try:
