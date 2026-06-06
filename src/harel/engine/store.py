@@ -16,15 +16,42 @@ engine drives durable runs.
 
 from __future__ import annotations
 
+import base64
 import json
 import sqlite3
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Optional, Protocol, Union, runtime_checkable
+from typing import Any, Iterable, Optional, Protocol, Union, runtime_checkable
 
-from harel.engine.execution import Execution
+from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.spec.states import Event
+
+
+def _encode_offset(offset: int) -> str:
+    """An opaque pagination cursor over an integer offset (the SQL/Mongo/Dict backends)."""
+    return base64.urlsafe_b64encode(str(offset).encode()).decode()
+
+
+def _decode_offset(cursor: Optional[str]) -> int:
+    """Decode an offset cursor; a missing/garbage cursor means start from 0."""
+    if not cursor:
+        return 0
+    try:
+        return int(base64.urlsafe_b64decode(cursor.encode()).decode())
+    except (ValueError, TypeError):
+        return 0
+
+
+def _matches(summary: ExecutionSummary, status, definition_id, roots_only) -> bool:
+    """Client-side filter shared by the backends that can't filter inside the JSON blob."""
+    if status is not None and summary.status not in status:
+        return False
+    if definition_id is not None and summary.definition_id != definition_id:
+        return False
+    if roots_only and summary.parent_id is not None:
+        return False
+    return True
 
 
 @dataclass
@@ -77,6 +104,29 @@ class StoreConflict(RuntimeError):
 @runtime_checkable
 class ExecutionStore(Protocol):
     def load(self, execution_id: str) -> Optional[Execution]: ...
+
+    def list_executions(
+        self,
+        *,
+        status: Optional[Iterable[Status]] = None,
+        definition_id: Optional[str] = None,
+        roots_only: bool = False,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> ExecutionPage:
+        """A page of lightweight `ExecutionSummary` for a monitor/list view. `status`
+        matches any of the given statuses (OR); `definition_id` is an exact match;
+        `roots_only` keeps only `parent_id is None`. `cursor` is the opaque
+        `next_cursor` from a prior page (None = first page); paginate until the
+        returned `next_cursor` is None.
+
+        Ordering is stable by `id` on the in-memory/SQL/document backends, but
+        **best-effort and unordered** on Redis (SCAN) and DynamoDB (Scan) — a caller
+        that needs an order sorts client-side. `status`/`outcome`/`parent_id` are not
+        broken-out columns in the durable backends (they live inside the JSON blob),
+        so on some backends those filters run client-side, which means a page may
+        return fewer than `limit` matches — keep paging while `next_cursor` is set."""
+        ...
 
     def save(self, exe: Execution) -> None:
         """Persist `exe`, committing `version+1` iff the stored row is still at
@@ -150,6 +200,24 @@ class DictStore:
 
     def load(self, execution_id: str) -> Optional[Execution]:
         return self._by_id.get(execution_id)
+
+    def list_executions(
+        self,
+        *,
+        status: Optional[Iterable[Status]] = None,
+        definition_id: Optional[str] = None,
+        roots_only: bool = False,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> ExecutionPage:
+        status = set(status) if status is not None else None
+        summaries = [ExecutionSummary.of(e) for e in self._by_id.values()]
+        summaries = [s for s in summaries if _matches(s, status, definition_id, roots_only)]
+        summaries.sort(key=lambda s: s.id)  # stable order for deterministic pagination
+        off = _decode_offset(cursor)
+        window = summaries[off : off + limit]
+        nxt = _encode_offset(off + limit) if off + limit < len(summaries) else None
+        return ExecutionPage(items=window, next_cursor=nxt)
 
     def save(self, exe: Execution) -> None:
         prev = self._by_id.get(exe.id)
@@ -248,6 +316,50 @@ class SqliteStore:
     def load(self, execution_id: str) -> Optional[Execution]:
         row = self._conn.execute("SELECT data FROM executions WHERE id = ?", (execution_id,)).fetchone()
         return Execution.model_validate_json(row[0]) if row is not None else None
+
+    def list_executions(
+        self,
+        *,
+        status: Optional[Iterable[Status]] = None,
+        definition_id: Optional[str] = None,
+        roots_only: bool = False,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> ExecutionPage:
+        # project only the scalar summary fields out of the JSON blob (never pull `data`);
+        # status/outcome/active_path/parent_id live inside it, so json_extract reaches them.
+        where, params = ["1=1"], []
+        if definition_id is not None:
+            where.append("definition_id = ?")
+            params.append(definition_id)
+        if status is not None:
+            statuses = [s.value for s in status]
+            where.append(f"json_extract(data,'$.status') IN ({','.join('?' * len(statuses))})")
+            params += statuses
+        if roots_only:
+            where.append("json_extract(data,'$.parent_id') IS NULL")
+        off = _decode_offset(cursor)
+        rows = self._conn.execute(
+            "SELECT id, definition_id, version, json_extract(data,'$.status'), "
+            "json_extract(data,'$.outcome'), json_extract(data,'$.active_path'), "
+            "json_extract(data,'$.parent_id') FROM executions "
+            f"WHERE {' AND '.join(where)} ORDER BY id LIMIT ? OFFSET ?",
+            (*params, limit + 1, off),  # fetch one extra to know if there's a next page
+        ).fetchall()
+        items = [
+            ExecutionSummary(
+                id=r[0],
+                definition_id=r[1],
+                version=r[2],
+                status=r[3],
+                outcome=r[4],
+                active_path=r[5],
+                parent_id=r[6],
+            )
+            for r in rows[:limit]
+        ]
+        nxt = _encode_offset(off + limit) if len(rows) > limit else None
+        return ExecutionPage(items=items, next_cursor=nxt)
 
     def _write(self, exe: Execution) -> None:
         """The CAS write of `exe`, WITHOUT committing the transaction (so it can
@@ -398,6 +510,32 @@ class RedisStore:
     def load(self, execution_id: str) -> Optional[Execution]:
         raw = self._r.get(self._k(f"exe:{execution_id}"))
         return Execution.model_validate_json(raw) if raw is not None else None
+
+    def list_executions(
+        self,
+        *,
+        status: Optional[Iterable[Status]] = None,
+        definition_id: Optional[str] = None,
+        roots_only: bool = False,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> ExecutionPage:
+        # Redis can't query inside a value, so list = SCAN the exe:* keys + MGET +
+        # filter client-side. Order is arbitrary and a page is best-effort sized (one
+        # SCAN round); keep paging while next_cursor is set. cursor = native SCAN cursor.
+        status = set(status) if status is not None else None
+        cur = int(cursor) if cursor else 0
+        new_cur, keys = self._r.scan(cursor=cur, match=self._k("exe:*"), count=max(limit, 20))
+        items = []
+        for raw in self._r.mget(keys) if keys else []:
+            if not raw:
+                continue
+            data = json.loads(raw)
+            summary = ExecutionSummary.from_data(data, data.get("version", 0))
+            if _matches(summary, status, definition_id, roots_only):
+                items.append(summary)
+        items.sort(key=lambda s: s.id)  # within-page order only (no global order in SCAN)
+        return ExecutionPage(items=items, next_cursor=str(new_cur) if new_cur != 0 else None)
 
     def save(self, exe: Execution) -> None:
         self.commit(exe, [])
@@ -551,6 +689,52 @@ class PostgresStore:
             row = cur.fetchone()
         self._conn.commit()  # end the read transaction so the next read sees fresh data
         return Execution.model_validate_json(row[0]) if row is not None else None
+
+    def list_executions(
+        self,
+        *,
+        status: Optional[Iterable[Status]] = None,
+        definition_id: Optional[str] = None,
+        roots_only: bool = False,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> ExecutionPage:
+        # `data` is TEXT, so cast to jsonb and extract the scalar summary fields with ->>
+        # (never select the heavy blob). status filtered with = ANY(array).
+        where: list[str] = ["TRUE"]
+        params: list[Any] = []
+        if definition_id is not None:
+            where.append("definition_id = %s")
+            params.append(definition_id)
+        if status is not None:
+            where.append("(data::jsonb->>'status') = ANY(%s)")
+            params.append([s.value for s in status])
+        if roots_only:
+            where.append("(data::jsonb->>'parent_id') IS NULL")
+        off = _decode_offset(cursor)
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, definition_id, version, data::jsonb->>'status', "
+                "data::jsonb->>'outcome', data::jsonb->>'active_path', data::jsonb->>'parent_id' "
+                f"FROM executions WHERE {' AND '.join(where)} ORDER BY id LIMIT %s OFFSET %s",
+                (*params, limit + 1, off),
+            )
+            rows = cur.fetchall()
+        self._conn.commit()  # end the read transaction
+        items = [
+            ExecutionSummary(
+                id=r[0],
+                definition_id=r[1],
+                version=r[2],
+                status=r[3],
+                outcome=r[4],
+                active_path=r[5],
+                parent_id=r[6],
+            )
+            for r in rows[:limit]
+        ]
+        nxt = _encode_offset(off + limit) if len(rows) > limit else None
+        return ExecutionPage(items=items, next_cursor=nxt)
 
     def save(self, exe: Execution) -> None:
         self.commit(exe, [])
@@ -751,6 +935,49 @@ class RqliteStore:
     def load(self, execution_id: str) -> Optional[Execution]:
         rows = self._query("SELECT data FROM executions WHERE id = ?", (execution_id,))
         return Execution.model_validate_json(rows[0][0]) if rows else None
+
+    def list_executions(
+        self,
+        *,
+        status: Optional[Iterable[Status]] = None,
+        definition_id: Optional[str] = None,
+        roots_only: bool = False,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> ExecutionPage:
+        # distributed SQLite: same json_extract projection as SqliteStore, over _query.
+        where, params = ["1=1"], []
+        if definition_id is not None:
+            where.append("definition_id = ?")
+            params.append(definition_id)
+        if status is not None:
+            statuses = [s.value for s in status]
+            where.append(f"json_extract(data,'$.status') IN ({','.join('?' * len(statuses))})")
+            params += statuses
+        if roots_only:
+            where.append("json_extract(data,'$.parent_id') IS NULL")
+        off = _decode_offset(cursor)
+        rows = self._query(
+            "SELECT id, definition_id, version, json_extract(data,'$.status'), "
+            "json_extract(data,'$.outcome'), json_extract(data,'$.active_path'), "
+            "json_extract(data,'$.parent_id') FROM executions "
+            f"WHERE {' AND '.join(where)} ORDER BY id LIMIT ? OFFSET ?",
+            (*params, limit + 1, off),
+        )
+        items = [
+            ExecutionSummary(
+                id=r[0],
+                definition_id=r[1],
+                version=r[2],
+                status=r[3],
+                outcome=r[4],
+                active_path=r[5],
+                parent_id=r[6],
+            )
+            for r in rows[:limit]
+        ]
+        nxt = _encode_offset(off + limit) if len(rows) > limit else None
+        return ExecutionPage(items=items, next_cursor=nxt)
 
     def save(self, exe: Execution) -> None:
         self.commit(exe, [])
@@ -979,6 +1206,36 @@ class MongoStore:
         doc = self._exes.find_one({"_id": execution_id}, {"data": 1})
         return Execution.model_validate_json(doc["data"]) if doc is not None else None
 
+    def list_executions(
+        self,
+        *,
+        status: Optional[Iterable[Status]] = None,
+        definition_id: Optional[str] = None,
+        roots_only: bool = False,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> ExecutionPage:
+        # definition_id is a top-level field (filtered server-side); status/parent_id
+        # live inside the `data` JSON string (filtered client-side). Project only
+        # {definition_id, version, data} — never the embedded outbox/spawns/timers arrays.
+        status = set(status) if status is not None else None
+        query: dict = {} if definition_id is None else {"definition_id": definition_id}
+        off = _decode_offset(cursor)
+        items: list[ExecutionSummary] = []
+        # over-fetch so client-side status/roots filtering still fills the page; if we
+        # exhaust the cursor short of `limit`, there simply is no next page.
+        cur = self._exes.find(query, {"version": 1, "data": 1}).sort("_id", 1).skip(off)
+        scanned = 0
+        for doc in cur:
+            scanned += 1
+            summary = ExecutionSummary.from_data(json.loads(doc["data"]), doc.get("version", 0))
+            if _matches(summary, status, definition_id, roots_only):
+                items.append(summary)
+            if len(items) >= limit:
+                break
+        nxt = _encode_offset(off + scanned) if len(items) >= limit else None
+        return ExecutionPage(items=items, next_cursor=nxt)
+
     def save(self, exe: Execution) -> None:
         self.commit(exe, [])
 
@@ -1174,6 +1431,36 @@ class SurrealStore:
     def load(self, execution_id: str) -> Optional[Execution]:
         res = self._db.query("SELECT data FROM type::thing('executions',$id)", {"id": execution_id})
         return Execution.model_validate_json(res[0]["data"]) if res else None
+
+    def list_executions(
+        self,
+        *,
+        status: Optional[Iterable[Status]] = None,
+        definition_id: Optional[str] = None,
+        roots_only: bool = False,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> ExecutionPage:
+        # definition_id is a record field (filtered server-side); status/parent_id live
+        # inside the `data` JSON string (client-side). Build the summary from parsed
+        # `data` so we don't need to normalize the Surreal RecordID. Offset pagination
+        # over a stable `id` order; a page returns <= limit after the status filter.
+        status = set(status) if status is not None else None
+        where = "" if definition_id is None else "WHERE definition_id = $def"
+        off = _decode_offset(cursor)
+        rows = self._db.query(
+            # `id` must be in the projection to ORDER BY it (Surreal); we don't read it
+            f"SELECT id, data, version FROM executions {where} ORDER BY id LIMIT $lim START $off",
+            {"def": definition_id, "lim": limit, "off": off},
+        )
+        items = []
+        for row in rows or []:
+            summary = ExecutionSummary.from_data(json.loads(row["data"]), row.get("version", 0))
+            if _matches(summary, status, definition_id, roots_only):
+                items.append(summary)
+        # len(rows) == limit => there may be more raw rows; keep paging by raw offset
+        nxt = _encode_offset(off + len(rows)) if rows and len(rows) == limit else None
+        return ExecutionPage(items=items, next_cursor=nxt)
 
     def save(self, exe: Execution) -> None:
         self.commit(exe, [])
@@ -1439,6 +1726,43 @@ class DynamoDBStore:
         )
         item = resp.get("Item")
         return Execution.model_validate_json(self._item(item)["data"]) if item else None
+
+    def list_executions(
+        self,
+        *,
+        status: Optional[Iterable[Status]] = None,
+        definition_id: Optional[str] = None,
+        roots_only: bool = False,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> ExecutionPage:
+        # Scan (unordered) projecting only data+version; status/parent_id are inside the
+        # `data` JSON so they're filtered client-side (definition_id can be a server-side
+        # FilterExpression). cursor = base64 of the native LastEvaluatedKey. `Limit` bounds
+        # items EXAMINED before the filter, so a page may return fewer than `limit` matches.
+        status = set(status) if status is not None else None
+        kwargs: dict[str, Any] = {
+            "TableName": self._t("executions"),
+            "ProjectionExpression": "#dat,#v",
+            "ExpressionAttributeNames": {"#dat": "data", "#v": "version"},
+            "Limit": limit,
+        }
+        if definition_id is not None:
+            kwargs["ExpressionAttributeNames"]["#def"] = "definition_id"
+            kwargs["FilterExpression"] = "#def = :def"
+            kwargs["ExpressionAttributeValues"] = {":def": {"S": definition_id}}
+        if cursor:
+            kwargs["ExclusiveStartKey"] = json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
+        resp = self._db.scan(**kwargs)
+        items = []
+        for raw in resp.get("Items", []):
+            item = self._item(raw)
+            summary = ExecutionSummary.from_data(json.loads(item["data"]), int(item.get("version", 0)))
+            if _matches(summary, status, definition_id, roots_only):
+                items.append(summary)
+        lek = resp.get("LastEvaluatedKey")
+        nxt = base64.urlsafe_b64encode(json.dumps(lek).encode()).decode() if lek else None
+        return ExecutionPage(items=items, next_cursor=nxt)
 
     def save(self, exe: Execution) -> None:
         self.commit(exe, [])

@@ -74,3 +74,54 @@ class Execution(pydantic.BaseModel):
     children: dict[str, ChildState] = {}  # parent: child_id -> ChildState (join counter)
     invoke_seq: dict[str, int] = {}  # invoke-state path -> times entered (deterministic child ids,
     #                                  so re-invoking the same state in a loop spawns a fresh child)
+
+
+class ExecutionSummary(pydantic.BaseModel):
+    """A lightweight projection of an `Execution` for list/monitor views: every field is
+    cheap to extract and renders a row without loading the heavy `context`/`history`/
+    `children`. Drill-down loads the full `Execution` via `store.load(id)`. Produced by
+    `ExecutionStore.list_executions`."""
+
+    id: str
+    definition_id: str
+    status: Status
+    outcome: Optional[str] = None
+    active_path: Optional[str] = None
+    version: int = 0
+    parent_id: Optional[str] = None  # None => a root; set => an orthogonal region / invoke child
+
+    @classmethod
+    def of(cls, exe: "Execution") -> "ExecutionSummary":
+        """Project a full Execution (the path used by backends holding live objects)."""
+        return cls(
+            id=exe.id,
+            definition_id=exe.definition_id,
+            status=exe.status,
+            outcome=exe.outcome,
+            active_path=exe.active_path,
+            version=exe.version,
+            parent_id=exe.parent_id,
+        )
+
+    @classmethod
+    def from_data(cls, raw: dict, version: int) -> "ExecutionSummary":
+        """Project from a parsed Execution-JSON dict (the path used by backends that store
+        the Execution as an opaque JSON blob `data` plus a broken-out `version` column)."""
+        return cls(
+            id=raw["id"],
+            definition_id=raw["definition_id"],
+            status=raw["status"],
+            outcome=raw.get("outcome"),
+            active_path=raw.get("active_path"),
+            version=version,
+            parent_id=raw.get("parent_id"),
+        )
+
+
+class ExecutionPage(pydantic.BaseModel):
+    """One page of `list_executions`: up to `limit` summaries plus an opaque `next_cursor`
+    to fetch the following page (None => no more). The cursor is backend-specific (an
+    offset, a SCAN cursor, a DynamoDB LastEvaluatedKey) and must be treated as opaque."""
+
+    items: list[ExecutionSummary] = []
+    next_cursor: Optional[str] = None
