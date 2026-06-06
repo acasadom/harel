@@ -9,6 +9,7 @@ concurrency test exercises the hand-rolled group lock under real contention.
 
 import threading
 import time
+from unittest import mock
 
 import pytest
 
@@ -247,3 +248,28 @@ def test_pipeline_orthogonal_over_redis(server):
     assert final.context["trace"] == ["Done"]
     regions = [store.load(cid) for cid in child_ids]
     assert sorted(r.context["trace"] for r in regions) == [["A1", "A2"], ["B1", "B2"]]
+
+
+# --- regression: claim must NOT scan every pending group (the O(N) SMEMBERS bug) ----
+
+
+def test_claim_does_not_scan_all_groups(transport):
+    # a large backlog of distinct pending groups
+    for i in range(1000):
+        transport.publish(f"G{i}", _event(f"e{i}"))
+
+    with (
+        mock.patch.object(transport._r, "smembers", wraps=transport._r.smembers) as smembers,
+        mock.patch.object(transport._r, "zrangebyscore", wraps=transport._r.zrangebyscore) as zrange,
+    ):
+        lease = transport.claim("w", visibility=30)
+
+    assert lease is not None  # leased one of the 1000 groups
+    # the old O(N) path materialised every group via SMEMBERS — it must be gone
+    assert smembers.call_count == 0
+    # claim reads only a bounded candidate window, independent of the 1000 pending groups
+    assert zrange.call_count == 1
+    assert zrange.call_args.kwargs.get("num") == RedisTransport._CANDIDATES
+    # exactly one group was leased (its score bumped into the future); the rest stay at 0
+    now_ms = int(time.time() * 1000)
+    assert transport._r.zcount(transport._k_ready(), now_ms + 1, "+inf") == 1
