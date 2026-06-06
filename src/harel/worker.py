@@ -4,7 +4,7 @@ Configured entirely by environment variables so it runs as a docker-compose
 service scaled to N replicas (each replica is one `Worker` loop):
 
     STM_REDIS_URL        redis URL for the transport (the queue)
-    STM_STORE_BACKEND    "sqlite" (default), "redis", "postgres", "rqlite", "mongo", "surrealdb" (store)
+    STM_STORE_BACKEND    "sqlite" (default), "redis", "postgres", "rqlite", "mongo", "surrealdb", "dynamodb"
     STM_STORE_DB         sqlite file for the store        (sqlite backend; a shared volume)
     STM_STORE_REDIS_URL  redis URL for the store, defaults to STM_REDIS_URL (redis backend)
     STM_POSTGRES_DSN     postgres DSN for the store       (postgres backend)
@@ -16,6 +16,8 @@ service scaled to N replicas (each replica is one `Worker` loop):
     STM_SURREAL_USER     surrealdb username (optional); STM_SURREAL_PASS password
     STM_SQS_ENDPOINT     SQS endpoint URL (e.g. LocalStack) for the sqs transport
     STM_SQS_QUEUE        SQS FIFO queue name (default stm.fifo)
+    STM_DYNAMODB_ENDPOINT DynamoDB endpoint URL (e.g. LocalStack); unset = real AWS (dynamodb store)
+    STM_AWS_REGION       AWS region for the dynamodb store (default us-east-1)
     STM_DEFINITIONS_DIR  directory of *.stm machine files = the Definition registry
     STM_WORKER_ID        worker id (defaults to the hostname)
     STM_VISIBILITY       lease seconds while a message is in flight (default 30)
@@ -44,6 +46,7 @@ from harel.dsl import definition_from_dsl_file, parse
 from harel.dsl.parser import DslError
 from harel.engine.distributed import Worker
 from harel.engine.store import (
+    DynamoDBStore,
     ExecutionStore,
     MongoStore,
     PostgresStore,
@@ -82,7 +85,7 @@ def load_definitions(definitions_dir: str) -> dict[str, Definition]:
 
 def build_store() -> ExecutionStore:
     """Build the durable store from STM_STORE_BACKEND (sqlite | redis | postgres |
-    rqlite | mongo | surrealdb)."""
+    rqlite | mongo | surrealdb | dynamodb)."""
     backend = os.environ.get("STM_STORE_BACKEND", "sqlite")
     if backend == "sqlite":
         return SqliteStore(os.environ["STM_STORE_DB"])
@@ -96,6 +99,10 @@ def build_store() -> ExecutionStore:
         return MongoStore.from_url(os.environ["STM_MONGO_URL"], os.environ.get("STM_MONGO_DB", "harel"))
     if backend == "surrealdb":
         return SurrealStore.from_url(**_surreal_kwargs())
+    if backend == "dynamodb":
+        return DynamoDBStore.create(
+            os.environ.get("STM_DYNAMODB_ENDPOINT"), os.environ.get("STM_AWS_REGION", "us-east-1")
+        )
     raise ValueError(f"unknown STM_STORE_BACKEND: {backend}")
 
 

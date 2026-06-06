@@ -18,8 +18,9 @@ store and the same machine survives crashes and restarts.
 | `RqliteStore` | distributed SQLite over Raft (HTTP) |
 | `MongoStore` | distributed document store (single-document atomic `update_one` CAS) |
 | `SurrealStore` | distributed multi-model, ACID (server-side `BEGIN…COMMIT`, THROW-gated CAS) |
+| `DynamoDBStore` | AWS serverless (conditional-write CAS, atomic `TransactWriteItems`; pairs with `SqsTransport`) |
 
-The networked ones are optional extras (`harel[redis]`, `[postgres]`, `[rqlite]`, `[mongo]`, `[surrealdb]`) and take an
+The networked ones are optional extras (`harel[redis]`, `[postgres]`, `[rqlite]`, `[mongo]`, `[surrealdb]`, `[dynamodb]`) and take an
 injected client. Selecting one is the *only* change — the machine and the driving loop are
 identical.
 
