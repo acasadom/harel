@@ -73,6 +73,37 @@ The store is hardened beyond just persisting state:
 - **Durable timers** — a `timeout` is persisted on enter and cancelled on exit in the *same*
   commit as the transition, so a scheduled timer can't be lost (see [step 7](../tutorial/07-timers)).
 
+## At-least-once actions & idempotency
+
+Delivery is **at least once**. The dedupe above stops a *redelivered* event from re-running once
+its prior attempt **committed** — but if a worker crashes *after* an action ran and *before* the
+commit, the event is redelivered and the action **runs again**. Dedupe is per *event*, not per
+*action*.
+
+For a side-effecting action (charge a card, send an email — local or a remote FaaS function) the
+driver exposes a stable key, `stm.idempotency_key = {execution_id}:{version}:{index}`. It is
+deterministic — the pure engine reproduces the same action sequence and the version is the
+pre-commit value — so a redelivery hands each action the *same* key.
+
+The dedupe must live in an **external** backend you own (Redis `SET NX`, a DynamoDB conditional
+put, a service's native idempotency key) — **not** in harel's store or context. The gap is a crash
+*before* the commit, so anything harel recorded would roll back with that failed commit; only a
+record the callee wrote outside harel's transaction survives. `harel.idempotency` ships the opt-in
+helper:
+
+```python
+# docs-test: skip
+from harel import idempotent, DictIdempotency  # DictIdempotency is in-memory (tests)
+
+backend = my_redis_backed_idempotency()         # an IdempotencyBackend you supply
+actions = {"charge": idempotent(backend)(charge)}  # bind the wrapped action
+```
+
+`idempotent` runs the body at most once per `stm.idempotency_key` (caching the result, so a
+selector still routes the same way). Residual window: true exactly-once needs the effect and the
+claim to be atomic (an idempotency-key-native service); the helper narrows the window, it doesn't
+abolish it.
+
 ## Retry & backoff is a composite, not a feature
 
 Because timers are durable and the model decides what a `Timeout` does, retry-with-backoff is
