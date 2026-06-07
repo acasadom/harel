@@ -217,8 +217,10 @@ class AsyncDriver:
 
 
 class _AsyncRuntimeDriver(AsyncDriver):
-    """Production policy: an unhandled action error fails the execution terminally
-    (`status=FAILED` + `error`) instead of propagating — mirror of `_RuntimeDriver`."""
+    """The production driver. An unhandled action error is a bug, not a modelled failure:
+    we neither propagate it (would crash the worker) nor retry (a deterministic bug loops)
+    — we fail the execution terminally (`status=FAILED` + `error`) and ack; the persisted
+    FAILED record is the dead-letter. Used by AsyncDurableRunner and AsyncWorker."""
 
     def _on_action_error(self, exe: Execution, exc: Exception) -> None:
         logger.exception("unhandled action error; failing execution %s", exe.id)
