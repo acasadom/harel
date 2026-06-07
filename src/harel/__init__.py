@@ -15,6 +15,7 @@ from harel.engine.execution import Execution
 from harel.engine.resolve import DictResolver, MachineResolver, ResolveError
 from harel.engine.runtime import Driver
 from harel.engine.store import DictStore, ExecutionStore, SqliteStore
+from harel.idempotency import DictIdempotency, IdempotencyBackend, idempotent
 from harel.spec.states import Action, Event, EventFilter, LogEvent, Selector, Transition
 from harel.viz.plantuml import render
 
@@ -45,4 +46,7 @@ __all__ = [
     "ModuleResolver",
     "SourceResolver",
     "ResolveError",
+    "idempotent",
+    "IdempotencyBackend",
+    "DictIdempotency",
 ]

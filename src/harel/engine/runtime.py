@@ -39,10 +39,17 @@ def _resolve(action: ActionRef):
 
 
 class _Proxy:
-    """Stand-in passed to an Execution's actions: exposes its `execution_ctx`."""
+    """Stand-in passed to an Execution's actions: exposes its `execution_ctx` and
+    a stable `idempotency_key` for the current action (set by the driver before
+    each call). The key is `{execution_id}:{version}:{index}` — deterministic, so
+    an at-least-once redelivery of the same event reproduces the same key per
+    action. Actions (or the FaaS stub) pass it to an external idempotency backend
+    to dedupe their side effect; harel itself records nothing (a harel-side record
+    would roll back with the failed commit — see `harel.idempotency`)."""
 
     def __init__(self, context: dict) -> None:
         self.execution_ctx = context
+        self.idempotency_key: Optional[str] = None
 
 
 class Driver:
@@ -112,6 +119,7 @@ class Driver:
         timer_ops: list[TimerOp] = []
         spawns: list[tuple[str, str, dict]] = []
         proxy = self._proxy(exe)
+        action_index = 0  # per-event counter -> a deterministic, replay-stable idempotency key
         try:
             effect = next(gen)
             while True:
@@ -120,6 +128,10 @@ class Driver:
                     action = (
                         effect.selector.action if isinstance(effect, engine.RunSelector) else effect.action
                     )
+                    # version is the pre-commit value (a failed attempt didn't bump it),
+                    # so the key is identical across an at-least-once redelivery
+                    proxy.idempotency_key = f"{exe.id}:{exe.version}:{action_index}"
+                    action_index += 1
                     try:
                         ret = _resolve(action)(proxy, effect.event, **dict(action.inputs))
                     except Exception as exc:

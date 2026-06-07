@@ -27,7 +27,8 @@ identical.
 ## Surviving a restart
 
 Point a `SqliteStore` at a file, and an execution created by one runner is picked up by another
-— a stand-in for "the process died and came back":
+**using only its id** — the state lives in the store, the id is the handle that crosses the
+process boundary. A stand-in for "the process died and came back":
 
 ```python
 import tempfile
@@ -47,11 +48,14 @@ machine order {
 defn = definition_from_dsl(SOURCE, "order")
 db = str(Path(tempfile.mkdtemp()) / "stm.db")
 
-# process #1: create the execution, then "crash"
-exe = DurableRunner(SqliteStore(db), {defn.id: defn}).create(defn.id)
+# process #1: a runner creates the execution (persisting it) and then "crashes".
+# create() returns the Execution; its `.id` is the ONLY handle that outlives the
+# process — you keep it (in a URL, a queue message, another table) to refer back.
+execution_id = DurableRunner(SqliteStore(db), {defn.id: defn}).create(defn.id).id
 
-# process #2: a brand-new runner over the same file picks it up and finishes it
-exe = DurableRunner(SqliteStore(db), {defn.id: defn}).process(exe.id, Event(kind="Finish"))
+# process #2: a brand-new runner — shares nothing with the first but the file —
+# reloads that execution by id from the store and drives it to completion.
+exe = DurableRunner(SqliteStore(db), {defn.id: defn}).process(execution_id, Event(kind="Finish"))
 print("survived restart ->", exe.active_path, "/", exe.outcome)
 ```
 
@@ -72,6 +76,37 @@ The store is hardened beyond just persisting state:
   idempotently, so a crash mid-fork neither double-spawns nor loses a region's result.
 - **Durable timers** — a `timeout` is persisted on enter and cancelled on exit in the *same*
   commit as the transition, so a scheduled timer can't be lost (see [step 7](../tutorial/07-timers)).
+
+## At-least-once actions & idempotency
+
+Delivery is **at least once**. The dedupe above stops a *redelivered* event from re-running once
+its prior attempt **committed** — but if a worker crashes *after* an action ran and *before* the
+commit, the event is redelivered and the action **runs again**. Dedupe is per *event*, not per
+*action*.
+
+For a side-effecting action (charge a card, send an email — local or a remote FaaS function) the
+driver exposes a stable key, `stm.idempotency_key = {execution_id}:{version}:{index}`. It is
+deterministic — the pure engine reproduces the same action sequence and the version is the
+pre-commit value — so a redelivery hands each action the *same* key.
+
+The dedupe must live in an **external** backend you own (Redis `SET NX`, a DynamoDB conditional
+put, a service's native idempotency key) — **not** in harel's store or context. The gap is a crash
+*before* the commit, so anything harel recorded would roll back with that failed commit; only a
+record the callee wrote outside harel's transaction survives. `harel.idempotency` ships the opt-in
+helper:
+
+```python
+# docs-test: skip
+from harel import idempotent, DictIdempotency  # DictIdempotency is in-memory (tests)
+
+backend = my_redis_backed_idempotency()         # an IdempotencyBackend you supply
+actions = {"charge": idempotent(backend)(charge)}  # bind the wrapped action
+```
+
+`idempotent` runs the body at most once per `stm.idempotency_key` (caching the result, so a
+selector still routes the same way). Residual window: true exactly-once needs the effect and the
+claim to be atomic (an idempotency-key-native service); the helper narrows the window, it doesn't
+abolish it.
 
 ## Retry & backoff is a composite, not a feature
 
