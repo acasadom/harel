@@ -39,6 +39,7 @@ sqs = ["boto3>=1.26"]
 lsp = ["pygls>=1.3,<2"]
 
 [project.scripts]
+harel = "harel.cli:main"
 harel-lsp = "harel.lsp:main"
 harel-fmt = "harel.fmt:main"
 

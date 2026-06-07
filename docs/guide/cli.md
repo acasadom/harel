@@ -1,0 +1,63 @@
+# Command-line interface
+
+Installing harel puts a single `harel` command on your `PATH` that wraps the static tooling,
+an in-memory `run`, the formatter, and the language server.
+
+```text
+harel validate FILE [NAME]                 # parse + validate; exit 1 on errors
+harel render   FILE [NAME] [--mermaid]      # PlantUML (default) or Mermaid
+harel list     FILE                         # machines / fragments / events in a file
+harel run      FILE [NAME] [-e KIND[:JSON]] # drive a machine with events (in-memory)
+harel fmt      FILES... [--check|--diff]    # format .stm files
+harel lsp                                   # start the DSL language server (stdio)
+harel --version
+```
+
+`NAME` selects the machine when a file declares more than one.
+
+## Examples
+
+Validate a machine and render it:
+
+```text
+$ harel validate examples/place_order/order.stm order
+order: ok
+
+$ harel render examples/place_order/order.stm order --mermaid
+stateDiagram-v2
+[*] --> Cart
+...
+```
+
+Drive a machine with a sequence of events (each `-e` is one event; attach data as
+`KIND:'{...}'` for guarded transitions):
+
+```text
+$ harel run examples/place_order/order.stm order \
+    -e PlaceOrder -e PaymentAuthorized -e Picked -e Packed -e Dispatched -e Delivered
+(start)              -> Cart
+PlaceOrder           -> AwaitingPayment
+PaymentAuthorized    -> Fulfilling.Picking
+...
+status: DONE  outcome: success
+```
+
+`run` resolves a machine's action modules from the working directory (for package-qualified
+paths like `pkg.mod.fn`, run it from your project root) and from the `.stm` file's own
+directory. Seed the initial context with `--seed '{"items": [...]}'`, and add `--validate` to
+check the machine before running.
+
+`fmt` and `lsp` are passthroughs: `harel fmt --check **/*.stm` and `harel lsp` behave exactly
+like the standalone `harel-fmt` / `harel-lsp` entry points.
+
+## Verified
+
+The commands behave as shown — exercised in CI:
+
+```python
+from harel.cli import main
+
+assert main(["list", "test/data/order.stm"]) == 0
+assert main(["validate", "test/data/order.stm", "order"]) == 0
+assert main(["render", "test/data/order.stm", "order", "--mermaid"]) == 0
+```

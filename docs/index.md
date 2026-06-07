@@ -48,6 +48,7 @@ How these machines run for real — and the reference material.
 :maxdepth: 1
 :caption: Operations & reference
 
+guide/cli
 guide/visualization
 guide/durability
 guide/distribution
