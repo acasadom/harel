@@ -24,10 +24,17 @@ class DefinitionSource:
         self,
         registry: Optional[dict[str, Definition]] = None,
         resolver: Optional[MachineResolver] = None,
+        sources: Optional[dict[str, str]] = None,
     ) -> None:
         self._registry = dict(registry) if registry else {}
         self._resolver = resolver
+        self._sources = dict(sources) if sources else {}  # definition_id -> .stm source text
         self._cache: dict[str, Optional[Definition]] = {}
+
+    def source(self, definition_id: str) -> Optional[str]:
+        """The `.stm` source text of the machine (None if unknown). For the monitor's
+        collapsible source view; only populated when built from a directory."""
+        return self._sources.get(definition_id)
 
     def get(self, definition_id: str, fqn: Optional[str] = None) -> Optional[Definition]:
         key = fqn or definition_id
@@ -47,10 +54,24 @@ class DefinitionSource:
         """Build a source from a directory of `.stm` files: a registry keyed by
         Definition.id (every machine, validated) plus a `FileResolver` so submachine
         FQNs (`a.b.c`) resolve too. Mirrors the worker's `load_definitions` convention."""
+        from pathlib import Path
+
+        from harel.dsl.parser import parse
         from harel.dsl.resolve import FileResolver
         from harel.worker import load_definitions
 
-        return cls(registry=load_definitions(definitions_dir), resolver=FileResolver(definitions_dir))
+        # map each machine name (== Definition.id) to its file's source text, for the
+        # monitor's collapsible DSL view.
+        sources: dict[str, str] = {}
+        for path in sorted(Path(definitions_dir).glob("*.stm")):
+            text = path.read_text()
+            for name in parse(text).machines:
+                sources[name] = text
+        return cls(
+            registry=load_definitions(definitions_dir),
+            resolver=FileResolver(definitions_dir),
+            sources=sources,
+        )
 
     @classmethod
     def empty(cls) -> "DefinitionSource":

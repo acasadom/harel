@@ -12,8 +12,21 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.timer import Timer
-from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Static, Tree
+from textual.widgets import (
+    Button,
+    Collapsible,
+    DataTable,
+    Footer,
+    Header,
+    Input,
+    Label,
+    OptionList,
+    Static,
+    Tree,
+)
+from textual.widgets.option_list import Option
 
+from harel.engine.execution import Status
 from harel.tui import summary, widgets
 
 if TYPE_CHECKING:
@@ -164,8 +177,10 @@ class ListScreen(_MonitorScreen):
 
 
 class DetailScreen(_MonitorScreen):
-    """One execution: the statechart tree (active state highlighted) on the left, data
-    panels on the right, and control-plane actions by keyboard."""
+    """One execution: the statechart tree (active state highlighted) on the left; on the
+    right a navigable **execution timeline** over a per-step detail (event in, transition,
+    actions/guards, context in → out). Navigating a step highlights its node in the tree.
+    A row of control-plane buttons mirrors the keyboard actions, enabled per status."""
 
     BINDINGS = [
         Binding("escape,h", "back", "back"),
@@ -180,20 +195,35 @@ class DetailScreen(_MonitorScreen):
         super().__init__()
         self.execution_id = execution_id
         self._can_cancel = True
+        self._steps: list = []  # TraceStep list, indexed by the OptionList option index
+        self._tree_model = None  # cached so navigating the timeline re-highlights cheaply
 
     def compose(self) -> ComposeResult:
         yield Header()
         with Horizontal(id="detail-body"):
-            yield Tree("statechart", id="statechart")
-            with VerticalScroll(id="panels"):
-                yield Static(id="status-panel")
-                yield Static(id="context-panel")
-                yield Static(id="pending-panel")
-                yield Static(id="history-panel")
+            with Vertical(id="left"):
+                yield Tree("statechart", id="statechart")
+                with Collapsible(title="DSL source", collapsed=True, id="source-box"):
+                    with VerticalScroll(id="source-scroll"):
+                        yield Static(id="source")
+            with Vertical(id="right"):
+                yield Static(id="status-header")
+                with Horizontal(id="actions"):
+                    yield Button("Suspend", id="btn-suspend")
+                    yield Button("Resume", id="btn-resume")
+                    yield Button("Cancel", id="btn-cancel")
+                    yield Button("Terminate", id="btn-terminate")
+                yield Label("Timeline", classes="section")
+                yield OptionList(id="timeline")
+                with VerticalScroll(id="step"):
+                    yield Static(id="step-detail")
         yield Footer()
 
     def on_mount(self) -> None:
         self.sub_title = self.execution_id
+        self.query_one("#statechart", Tree).border_title = "statechart"
+        self.query_one("#timeline", OptionList).border_title = "timeline (↑/↓ to navigate)"
+        self.query_one("#step", VerticalScroll).border_title = "step detail"
         self.set_interval(self.monitor.interval, self.action_refresh)
         self.action_refresh()
 
@@ -212,17 +242,65 @@ class DetailScreen(_MonitorScreen):
             self.app.pop_screen()
             return
         self._can_cancel = can_cancel
+        self._tree_model = detail.tree
         widgets.populate_statechart(self.query_one("#statechart", Tree), detail.tree)
-        self.query_one("#status-panel", Static).update(widgets.status_markup(detail))
-        self.query_one("#context-panel", Static).update("[b u]context[/]\n" + widgets.context_markup(detail))
-        self.query_one("#pending-panel", Static).update(
-            "[b u]pending[/]\n" + widgets.pending_markup(detail, self.monitor.clock())
+        self.query_one("#source", Static).update(
+            detail.source or "[dim](source unavailable — pass --definitions-dir)[/]"
         )
-        self.query_one("#history-panel", Static).update("[b u]history[/]\n" + widgets.history_markup(detail))
+        self.query_one("#status-header", Static).update(widgets.status_header_markup(detail))
+        self._sync_buttons(detail.execution.status)
+
+        timeline = self.query_one("#timeline", OptionList)
+        keep = timeline.highlighted  # preserve the navigated step across a refresh
+        timeline.clear_options()
+        self._steps = list(detail.trace)
+        for step in self._steps:
+            timeline.add_option(Option(step.title(), id=str(step.index)))
+        if self._steps:
+            timeline.highlighted = (
+                keep if keep is not None and keep < len(self._steps) else len(self._steps) - 1
+            )
+            self._show_step(timeline.highlighted)
+        else:
+            self.query_one("#step-detail", Static).update(
+                "[dim](no execution trace — step-by-step recording is a future engine "
+                "feature; this timeline fills in once a trace is present)[/]"
+            )
         banner = "" if detail.tree.resolved else "  [yellow](data-only: definition unavailable)[/]"
         self.sub_title = f"{self.execution_id}{banner}"
 
-    # --- control plane ----------------------------------------------------------------
+    def _sync_buttons(self, status) -> None:
+        """Enable each control button only where it applies (Resume needs SUSPENDED,
+        Suspend needs RUNNING, cancel needs a resolvable Definition, …)."""
+        terminal = status in (Status.DONE, Status.CANCELLED, Status.FAILED)
+        self.query_one("#btn-suspend", Button).disabled = status is not Status.RUNNING
+        self.query_one("#btn-resume", Button).disabled = status is not Status.SUSPENDED
+        self.query_one("#btn-cancel", Button).disabled = terminal or not self._can_cancel
+        self.query_one("#btn-terminate", Button).disabled = terminal
+
+    def _show_step(self, index: Optional[int]) -> None:
+        """Render the selected timeline step and highlight its target node in the tree."""
+        if index is None or not (0 <= index < len(self._steps)):
+            return
+        step = self._steps[index]
+        self.query_one("#step-detail", Static).update(widgets.step_markup(step))
+        if self._tree_model is not None:
+            widgets.populate_statechart(self.query_one("#statechart", Tree), self._tree_model, step.to_path)
+
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        self._show_step(event.option_index)
+
+    # --- control plane (buttons + keys share the same actions) ------------------------
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        handler = {
+            "btn-suspend": self.action_suspend,
+            "btn-resume": self.action_resume,
+            "btn-cancel": self.action_cancel,
+            "btn-terminate": self.action_terminate,
+        }.get(event.button.id or "")
+        if handler is not None:
+            handler()
 
     def action_back(self) -> None:
         self.app.pop_screen()

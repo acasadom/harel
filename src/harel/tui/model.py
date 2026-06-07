@@ -12,6 +12,7 @@ from typing import Iterable, Optional
 from harel.engine.execution import Execution, ExecutionPage, Status
 from harel.engine.store import ExecutionStore, OutboxEntry, SpawnEntry
 from harel.tui.resolve import DefinitionSource
+from harel.tui.trace import TraceStep
 from harel.tui.tree import TreeModel, build_tree_model
 
 # a horizon far beyond any real fire_at: `due_timers(now)` returns fire_at <= now, so a
@@ -29,6 +30,8 @@ class ExecutionDetail:
     timers: list[tuple[str, float]] = field(default_factory=list)  # (path, fire_at)
     inbound: list[OutboxEntry] = field(default_factory=list)  # outbox entries targeting this id
     spawns: list[SpawnEntry] = field(default_factory=list)  # pending child creations from this id
+    trace: list[TraceStep] = field(default_factory=list)  # the execution timeline (preview)
+    source: Optional[str] = None  # the machine's .stm source text (collapsible view), if known
 
 
 class MonitorModel:
@@ -66,7 +69,20 @@ class MonitorModel:
         timers.sort(key=lambda t: t[1])
         inbound = [e for e in self._store.pending_outbox() if e.target_id == execution_id]
         spawns = [s for s in self._store.pending_spawns() if s.parent_id == execution_id]
-        return ExecutionDetail(execution=exe, tree=tree, timers=timers, inbound=inbound, spawns=spawns)
+        # PREVIEW: the execution timeline, if the store carries a trace (Sqlite/Dict). A
+        # store without the seam simply yields no timeline (the panel shows a placeholder).
+        reader = getattr(self._store, "read_trace", None)
+        trace = [TraceStep.from_dict(r) for r in reader(execution_id)] if reader else []
+        source = self._source.source(exe.definition_id)
+        return ExecutionDetail(
+            execution=exe,
+            tree=tree,
+            timers=timers,
+            inbound=inbound,
+            spawns=spawns,
+            trace=trace,
+            source=source,
+        )
 
     def get(self, execution_id: str) -> Optional[Execution]:
         return self._store.load(execution_id)

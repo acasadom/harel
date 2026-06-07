@@ -6,7 +6,7 @@ import pytest
 
 pytest.importorskip("textual")
 
-from textual.widgets import DataTable, Tree  # noqa: E402
+from textual.widgets import Button, DataTable, OptionList, Static, Tree  # noqa: E402
 
 from harel.dsl import definition_from_dsl  # noqa: E402
 from harel.engine.execution import Execution, Status  # noqa: E402
@@ -29,13 +29,43 @@ _S1 = next(p for p, n in DEFN.index.items() if n.name == "S1")
 
 
 def _model(store, *, resolvable=True):
-    return MonitorModel(store, DefinitionSource(registry={"M": DEFN} if resolvable else {}))
+    source = DefinitionSource(registry={"M": DEFN}, sources={"M": HIER}) if resolvable else DefinitionSource()
+    return MonitorModel(store, source)
 
 
-def _seeded_store():
+_S2 = next(p for p, n in DEFN.index.items() if n.name == "S2")
+
+
+def _seeded_store(*, with_trace=False):
     store = DictStore()
     store.save(Execution(id="run-1", definition_id="M", status=Status.RUNNING, active_path=_S1))
     store.save(Execution(id="run-2", definition_id="M", status=Status.DONE, outcome="success"))
+    if with_trace:
+        store.append_trace(
+            "run-1",
+            {
+                "index": 0,
+                "event_kind": "Go",
+                "from_path": "Idle",
+                "to_path": _S1,
+                "context_in": {},
+                "context_out": {"n": 1},
+                "actions": ["start_work"],
+                "guards": ["ready"],
+            },
+        )
+        store.append_trace(
+            "run-1",
+            {
+                "index": 1,
+                "event_kind": "Next",
+                "from_path": _S1,
+                "to_path": _S2,
+                "context_in": {"n": 1},
+                "context_out": {"n": 2},
+                "actions": ["advance"],
+            },
+        )
     return store
 
 
@@ -116,6 +146,53 @@ async def test_terminate_only_mutates_after_confirm():
         await pilot.press("y")
         await _settle(app, pilot)
         assert store.load("run-1").status is Status.CANCELLED
+
+
+async def test_timeline_navigation_shows_step_and_marks_tree():
+    app = MonitorApp(_model(_seeded_store(with_trace=True)), interval=10.0)
+    async with app.run_test(size=(140, 45)) as pilot:
+        await _settle(app, pilot)
+        await pilot.press("enter")  # open run-1
+        await _settle(app, pilot)
+        timeline = app.screen.query_one(OptionList)
+        assert timeline.option_count == 2  # two seeded steps
+        timeline.highlighted = 0  # navigate to the first step
+        await pilot.pause()
+        detail = str(app.screen.query_one("#step-detail", Static).render())
+        assert "start_work" in detail and "ready" in detail  # step's actions/guards
+        # the tree marks the navigated step's target node (S1) with the ◀ marker
+        labels = _labels(app.screen.query_one(Tree).root)
+        assert any("◀" in label for label in labels)
+
+
+async def test_dsl_source_collapsible_shows_the_machine():
+    app = MonitorApp(_model(_seeded_store()), interval=10.0)
+    async with app.run_test(size=(140, 45)) as pilot:
+        await _settle(app, pilot)
+        await pilot.press("enter")
+        await _settle(app, pilot)
+        from textual.widgets import Collapsible
+
+        assert app.screen.query_one(Collapsible).collapsed is True  # folded by default
+        src = str(app.screen.query_one("#source", Static).render())
+        assert "machine M" in src  # the .stm source is loaded into the collapsible
+
+
+async def test_buttons_reflect_status():
+    store = _seeded_store()
+    app = MonitorApp(_model(store), interval=10.0)
+    async with app.run_test(size=(140, 45)) as pilot:
+        await _settle(app, pilot)
+        await pilot.press("enter")  # run-1 is RUNNING
+        await _settle(app, pilot)
+        disabled = {b.id: b.disabled for b in app.screen.query(Button)}
+        assert disabled["btn-suspend"] is False and disabled["btn-resume"] is True
+        # clicking the Suspend button suspends (same action as the `s` key)
+        await pilot.click("#btn-suspend")
+        await _settle(app, pilot)
+        assert store.load("run-1").status is Status.SUSPENDED
+        disabled = {b.id: b.disabled for b in app.screen.query(Button)}
+        assert disabled["btn-suspend"] is True and disabled["btn-resume"] is False
 
 
 async def test_data_only_when_definition_unresolved_disables_cancel():

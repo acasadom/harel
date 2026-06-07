@@ -35,22 +35,40 @@ decide cooperative-vs-forceful — `terminate`/`suspend`/`resume` still work).
 auto-refreshing. Keys: `enter` opens the selected execution, `/` filters by a free substring
 (id/definition/status), `r` forces a refresh, `p` pauses/resumes auto-refresh, `q` quits.
 
-**Detail** — the statechart tree on the left with the **active state highlighted** (and its
-ancestors bolded; orthogonal regions and `invoke` children annotated with their join outcome), and
-data panels on the right (status/outcome/error, context, pending timers/events/spawns, history).
-Control-plane keys:
+**Detail** — opened with `enter`. The left column shows the **statechart tree** with the **active
+state highlighted** (ancestors bolded; orthogonal regions and `invoke` children annotated with their
+join outcome), and a collapsible **DSL source** panel underneath (the machine's `.stm`, folded by
+default — needs `--definitions-dir`). The right column is a status header, a row of control buttons,
+and a navigable **execution timeline** over a per-step **detail**.
 
-| key | action | |
+Navigate the timeline (`↑/↓`) and each step shows its **event in, transition, guards, actions, and
+context before → after**; the step's target state is marked in the tree (a `◀` marker) so you can
+see both the live state and the one you're inspecting. Control-plane actions are both **keys and
+buttons** (the buttons enable/disable per status):
+
+| key / button | action | |
 |-----|--------|--|
-| `s` | suspend | immediate (RUNNING → SUSPENDED) |
-| `R` | resume | immediate (SUSPENDED → RUNNING) |
-| `c` | cancel | confirm; modelled if the machine has an `on Cancel`, else forceful |
-| `t` | terminate | confirm; forceful (→ CANCELLED) |
+| `s` Suspend | suspend | immediate (RUNNING → SUSPENDED) |
+| `R` Resume | resume | immediate (SUSPENDED → RUNNING) |
+| `c` Cancel | cancel | confirm; modelled if the machine has an `on Cancel`, else forceful; disabled when the Definition is unresolved |
+| `t` Terminate | terminate | confirm; forceful (→ CANCELLED) |
 | `escape`/`h` | back | |
 
 The destructive actions (`c`/`t`) ask for confirmation. All of these go through the
 [control plane](control-plane.md), which CASes the record so the change lands at the next event
 boundary.
+
+> **The timeline is a preview.** The engine keeps a state snapshot, not a step-by-step event log, so
+> step-by-step recording is a future engine feature. The monitor reads a trace if the store carries
+> one (a preview `read_trace` seam on the Sqlite/Dict stores, which the `examples/monitor_demo` seed
+> populates); without one, the timeline shows a placeholder. The tree, source, status, control plane
+> and pending-work panels all work regardless.
+
+## Theming
+
+The palette comes from a built-in **Textual theme** (`nord` by default) — pick another with
+`--theme <name>` / `STM_TUI_THEME`, or preview them live in-app with **`Ctrl+P` → "theme"**
+(`gruvbox`, `tokyo-night`, `dracula`, `textual-light`, …).
 
 ## How it refreshes
 

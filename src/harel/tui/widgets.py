@@ -10,6 +10,7 @@ from textual.widgets import Tree
 from harel.definition.model import NodeKind
 from harel.tui import summary
 from harel.tui.model import ExecutionDetail
+from harel.tui.trace import TraceStep
 from harel.tui.tree import NodeMark, TreeModel, TreeNode
 
 _KIND_GLYPH = {
@@ -20,9 +21,11 @@ _KIND_GLYPH = {
 }
 
 
-def node_label(tn: TreeNode) -> Text:
+def node_label(tn: TreeNode, *, selected: bool = False) -> Text:
     """A Rich `Text` label for one statechart node: kind glyph + name (reverse-green if
-    active, bold if on the active path) + an optional region annotation."""
+    the active leaf, bold if on the active path) + an optional region annotation. When
+    `selected` (the timeline's currently-navigated step lands here) it's underlined with a
+    `◀` marker, so you can see both the live state (colour) and the navigated step."""
     name = tn.name or "(root)"
     if tn.mark is NodeMark.ACTIVE:
         styled = Text(name, style="reverse bold green")
@@ -33,30 +36,79 @@ def node_label(tn: TreeNode) -> Text:
     label = Text(f"{_KIND_GLYPH.get(tn.kind, '·')} ") + styled
     if tn.region is not None:
         r = tn.region
-        tag = "invoke" if r.submachine else "region"
-        state = f"✓ {r.outcome}" if r.finished else ("✓" if r.finished else "…")
-        label += Text(f"  ({tag}: {state})", style="dim")
+        state = f"✓ {r.outcome}" if r.finished else "…"
+        label += Text(f"  ({'invoke' if r.submachine else 'region'}: {state})", style="dim")
+    if selected:
+        label += Text("  ◀", style="bold yellow")
+        label.stylize("underline yellow")
     return label
 
 
-def populate_statechart(tree: Tree, model: TreeModel) -> None:
-    """Fill a Textual `Tree` from a `TreeModel`, expanding the whole tree (statecharts are
-    shallow). With no resolved Definition, show a single data-only placeholder."""
+def populate_statechart(tree: Tree, model: TreeModel, selected_path: str | None = None) -> None:
+    """Fill a Textual `Tree` from a `TreeModel`, marking `selected_path` (the navigated
+    timeline step). Statecharts are shallow, so re-populating on each navigation is cheap.
+    With no resolved Definition, show a single data-only placeholder."""
     tree.clear()
     if not model.resolved or model.root is None:
         tree.root.set_label(Text("(definition unavailable — data-only)", style="dim italic"))
         tree.root.data = None
         return
-    tree.root.set_label(node_label(model.root))
+    tree.root.set_label(node_label(model.root, selected=model.root.full_path == selected_path))
     tree.root.data = model.root.full_path
 
     def add(parent, tn: TreeNode) -> None:
         for child in tn.children:
-            node = parent.add(node_label(child), data=child.full_path)
+            node = parent.add(
+                node_label(child, selected=child.full_path == selected_path), data=child.full_path
+            )
             add(node, child)
 
     add(tree.root, model.root)
     tree.root.expand_all()
+
+
+def step_markup(step: TraceStep) -> str:
+    """The detail of one navigated timeline step: event in, transition, actions/guards,
+    and the context before → after."""
+
+    def kv(d: dict) -> str:
+        return (
+            "  " + "\n  ".join(f"[cyan]{k}[/] = {summary.truncate(v, 60)}" for k, v in d.items())
+            if d
+            else "  [dim](empty)[/]"
+        )
+
+    frm = step.from_path or "∅"
+    to = step.to_path or "∅"
+    parts = [
+        f"[b]event[/]       [yellow]{step.event_kind}[/]"
+        + (f"  {summary.truncate(step.event_data, 50)}" if step.event_data else ""),
+        f"[b]transition[/]  {frm} → [green]{to}[/]",
+    ]
+    if step.guards:
+        parts.append("[b]guards[/]      " + ", ".join(step.guards))
+    if step.actions:
+        parts.append("[b]actions[/]     " + ", ".join(step.actions))
+    parts.append("[b u]context in[/]\n" + kv(step.context_in))
+    parts.append("[b u]context out[/]\n" + kv(step.context_out))
+    return "\n".join(parts)
+
+
+def status_header_markup(detail: ExecutionDetail) -> str:
+    """A compact id/status/outcome header for the detail screen."""
+    exe = detail.execution
+    color = summary.status_color(exe.status)
+    head = f"[{color}]{summary.status_label(exe.status)}[/]   [b]{exe.id}[/]   v{exe.version}"
+    bits = []
+    if exe.outcome:
+        bits.append(f"outcome=[b]{exe.outcome}[/]")
+    if exe.error:
+        bits.append(f"[red]{summary.truncate(exe.error, 60)}[/]")
+    if detail.timers:
+        bits.append(f"{len(detail.timers)} timer(s)")
+    if detail.inbound:
+        bits.append(f"{len(detail.inbound)} queued event(s)")
+    return head + ("\n" + "   ".join(bits) if bits else "")
 
 
 def status_markup(detail: ExecutionDetail) -> str:
