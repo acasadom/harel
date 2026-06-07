@@ -47,11 +47,17 @@ flowchart TB
   Transport --> Runner
 ```
 
-Why this split (the history): harel was reimplemented away from a mongodb-coupled engine that
-navigated by `full_path` strings and mixed IO into the state logic. The rewrite made the engine
-a pure, effects-based core navigated by **node references**, which is what makes it testable,
-crash-safe, and portable across in-memory / sqlite / redis / postgres / … without changing a
-line of the state logic. See `design/engine-reimplementation.md`.
+Why this split: keeping the engine a pure function of data — no IO, no user code — is what buys
+the three properties harel is after.
+
+- **Determinism & testability** — a run is just `Definition + Execution → effects`, reproducible
+  and unit-testable without a store, a worker, or your action code.
+- **Crash-safety** — because the engine only *describes* effects, the runner can apply them and
+  advance the state in **one atomic checkpoint**, so a crash never leaves a half-applied step.
+- **Portability** — the state logic navigates by **node references** and touches no backend, so
+  the same engine runs in-memory or over sqlite / redis / postgres / … without changing a line.
+
+The IO — your action functions, the store, the queue — lives entirely in the runner.
 
 ### 1. Definition — the immutable program (`harel/definition/`)
 
