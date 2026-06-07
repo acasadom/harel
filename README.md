@@ -132,9 +132,15 @@ A complete, runnable example (nested states, a selector-driven retry, actions) l
 ## Documentation
 
 A step-by-step **tutorial** — 14 stages that grow one example from a turnstile to durable,
-distributed submachines — plus an operations and reference guide live under
-[`docs/`](docs/). Build the HTML locally with `make docs`. Every code example in the docs is
-executed in CI, so it stays in sync with the engine.
+distributed submachines — plus operations and reference guides live under [`docs/`](docs/).
+Build the HTML locally with `make docs`. Every code example in the docs is executed in CI, so
+it stays in sync with the engine.
+
+- **[Tutorial](docs/tutorial/01-getting-started.md)** — start here; the model, one step at a time.
+- **[Architecture](docs/guide/architecture.md)** — how harel works inside: the pure engine, the
+  effect protocol, the single atomic checkpoint, in-memory vs. distributed (with diagrams).
+- Reference: **[DSL](docs/guide/dsl-reference.md)** · **[CLI](docs/guide/cli.md)** · **[Public API](docs/guide/api-reference.md)** · **[Visualization](docs/guide/visualization.md)**.
+- Operations: **[durability](docs/guide/durability.md)** · **[distribution](docs/guide/distribution.md)** · **[control plane](docs/guide/control-plane.md)** · **[monitor TUI](docs/guide/monitor.md)** · **[remote actions / FaaS](docs/guide/faas.md)**.
 
 ---
 
@@ -204,8 +210,12 @@ make type-check         # mypy
 
 ## The name
 
-Named after **David Harel**, who introduced statecharts in 1987 — the formalism this engine
-makes durable and distributed.
+Named after **David Harel**, who introduced statecharts in his 1987 paper *Statecharts: A
+Visual Formalism for Complex Systems*
+([PDF](https://dubroy.com/refs/Statecharts_a_visual_formalism_for_complex_systems.pdf) ·
+[DOI](https://doi.org/10.1016/0167-6423\(87\)90035-9)), and later recounted how it came to be in
+[*Statecharts in the Making: A Personal Account*](https://www.weizmann.ac.il/math/harel/sites/math.harel/files/users/user50/Statecharts.History.pdf)
+(2007). This engine makes that formalism durable and distributed, in his honour.
 
 ## License
 
