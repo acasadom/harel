@@ -333,3 +333,116 @@ class AsyncRedisTransport:
 
     async def close(self) -> None:
         await self._r.aclose()
+
+
+class AsyncSurrealTransport:
+    """Async mirror of `SurrealTransport`: per-group exclusivity via a `THROW`-gated
+    `BEGIN … COMMIT` lock-acquire block (awaited), FIFO via a `messages` table,
+    `lock_expiry` lease for crash recovery. The client is injected (an already-connected
+    `AsyncSurreal`), so tests use the in-process `mem://` engine."""
+
+    def __init__(self, client: Any, clock: Callable[[], float] = time.time) -> None:
+        from surrealdb import SurrealError
+
+        self._db = client
+        self._SurrealError = SurrealError
+        self._clock = clock
+
+    @classmethod
+    async def from_url(
+        cls,
+        url: str,
+        namespace: str = "harel",
+        database: str = "harel",
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        connect_retries: int = 30,
+        retry_delay: float = 1.0,
+    ) -> "AsyncSurrealTransport":
+        import anyio
+        from surrealdb import AsyncSurreal
+
+        last: Exception | None = None
+        for _ in range(connect_retries):
+            try:
+                client: Any = AsyncSurreal(url)
+                await client.connect()
+                if username is not None:
+                    await client.signin({"username": username, "password": password})
+                await client.use(namespace, database)
+                await client.query("INFO FOR DB")
+                return cls(client)
+            except Exception as exc:  # noqa: BLE001
+                last = exc
+                await anyio.sleep(retry_delay)
+        raise last if last is not None else RuntimeError("surreal connect failed")
+
+    async def _next_seq(self) -> int:
+        res = await self._db.query("UPSERT counter:msg SET v = (v ?? 0) + 1 RETURN v")
+        return int(res[0]["v"])
+
+    async def publish(self, group_id: str, event: Event) -> None:
+        await self._db.query(
+            "CREATE messages SET seq=$s, group_id=$g, event=$e",
+            {"s": await self._next_seq(), "g": group_id, "e": event.model_dump_json()},
+        )
+
+    _ACQUIRE = (
+        "BEGIN;\n"
+        "LET $l = (SELECT id FROM type::thing('locks',$g) WHERE lock_expiry > $now);\n"
+        "IF array::len($l) > 0 { THROW 'held' };\n"
+        "UPSERT type::thing('locks',$g) SET token=$tok, lock_expiry=$exp;\n"
+        "COMMIT;"
+    )
+
+    async def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
+        now = self._clock()
+        groups = await self._db.query(
+            "SELECT group_id, math::min(seq) AS head FROM messages GROUP BY group_id ORDER BY head ASC"
+        )
+        for g in groups:
+            group_id = g["group_id"]
+            token = f"{worker_id}:{uuid.uuid4().hex}"
+            try:
+                await self._db.query(
+                    self._ACQUIRE,
+                    {"g": group_id, "now": now, "tok": token, "exp": now + visibility},
+                )
+            except self._SurrealError:
+                continue  # held by another worker
+            head = await self._db.query(
+                "SELECT seq, event FROM messages WHERE group_id=$g ORDER BY seq ASC LIMIT 1",
+                {"g": group_id},
+            )
+            if not head:
+                await self._db.query("DELETE type::thing('locks',$g)", {"g": group_id})
+                continue
+            row = head[0]
+            return Lease(row["seq"], group_id, Event.model_validate_json(row["event"]), token=token)
+        return None
+
+    async def _owns(self, group_id: str, token: str) -> bool:
+        res = await self._db.query(
+            "SELECT token FROM type::thing('locks',$g)", {"g": group_id}
+        )
+        return bool(res) and res[0].get("token") == token
+
+    async def ack(self, lease: Lease) -> None:
+        if not await self._owns(lease.group_id, lease.token):
+            return
+        await self._db.query("DELETE messages WHERE seq=$s", {"s": lease.seq})
+        await self._db.query("DELETE type::thing('locks',$g)", {"g": lease.group_id})
+
+    async def nack(self, lease: Lease, delay: float = 0.0) -> None:
+        if not await self._owns(lease.group_id, lease.token):
+            return
+        if delay > 0:
+            await self._db.query(
+                "UPDATE type::thing('locks',$g) SET lock_expiry=$exp",
+                {"g": lease.group_id, "exp": self._clock() + delay},
+            )
+        else:
+            await self._db.query("DELETE type::thing('locks',$g)", {"g": lease.group_id})
+
+    async def close(self) -> None:
+        await self._db.close()
