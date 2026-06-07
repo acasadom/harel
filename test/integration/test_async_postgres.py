@@ -32,11 +32,11 @@ def _dsn() -> str:
 
 
 async def _fresh_store() -> AsyncPostgresStore:
-    # a unique table set would be ideal; instead each test truncates what it uses
     store = await AsyncPostgresStore.from_dsn(_dsn())
-    async with store._conn.cursor() as cur:
-        await cur.execute("TRUNCATE executions, outbox, processed_events, timers, spawns")
-    await store._conn.commit()
+    async with store._pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("TRUNCATE executions, outbox, processed_events, timers, spawns")
+        await conn.commit()
     return store
 
 
@@ -73,9 +73,10 @@ async def test_async_postgres_distributed_pipeline():
     defn = definition_from_dsl(FLAT, "M")
     store = await _fresh_store()
     transport = await AsyncPostgresTransport.from_dsn(_dsn(), prefix=f"t{uuid.uuid4().hex[:8]}")
-    async with transport._conn.cursor() as cur:
-        await cur.execute("TRUNCATE transport_messages")
-    await transport._conn.commit()
+    async with transport._pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("TRUNCATE transport_messages")
+        await conn.commit()
     runner = AsyncDistributedRunner(store, transport, {defn.id: defn})
 
     exe = await runner.create(defn.id)
