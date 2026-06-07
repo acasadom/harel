@@ -161,6 +161,90 @@ class AsyncSqliteTransport:
         await self._conn.close()
 
 
+class AsyncPostgresTransport:
+    """Async mirror of `PostgresTransport` over `psycopg.AsyncConnection`: a queue table;
+    `claim` takes a global `pg_advisory_xact_lock` (serializes claims like SQLite's write-lock)
+    then leases the oldest deliverable message of a group with nothing in-flight. Build with
+    `await AsyncPostgresTransport.from_dsn(dsn)`."""
+
+    def __init__(self, conn: Any, prefix: str = "stm", clock: Callable[[], float] = time.time) -> None:
+        self._conn = conn
+        self._prefix = prefix
+        self._clock = clock
+
+    @classmethod
+    async def from_dsn(
+        cls, dsn: str, prefix: str = "stm", clock: Callable[[], float] = time.time
+    ) -> "AsyncPostgresTransport":
+        import psycopg
+
+        conn = await psycopg.AsyncConnection.connect(dsn)
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "CREATE TABLE IF NOT EXISTS transport_messages "
+                "(seq BIGSERIAL PRIMARY KEY, group_id TEXT NOT NULL, event TEXT NOT NULL, "
+                "locked_by TEXT, lock_expiry DOUBLE PRECISION)"
+            )
+        await conn.commit()
+        return cls(conn, prefix, clock)
+
+    async def publish(self, group_id: str, event: Event) -> None:
+        async with self._conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO transport_messages (group_id, event) VALUES (%s, %s)",
+                (group_id, event.model_dump_json()),
+            )
+        await self._conn.commit()
+
+    async def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
+        now = self._clock()
+        try:
+            async with self._conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s)::int8)", (f"{self._prefix}:claim",)
+                )
+                await cur.execute(
+                    "UPDATE transport_messages SET locked_by = %s, lock_expiry = %s WHERE seq = ("
+                    "  SELECT seq FROM transport_messages m "
+                    "  WHERE (m.locked_by IS NULL OR m.lock_expiry < %s) "
+                    "    AND m.group_id NOT IN ("
+                    "      SELECT group_id FROM transport_messages WHERE locked_by IS NOT NULL AND lock_expiry >= %s"
+                    "    ) ORDER BY m.seq LIMIT 1"
+                    ") RETURNING seq, group_id, event",
+                    (worker_id, now + visibility, now, now),
+                )
+                row = await cur.fetchone()
+            await self._conn.commit()
+        except Exception:
+            await self._conn.rollback()
+            raise
+        if row is None:
+            return None
+        return Lease(row[0], row[1], Event.model_validate_json(row[2]))
+
+    async def ack(self, lease: Lease) -> None:
+        async with self._conn.cursor() as cur:
+            await cur.execute("DELETE FROM transport_messages WHERE seq = %s", (lease.seq,))
+        await self._conn.commit()
+
+    async def nack(self, lease: Lease, delay: float = 0.0) -> None:
+        async with self._conn.cursor() as cur:
+            if delay > 0:
+                await cur.execute(
+                    "UPDATE transport_messages SET locked_by = %s, lock_expiry = %s WHERE seq = %s",
+                    (_PARKED, self._clock() + delay, lease.seq),
+                )
+            else:
+                await cur.execute(
+                    "UPDATE transport_messages SET locked_by = NULL, lock_expiry = NULL WHERE seq = %s",
+                    (lease.seq,),
+                )
+        await self._conn.commit()
+
+    async def close(self) -> None:
+        await self._conn.close()
+
+
 class AsyncRedisTransport:
     """Async mirror of `RedisTransport` over `redis.asyncio`: per-group exclusivity by hand
     (`SET NX PX` group-lock-as-lease + a list per group), and a `ready` ZSET scored by

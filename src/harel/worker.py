@@ -166,6 +166,10 @@ async def build_store_async() -> Any:
         from harel.engine.aio_store import AsyncRedisStore
 
         return AsyncRedisStore.from_url(os.environ.get("STM_STORE_REDIS_URL") or os.environ["STM_REDIS_URL"])
+    if backend == "postgres":
+        from harel.engine.aio_store import AsyncPostgresStore
+
+        return await AsyncPostgresStore.from_dsn(os.environ["STM_POSTGRES_DSN"])
     return facade.as_async_store(build_store())  # not-yet-ported: adapt the sync store
 
 
@@ -181,6 +185,10 @@ async def build_transport_async() -> Any:
         from harel.engine.aio_transport import AsyncSqliteTransport
 
         return await AsyncSqliteTransport.create(os.environ["STM_TRANSPORT_DB"])
+    if backend == "postgres":
+        from harel.engine.aio_transport import AsyncPostgresTransport
+
+        return await AsyncPostgresTransport.from_dsn(os.environ["STM_POSTGRES_DSN"])
     return facade.as_async_transport(build_transport())  # not-yet-ported: adapt the sync transport
 
 
