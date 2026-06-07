@@ -22,6 +22,11 @@ dependencies = [
     "lark>=1.2,<2",
     "pydantic>=2,<3",
     "structlog",
+    # the sync API (Driver/DurableRunner) is a thin facade over the async core; anyio's
+    # BlockingPortal bridges sync->async (one background loop), the way Starlette/FastAPI do
+    "anyio>=4,<5",
+    # the async SqliteStore/Transport (the default durable backend) over aiosqlite
+    "aiosqlite>=0.20",
 ]
 
 [project.optional-dependencies]
@@ -31,10 +36,10 @@ redis = ["redis>=5,<9"]
 # the PostgresStore backend (distributed-SQL); validated via the docker-compose stack
 postgres = ["psycopg[binary]>=3,<4"]
 # the RqliteStore backend (distributed SQLite over rqlite's HTTP API)
-rqlite = ["requests>=2,<3"]
+rqlite = ["requests>=2,<3", "httpx>=0.27"]
 # the MongoStore / MongoTransport backend; the client is injected, so this is only
 # needed to talk to a real MongoDB (tests use mongomock from the dev group)
-mongo = ["pymongo>=4,<5"]
+mongo = ["pymongo>=4,<5", "motor>=3,<4"]
 # the SurrealStore / SurrealTransport backend; the package bundles an in-process
 # `mem://` engine, which the unit tests run against (no server needed)
 surrealdb = ["surrealdb>=2,<3"]
@@ -78,6 +83,9 @@ dev = [
     "moto>=5.2.1",
     "textual>=0.60",
     "pytest-asyncio>=0.24",
+    "aioboto3>=12",
+    "httpx>=0.27",
+    "motor>=3,<4",
 ]
 
 [build-system]

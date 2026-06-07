@@ -9,7 +9,6 @@ and moves on. The bare Driver (the test harness) still raises so test bugs surfa
 
 import pytest
 
-from harel import engine
 from harel.dsl import definition_from_dsl
 from harel.engine.distributed import DistributedRunner
 from harel.engine.durable import DurableRunner
@@ -56,7 +55,7 @@ def test_bare_driver_still_raises(tmp_path):
     exe = Execution(definition_id=defn.id)
     driver.start(exe)
     with pytest.raises(RuntimeError, match="boom"):
-        driver._run(exe, engine.process(defn, exe, Event(kind="Go")))
+        driver.inject(exe, Event(kind="Go"))  # public surface; the bare Driver propagates
 
 
 def test_distributed_worker_survives_an_unhandled_error():
