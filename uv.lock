@@ -647,7 +647,6 @@ wheels = [
 
 [[package]]
 name = "harel"
-version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "lark" },
@@ -724,7 +723,7 @@ requires-dist = [
     { name = "surrealdb", marker = "extra == 'surrealdb'", specifier = ">=2,<3" },
     { name = "textual", marker = "extra == 'tui'", specifier = ">=0.60" },
 ]
-provides-extras = ["redis", "postgres", "rqlite", "mongo", "surrealdb", "sqs", "dynamodb", "lsp", "tui", "faas"]
+provides-extras = ["dynamodb", "faas", "lsp", "mongo", "postgres", "redis", "rqlite", "sqs", "surrealdb", "tui"]
 
 [package.metadata.requires-dev]
 dev = [
