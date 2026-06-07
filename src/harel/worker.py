@@ -21,10 +21,17 @@ service scaled to N replicas (each replica is one `Worker` loop):
     STM_DEFINITIONS_DIR  directory of *.stm machine files = the Definition registry
     STM_WORKER_ID        worker id (defaults to the hostname)
     STM_VISIBILITY       lease seconds while a message is in flight (default 30)
+    STM_CONCURRENCY      max events in flight on the loop at once (default 256)
 
 Pure-sqlite (single machine / shared volume), pure-redis (all-network), postgres
 (distributed SQL) and mongo (document store) are all supported by swapping
 STM_STORE_BACKEND.
+
+The worker is **async-native**: one `asyncio` event loop (via `anyio.run`) drives up to
+`STM_CONCURRENCY` events in flight at once with `AsyncWorker.run` (the throughput win).
+Backends with a native async port (sqlite, redis) run async end-to-end; the others are
+adapted from their sync store/transport (correct, but their store IO blocks the loop until
+they get a native async port).
 
 Run with: `python -m harel.worker`. SIGTERM/SIGINT stop the loop cleanly. The
 workers share nothing but the store + the transport — separate processes (here,
@@ -33,10 +40,10 @@ containers) coordinating by events, which is the whole point of the model.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import signal
 import socket
-import threading
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +51,8 @@ from harel.definition.model import Definition
 from harel.definition.validate import ValidationError
 from harel.dsl import definition_from_dsl_file, parse
 from harel.dsl.parser import DslError
-from harel.engine.distributed import Worker
+from harel.engine.aio import facade
+from harel.engine.aio.distributed import AsyncWorker
 from harel.engine.store import (
     DynamoDBStore,
     ExecutionStore,
@@ -145,24 +153,66 @@ def build_transport() -> Transport:
     raise ValueError(f"unknown STM_TRANSPORT_BACKEND: {backend}")
 
 
-def main() -> None:
+async def build_store_async() -> Any:
+    """The async store for STM_STORE_BACKEND: a native async backend where one exists
+    (sqlite, redis), else the sync store adapted to the async interface (correct, but its
+    IO blocks the loop until it gets a native async port)."""
+    backend = os.environ.get("STM_STORE_BACKEND", "sqlite")
+    if backend == "sqlite":
+        from harel.engine.aio_store import AsyncSqliteStore
+
+        return await AsyncSqliteStore.create(os.environ["STM_STORE_DB"])
+    if backend == "redis":
+        from harel.engine.aio_store import AsyncRedisStore
+
+        return AsyncRedisStore.from_url(os.environ.get("STM_STORE_REDIS_URL") or os.environ["STM_REDIS_URL"])
+    return facade.as_async_store(build_store())  # not-yet-ported: adapt the sync store
+
+
+async def build_transport_async() -> Any:
+    """The async transport for STM_TRANSPORT_BACKEND: native async where one exists (sqlite,
+    redis), else the sync transport adapted."""
+    backend = os.environ.get("STM_TRANSPORT_BACKEND", "redis")
+    if backend == "redis":
+        from harel.engine.aio_transport import AsyncRedisTransport
+
+        return AsyncRedisTransport.from_url(os.environ["STM_REDIS_URL"])
+    if backend == "sqlite":
+        from harel.engine.aio_transport import AsyncSqliteTransport
+
+        return await AsyncSqliteTransport.create(os.environ["STM_TRANSPORT_DB"])
+    return facade.as_async_transport(build_transport())  # not-yet-ported: adapt the sync transport
+
+
+async def amain() -> None:
     definitions_dir = os.environ["STM_DEFINITIONS_DIR"]
     worker_id = os.environ.get("STM_WORKER_ID", socket.gethostname())
     visibility = float(os.environ.get("STM_VISIBILITY", "30"))
+    concurrency = int(os.environ.get("STM_CONCURRENCY", "256"))
 
-    store = build_store()
-    transport = build_transport()
-    definitions = load_definitions(definitions_dir)
+    store = await build_store_async()
+    transport = await build_transport_async()
+    definitions = load_definitions(definitions_dir)  # sync startup IO, one-time
 
-    stop = threading.Event()
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(sig, lambda *_: stop.set())
+        loop.add_signal_handler(sig, stop.set)
 
+    worker = AsyncWorker(
+        store, transport, definitions, worker_id=worker_id, visibility=visibility, concurrency=concurrency
+    )
     try:
-        Worker(store, transport, definitions, worker_id=worker_id, visibility=visibility).run(stop)
+        await worker.run(stop)
     finally:
-        store.close()
-        transport.close()
+        await store.close()
+        await transport.close()
+
+
+def main() -> None:
+    import anyio
+
+    anyio.run(amain)
 
 
 if __name__ == "__main__":
