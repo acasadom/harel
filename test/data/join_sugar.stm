@@ -3,6 +3,8 @@
 # (success iff every region succeeded), landing on a `final` terminal. This is the
 # common case the sugar replaces — no hand-written join selector.
 
+event Pass {}
+event Fail {}
 machine M {
   initial Fork
   orthogonal Fork {

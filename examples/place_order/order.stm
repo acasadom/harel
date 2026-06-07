@@ -9,6 +9,14 @@
 #
 # Delivered and Cancelled are sinks (the order is Done). Actions are literal
 # dotted paths resolved by the engine at run time.
+event PlaceOrder {}
+event PaymentAuthorized {}
+event PaymentDeclined {}
+event Picked {}
+event Packed {}
+event Dispatched {}
+event Delivered {}
+event CancelOrder {}
 machine order {
   initial Cart
 

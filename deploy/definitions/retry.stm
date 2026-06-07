@@ -1,3 +1,4 @@
+event Success {}
 machine retry {
   initial Trying
 

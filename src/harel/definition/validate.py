@@ -3,8 +3,9 @@ executing, independent of any authoring surface (YAML, the future DSL, objects).
 
 A pure pass over the immutable graph. It catches the structural defects the
 builder does not: unresolved selector targets, missing composite initials,
-non-deterministic automatic transitions, unreachable states, and — when the
-machine declares typed events — references to undeclared events or fields.
+non-deterministic automatic transitions, unreachable states, and references to
+**undeclared events** (every event a transition fires on must be declared — or be a
+reserved engine event) plus unknown event fields.
 
 Action *bugs* are out of scope (those surface at run time); this is about the
 shape of the machine being well-formed.
@@ -224,8 +225,9 @@ def _check_reachability(defn: Definition, issues: list[Issue]) -> None:
 
 
 def _check_event(node: Node, ef: EventFilter, defn: Definition, issues: list[Issue]) -> None:
-    if not defn.events:  # no declarations => event validation disabled
-        return
+    # Every referenced event must be declared (or be a RESERVED_EVENT): an undeclared
+    # event is an error, so a typo can't slip through. (Reserved engine events and
+    # automatic — eventless — transitions are exempt; the latter have no EventFilter.)
     fields = _flat_fields(ef.predicates) | {leaf.field for leaf in _tree_leaves(ef.predicate) if leaf.field}
     leaves = _flat_leaves(ef.predicates) + [
         (leaf.field, leaf.op) for leaf in _tree_leaves(ef.predicate) if leaf.field

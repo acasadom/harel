@@ -328,13 +328,16 @@ def test_op_type_mismatch_warns():
     assert "op_type_mismatch" in codes(build(cfg), "warning")
 
 
-def test_no_events_declared_skips_event_checks():
+def test_undeclared_event_is_an_error():
+    # an event referenced but not declared is an error (a typo can't slip through) —
+    # even when the machine declares no events at all.
     cfg = {
         "start": "A",
         "states": {"A": {}, "B": {"outcome": "success"}},
-        "transitions": [{"from": "A", "to": "B", "on_event": {"type": "Whatever", "any_field__eq": 1}}],
+        "transitions": [{"from": "A", "to": "B", "on_event": {"type": "Whatever"}}],
     }
-    assert codes(build(cfg), "error") == set()
+    issues = validate(build(cfg))
+    assert any(i.code == "unknown_event" and i.severity == "error" for i in issues)
 
 
 # --- event parsing ------------------------------------------------------------
@@ -371,6 +374,7 @@ def test_validate_or_raise_raises_on_error():
 def test_warnings_do_not_raise():
     cfg = {
         "start": "A",
+        "events": {"Ping": {}},
         "states": {"A": {}, "Island": {"outcome": "success"}},
         "transitions": [{"from": "A", "to": "A", "on_event": {"type": "Ping"}}],
     }

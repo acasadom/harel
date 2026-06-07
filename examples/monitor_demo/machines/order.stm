@@ -1,6 +1,10 @@
 # Demo machine for the monitor TUI: a hierarchical order lifecycle (a composite
 # Checkout with its own sub-states), so the statechart tree shows real depth.
 
+event Checkout {}
+event Paid {}
+event Ship {}
+event Deliver {}
 machine Order {
   initial Cart
   state Cart {}

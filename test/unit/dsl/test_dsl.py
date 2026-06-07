@@ -76,7 +76,8 @@ def test_unbound_handler_raises():
 
 def test_final_sugar_parses_terminal_with_outcome():
     defn = definition_from_dsl(
-        "machine M { initial A  state A {}  final Done success  final Boom failed { on exit p.q }"
+        "event Ok {}  event Bad {}  machine M { initial A  state A {}  final Done success"
+        "  final Boom failed { on exit p.q }"
         "  from A to Done on Ok  from A to Boom on Bad }",
         "M",
     )
@@ -557,3 +558,14 @@ def test_validate_flag_raises_on_defect():
     text = "machine M { initial A  state A {}  state B {}  state C {}  from A to B  from A to C }"
     with pytest.raises(ValidationError):
         definition_from_dsl(text, "M", validate=True)
+
+
+def test_undeclared_event_fails_validation():
+    # an event used in a transition but never declared is a validation error
+    text = "machine M { initial A  state A {}  final Done success  from A to Done on Go }"
+    with pytest.raises(ValidationError) as ei:
+        definition_from_dsl(text, "M", validate=True)
+    assert any(i.code == "unknown_event" for i in ei.value.issues)
+    # declaring it makes the machine valid
+    ok = definition_from_dsl("event Go {}  " + text, "M", validate=True)
+    assert ok.id == "M"
