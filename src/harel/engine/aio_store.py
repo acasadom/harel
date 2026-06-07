@@ -11,7 +11,8 @@ The data classes (`OutboxEntry`/`SpawnEntry`/`TimerOp`/`StoreConflict`) are reus
 
 from __future__ import annotations
 
-from typing import Optional, Protocol, runtime_checkable
+import json
+from typing import Any, Optional, Protocol, runtime_checkable
 
 from harel.engine.execution import Execution
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
@@ -126,3 +127,116 @@ class AsyncDictStore:
 
     async def close(self) -> None:
         pass
+
+
+class AsyncRedisStore:
+    """Async mirror of `RedisStore` over `redis.asyncio`: version-CAS via WATCH/MULTI/EXEC
+    (no Lua, so fakeredis.aioredis works), transactional outbox in a hash, dedupe in a set,
+    timers in a sorted set. The client is injected (duck-typed)."""
+
+    def __init__(self, client: Any, prefix: str = "stm") -> None:
+        from redis.exceptions import WatchError
+
+        self._r = client
+        self._prefix = prefix
+        self._WatchError = WatchError
+
+    @classmethod
+    def from_url(cls, url: str, prefix: str = "stm") -> "AsyncRedisStore":
+        import redis.asyncio as aioredis
+
+        return cls(aioredis.Redis.from_url(url), prefix)
+
+    def _k(self, suffix: str) -> str:
+        return f"{self._prefix}:{suffix}"
+
+    async def load(self, execution_id: str) -> Optional[Execution]:
+        raw = await self._r.get(self._k(f"exe:{execution_id}"))
+        return Execution.model_validate_json(raw) if raw is not None else None
+
+    async def save(self, exe: Execution) -> None:
+        await self.commit(exe, [])
+
+    async def commit(
+        self,
+        exe: Execution,
+        emits: list[tuple[Optional[str], Event]],
+        processed_event_id: Optional[str] = None,
+        timers: tuple[TimerOp, ...] = (),
+        spawns: tuple[tuple[str, str, dict], ...] = (),
+    ) -> None:
+        queued = [(int(await self._r.incr(self._k("outbox:seq"))), t, e.model_dump_json()) for t, e in emits]
+        queued_spawns = [
+            (int(await self._r.incr(self._k("spawns:seq"))), cid, rp, ctx) for cid, rp, ctx in spawns
+        ]
+        key = self._k(f"exe:{exe.id}")
+        old = exe.version
+        async with self._r.pipeline() as pipe:
+            try:
+                await pipe.watch(key)
+                current = await pipe.get(key)
+                cur_version = json.loads(current)["version"] if current is not None else None
+                if not (current is None and old == 0) and cur_version != old:
+                    await pipe.unwatch()
+                    raise StoreConflict(exe.id, expected=old, found=cur_version)
+                exe.version = old + 1
+                pipe.multi()
+                pipe.set(key, exe.model_dump_json())
+                for seq, target_id, event_json in queued:
+                    pipe.hset(self._k("outbox"), str(seq), json.dumps({"t": target_id, "e": event_json}))
+                if processed_event_id is not None:
+                    pipe.sadd(self._k(f"processed:{exe.id}"), processed_event_id)
+                for seq, cid, rp, ctx in queued_spawns:
+                    pipe.hset(
+                        self._k("spawns"), str(seq), json.dumps({"p": exe.id, "c": cid, "r": rp, "x": ctx})
+                    )
+                for op in timers:
+                    member = f"{exe.id}\x00{op.path}"
+                    if op.action == "schedule":
+                        pipe.zadd(self._k("timers"), {member: op.fire_at})
+                    else:
+                        pipe.zrem(self._k("timers"), member)
+                await pipe.execute()
+            except self._WatchError:
+                exe.version = old
+                raise StoreConflict(exe.id, expected=old, found=None)
+
+    async def is_processed(self, execution_id: str, event_id: str) -> bool:
+        return bool(await self._r.sismember(self._k(f"processed:{execution_id}"), event_id))
+
+    async def pending_spawns(self) -> list[SpawnEntry]:
+        entries = []
+        for seq_raw, val_raw in (await self._r.hgetall(self._k("spawns"))).items():
+            p = json.loads(val_raw)
+            entries.append(SpawnEntry(int(seq_raw), p["p"], p["c"], p["r"], p["x"]))
+        return sorted(entries, key=lambda s: s.seq)
+
+    async def ack_spawn(self, seq: int) -> None:
+        await self._r.hdel(self._k("spawns"), str(seq))
+
+    async def pending_outbox(self) -> list[OutboxEntry]:
+        entries = []
+        for seq_raw, val_raw in (await self._r.hgetall(self._k("outbox"))).items():
+            payload = json.loads(val_raw)
+            entries.append(OutboxEntry(int(seq_raw), payload["t"], Event.model_validate_json(payload["e"])))
+        return sorted(entries, key=lambda e: e.seq)
+
+    async def ack_outbox(self, seq: int) -> None:
+        await self._r.hdel(self._k("outbox"), str(seq))
+
+    async def due_timers(self, now: float) -> list[tuple[str, str, float]]:
+        out: list[tuple[str, str, float]] = []
+        for member_raw, score in await self._r.zrangebyscore(self._k("timers"), "-inf", now, withscores=True):
+            member = member_raw.decode() if isinstance(member_raw, (bytes, bytearray)) else member_raw
+            execution_id, _, path = member.partition("\x00")
+            out.append((execution_id, path, float(score)))
+        return out
+
+    async def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None:
+        member = f"{execution_id}\x00{path}"
+        score = await self._r.zscore(self._k("timers"), member)
+        if score is not None and float(score) == fire_at:
+            await self._r.zrem(self._k("timers"), member)
+
+    async def close(self) -> None:
+        await self._r.aclose()
