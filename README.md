@@ -204,8 +204,12 @@ make type-check         # mypy
 
 ## The name
 
-Named after **David Harel**, who introduced statecharts in 1987 — the formalism this engine
-makes durable and distributed.
+Named after **David Harel**, who introduced statecharts in his 1987 paper *Statecharts: A
+Visual Formalism for Complex Systems*
+([author's PDF](https://www.wisdom.weizmann.ac.il/~harel/papers/Statecharts.pdf) ·
+[mirror](https://dubroy.com/refs/Statecharts_a_visual_formalism_for_complex_systems.pdf) ·
+[DOI](https://doi.org/10.1016/0167-6423\(87\)90035-9)) — the formalism this engine makes
+durable and distributed, in his honour.
 
 ## License
 
