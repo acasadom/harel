@@ -40,7 +40,7 @@ docker compose -f deploy/docker-compose.yml down -v   # -v drops the state volum
 Scale workers with `--scale worker=N`. Tail logs with
 `docker compose -f deploy/docker-compose.yml logs -f worker`.
 
-### Store backend: sqlite, redis, postgres, rqlite, mongo, or surrealdb
+### Store backend: sqlite, redis, postgres, rqlite, mongo, surrealdb, or dynamodb
 
 `STM_STORE_BACKEND` selects the durable store (default `sqlite`, the shared
 volume above). The others are **all-network** (no shared filesystem); bring up
@@ -68,11 +68,17 @@ STM_STORE_BACKEND=mongo docker compose -f deploy/docker-compose.yml run --rm tes
 # with a THROW-gated version CAS (closest to the postgres backend).
 STM_STORE_BACKEND=surrealdb docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 redis surrealdb worker
 STM_STORE_BACKEND=surrealdb docker compose -f deploy/docker-compose.yml run --rm test
+
+# dynamodb (AWS serverless, on localstack): conditional writes are the CAS and
+# TransactWriteItems makes the commit atomic. Pairs with the sqs transport for an
+# all-AWS stack. No AWS account needed.
+STM_STORE_BACKEND=dynamodb docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 redis localstack worker
+STM_STORE_BACKEND=dynamodb docker compose -f deploy/docker-compose.yml run --rm test
 ```
 
 sqlite = single machine (or one host's containers); redis / postgres / rqlite /
-mongo / surrealdb = distributed across machines. Same engine, workers and test
-for all of them. The
+mongo / surrealdb / dynamodb = distributed across machines. Same engine, workers
+and test for all of them. The
 test service runs `pytest -m stack`, so the contract tests for the active backend
 run against the real service.
 
@@ -104,6 +110,12 @@ STM_STORE_BACKEND=mongo STM_TRANSPORT_BACKEND=mongo \
 STM_TRANSPORT_BACKEND=sqs \
   docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 localstack worker
 STM_TRANSPORT_BACKEND=sqs docker compose -f deploy/docker-compose.yml run --rm test
+
+# all-AWS serverless: DynamoDB store + SQS transport, both on localstack, no Redis.
+STM_STORE_BACKEND=dynamodb STM_TRANSPORT_BACKEND=sqs \
+  docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 localstack worker
+STM_STORE_BACKEND=dynamodb STM_TRANSPORT_BACKEND=sqs \
+  docker compose -f deploy/docker-compose.yml run --rm test
 ```
 
 Store and transport are independent: mix them (e.g. `STM_STORE_BACKEND=postgres`

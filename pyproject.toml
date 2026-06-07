@@ -40,6 +40,9 @@ mongo = ["pymongo>=4,<5"]
 surrealdb = ["surrealdb>=2,<3"]
 # the SqsTransport backend (AWS SQS FIFO; works against LocalStack with no AWS account)
 sqs = ["boto3>=1.26"]
+# the DynamoDBStore backend (AWS serverless; pairs with sqs for an all-AWS stack;
+# works against LocalStack / moto with no AWS account — tests use moto from dev)
+dynamodb = ["boto3>=1.26"]
 # the DSL language server (editor diagnostics over parse() + validate()); the
 # VSCode extension in editor/vscode/ launches `python -m harel.lsp`
 lsp = ["pygls>=1.3,<2"]
@@ -61,6 +64,7 @@ dev = [
     "mongomock>=4.1",
     "pygls>=1.3,<2",
     "surrealdb>=2.0.0",
+    "moto>=5.2.1",
 ]
 
 [build-system]
