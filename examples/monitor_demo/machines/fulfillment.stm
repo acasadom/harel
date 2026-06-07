@@ -1,0 +1,22 @@
+# Demo machine for the monitor TUI: an orthogonal (AND-state) fulfillment with two
+# concurrent regions, so the tree shows region annotations (finished/outcome) at the join.
+
+machine Fulfillment {
+  initial Fork
+  orthogonal Fork {
+    state Picking {
+      initial P1
+      state P1 {}
+      final P2 success
+      from P1 to P2 on Picked
+    }
+    state Billing {
+      initial B1
+      state B1 {}
+      final B2 success
+      from B1 to B2 on Billed
+    }
+  }
+  final Done success
+  from Fork to Done
+}

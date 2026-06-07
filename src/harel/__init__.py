@@ -11,10 +11,11 @@ from harel.definition.validate import Issue, ValidationError, validate, validate
 from harel.dsl import DslError, definition_from_dsl, definition_from_dsl_file
 from harel.dsl.resolve import FileResolver, ModuleResolver, SourceResolver
 from harel.engine.durable import DurableRunner
-from harel.engine.execution import Execution
+from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary
 from harel.engine.resolve import DictResolver, MachineResolver, ResolveError
 from harel.engine.runtime import Driver
 from harel.engine.store import DictStore, ExecutionStore, SqliteStore
+from harel.faas import handler, http_action, lambda_action, openfaas_action, remote_action
 from harel.idempotency import DictIdempotency, IdempotencyBackend, idempotent
 from harel.spec.states import Action, Event, EventFilter, LogEvent, Selector, Transition
 from harel.viz.plantuml import render
@@ -35,6 +36,8 @@ __all__ = [
     "Issue",
     "ValidationError",
     "Execution",
+    "ExecutionSummary",
+    "ExecutionPage",
     "Driver",
     "DurableRunner",
     "ExecutionStore",
@@ -49,4 +52,9 @@ __all__ = [
     "idempotent",
     "IdempotencyBackend",
     "DictIdempotency",
+    "lambda_action",
+    "http_action",
+    "openfaas_action",
+    "remote_action",
+    "handler",
 ]

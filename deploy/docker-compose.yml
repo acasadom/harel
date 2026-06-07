@@ -36,7 +36,11 @@ services:
   localstack:
     image: localstack/localstack:4.14
     environment:
-      SERVICES: sqs,dynamodb
+      SERVICES: sqs,dynamodb,lambda
+    volumes:
+      # LocalStack runs each Lambda (zip) in a container it launches on the HOST
+      # docker daemon, so it needs the socket. (Image packaging is Pro; we use zip.)
+      - /var/run/docker.sock:/var/run/docker.sock
 
 
   worker:
@@ -95,8 +99,15 @@ services:
       STM_SQS_ENDPOINT: http://localstack:4566
       STM_DYNAMODB_ENDPOINT: http://localstack:4566
       STM_AWS_REGION: us-east-1
+      # the FaaS Lambda stack test (test_faas_lambda.py): the LocalStack lambda
+      # endpoint + the zip built by the Dockerfile.lambda export target. Unset (or a
+      # missing zip) => that test skips.
+      STM_LAMBDA_ENDPOINT: http://localstack:4566
+      STM_LAMBDA_ZIP: /app/deploy/build/function.zip
     volumes:
       - state:/state
+      # the prebuilt Lambda zip (docker build --target export --output deploy/build ..)
+      - ./build:/app/deploy/build:ro
     command: ["uv", "run", "pytest", "-m", "stack", "-v"]
 
 volumes:

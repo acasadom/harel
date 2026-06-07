@@ -1,0 +1,32 @@
+# Build a ZIP-packaged Lambda deployment for the FaaS stack test. LocalStack
+# *community* supports zip Lambdas but not image packaging (that's Pro), so we can't
+# just hand it our image — we install harel + its deps onto the official Lambda base
+# (so pydantic-core's compiled wheel matches the AL2023 runtime LocalStack runs the
+# zip in) and zip that up. Build context = the repo root. Export the zip to the host:
+#
+#   docker build --platform=linux/amd64 -f deploy/Dockerfile.lambda \
+#       --target export --output deploy/build .
+#
+# -> deploy/build/function.zip, which test/integration/test_faas_lambda.py uploads.
+#
+# Build it with `--platform=linux/amd64` (in the command above) so pydantic-core's
+# compiled wheel matches the x86_64 Lambda the test creates — deterministic on any
+# build host (an arm64 mac emulates it). The function MUST be created with
+# Architectures=['x86_64'] to match (the test does).
+FROM public.ecr.aws/lambda/python:3.13 AS build
+WORKDIR /build
+
+# README.md + LICENSE are required by the hatchling metadata (readme / license-files)
+COPY pyproject.toml README.md LICENSE ./
+COPY src ./src
+COPY deploy/faas_function.py ./
+
+# install harel + runtime deps into ./package, drop the handler module beside them,
+# and zip the package root (the Lambda deployment layout: handler + deps at the top)
+RUN pip install --no-cache-dir . -t package \
+ && cp faas_function.py package/ \
+ && python -c "import shutil; shutil.make_archive('/build/function', 'zip', 'package')"
+
+# export stage: `--output` writes just the zip to the host (no image kept)
+FROM scratch AS export
+COPY --from=build /build/function.zip /
