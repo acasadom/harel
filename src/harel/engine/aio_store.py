@@ -11,6 +11,7 @@ The data classes (`OutboxEntry`/`SpawnEntry`/`TimerOp`/`StoreConflict`) are reus
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, Optional, Protocol, runtime_checkable
 
@@ -760,3 +761,82 @@ class AsyncSurrealStore:
 
     async def close(self) -> None:
         await self._db.close()
+
+
+class AsyncDynamoDBStore:
+    """Async mirror of `DynamoDBStore`: each boto3 call runs in `asyncio.to_thread` so it
+    does not block the event loop. boto3 clients are thread-safe; moto's `mock_aws` patches
+    at the botocore level (process-wide) so it works in threads too — tests need no server.
+    Build with `await AsyncDynamoDBStore.create(...)` or inject an existing boto3 client via
+    the constructor (which calls `_ensure_tables` synchronously on construction)."""
+
+    def __init__(self, client: Any, prefix: str = "harel") -> None:
+        from harel.engine.store import DynamoDBStore
+
+        self._sync = DynamoDBStore(client, prefix)
+
+    @classmethod
+    async def create(
+        cls,
+        endpoint_url: Optional[str] = None,
+        region: str = "us-east-1",
+        prefix: str = "harel",
+        connect_retries: int = 30,
+        retry_delay: float = 1.0,
+    ) -> "AsyncDynamoDBStore":
+        from harel.engine.store import DynamoDBStore
+
+        sync = await asyncio.to_thread(
+            DynamoDBStore.create,
+            endpoint_url=endpoint_url,
+            region=region,
+            prefix=prefix,
+            connect_retries=connect_retries,
+            retry_delay=retry_delay,
+        )
+        inst = cls.__new__(cls)
+        inst._sync = sync
+        return inst
+
+    async def load(self, execution_id: str) -> Optional[Execution]:
+        return await asyncio.to_thread(self._sync.load, execution_id)
+
+    async def save(self, exe: Execution) -> None:
+        await asyncio.to_thread(self._sync.save, exe)
+
+    async def commit(
+        self,
+        exe: Execution,
+        emits: list[tuple[Optional[str], Event]],
+        processed_event_id: Optional[str] = None,
+        timers: tuple[TimerOp, ...] = (),
+        spawns: tuple[tuple[str, str, dict], ...] = (),
+    ) -> None:
+        await asyncio.to_thread(
+            self._sync.commit, exe, emits,
+            processed_event_id=processed_event_id, timers=timers, spawns=spawns,
+        )
+
+    async def is_processed(self, execution_id: str, event_id: str) -> bool:
+        return await asyncio.to_thread(self._sync.is_processed, execution_id, event_id)
+
+    async def pending_outbox(self) -> list[OutboxEntry]:
+        return await asyncio.to_thread(self._sync.pending_outbox)
+
+    async def ack_outbox(self, seq: int) -> None:
+        await asyncio.to_thread(self._sync.ack_outbox, seq)
+
+    async def pending_spawns(self) -> list[SpawnEntry]:
+        return await asyncio.to_thread(self._sync.pending_spawns)
+
+    async def ack_spawn(self, seq: int) -> None:
+        await asyncio.to_thread(self._sync.ack_spawn, seq)
+
+    async def due_timers(self, now: float) -> list[tuple[str, str, float]]:
+        return await asyncio.to_thread(self._sync.due_timers, now)
+
+    async def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None:
+        await asyncio.to_thread(self._sync.delete_timer, execution_id, path, fire_at)
+
+    async def close(self) -> None:
+        await asyncio.to_thread(self._sync.close)

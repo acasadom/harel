@@ -9,6 +9,7 @@ backends (sqlite/redis/postgres) are added in later phases. `Lease` is reused as
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from typing import Any, Callable, Optional, Protocol, runtime_checkable
@@ -446,3 +447,54 @@ class AsyncSurrealTransport:
 
     async def close(self) -> None:
         await self._db.close()
+
+
+class AsyncSqsTransport:
+    """Async mirror of `SqsTransport`: each boto3 SQS call runs in `asyncio.to_thread`
+    so it does not block the event loop. SQS FIFO semantics (per-group exclusivity via
+    `MessageGroupId`, `ReceiptHandle` as the lease) are unchanged. boto3 clients are
+    thread-safe; moto's `mock_aws` works in threads — tests need no server.
+    Build with `await AsyncSqsTransport.create(endpoint_url, ...)` or inject a client."""
+
+    def __init__(self, client: Any, queue_url: str, wait_seconds: int = 1) -> None:
+        from harel.engine.transport import SqsTransport
+
+        self._sync = SqsTransport(client, queue_url, wait_seconds)
+
+    @classmethod
+    async def create(
+        cls,
+        endpoint_url: str,
+        queue_name: str = "stm.fifo",
+        region: str = "us-east-1",
+        connect_retries: int = 30,
+        retry_delay: float = 1.0,
+    ) -> "AsyncSqsTransport":
+        from harel.engine.transport import SqsTransport
+
+        sync = await asyncio.to_thread(
+            SqsTransport.create,
+            endpoint_url=endpoint_url,
+            queue_name=queue_name,
+            region=region,
+            connect_retries=connect_retries,
+            retry_delay=retry_delay,
+        )
+        inst = cls.__new__(cls)
+        inst._sync = sync
+        return inst
+
+    async def publish(self, group_id: str, event: Event) -> None:
+        await asyncio.to_thread(self._sync.publish, group_id, event)
+
+    async def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
+        return await asyncio.to_thread(self._sync.claim, worker_id, visibility)
+
+    async def ack(self, lease: Lease) -> None:
+        await asyncio.to_thread(self._sync.ack, lease)
+
+    async def nack(self, lease: Lease, delay: float = 0.0) -> None:
+        await asyncio.to_thread(self._sync.nack, lease, delay)
+
+    async def close(self) -> None:
+        await asyncio.to_thread(self._sync.close)
