@@ -765,3 +765,127 @@ class MongoTransport:
 
     def close(self) -> None:
         self._client.close()
+
+
+class SurrealTransport:
+    """`Transport` over SurrealDB — a multi-machine queue with no Redis. Like
+    `MongoTransport`, the per-group exclusivity is a **per-group lock record**
+    (SurrealDB has no native message groups). Acquiring the lock is one atomic
+    server-side `BEGIN … COMMIT` block: it `THROW`s (aborting the txn) if the
+    lock is still live, so a collision means "held by another worker" (skip);
+    otherwise it upserts the lock. The lock's `lock_expiry` is the lease — a
+    crashed worker's lock expires and the group becomes claimable again.
+
+    `messages` is the FIFO (one record per message, monotonic `seq`); `claim`
+    walks the groups ordered by their oldest message, takes the first whose lock
+    is free, and returns its head without removing it; `ack` (lock still owned)
+    deletes the message + releases; `nack` releases (or, with `delay>0`, extends
+    the lock = park). The client is injected (an already-connected `Surreal`), so
+    `surrealdb` is an optional extra and tests use the in-process `mem://` engine.
+    NOTE: like the other lease backends, a lock that expires mid-ack can let two
+    workers touch one group; the store's version/CAS is the backstop."""
+
+    def __init__(self, client: Any, clock: Callable[[], float] = time.time) -> None:
+        from surrealdb import SurrealError
+
+        self._db = client
+        self._SurrealError = SurrealError
+        self._clock = clock
+
+    @classmethod
+    def from_url(
+        cls,
+        url: str,
+        namespace: str = "harel",
+        database: str = "harel",
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        connect_retries: int = 30,
+        retry_delay: float = 1.0,
+    ) -> "SurrealTransport":
+        import time as _time
+
+        from surrealdb import Surreal
+
+        last: Exception | None = None
+        for _ in range(connect_retries):
+            try:
+                client: Any = Surreal(url)
+                client.connect()
+                if username is not None:
+                    client.signin({"username": username, "password": password})
+                client.use(namespace, database)
+                client.query("INFO FOR DB")
+                return cls(client)
+            except Exception as exc:  # noqa: BLE001 — retry any connect-time failure
+                last = exc
+                _time.sleep(retry_delay)
+        raise last if last is not None else RuntimeError("surreal connect failed")
+
+    def _next_seq(self) -> int:
+        res = self._db.query("UPSERT counter:msg SET v = (v ?? 0) + 1 RETURN v")
+        return int(res[0]["v"])
+
+    def publish(self, group_id: str, event: Event) -> None:
+        self._db.query(
+            "CREATE messages SET seq=$s, group_id=$g, event=$e",
+            {"s": self._next_seq(), "g": group_id, "e": event.model_dump_json()},
+        )
+
+    _ACQUIRE = (
+        "BEGIN;\n"
+        "LET $l = (SELECT id FROM type::thing('locks',$g) WHERE lock_expiry > $now);\n"
+        "IF array::len($l) > 0 { THROW 'held' };\n"
+        "UPSERT type::thing('locks',$g) SET token=$tok, lock_expiry=$exp;\n"
+        "COMMIT;"
+    )
+
+    def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
+        now = self._clock()
+        groups = self._db.query(
+            "SELECT group_id, math::min(seq) AS head FROM messages GROUP BY group_id ORDER BY head ASC"
+        )
+        for g in groups:
+            group_id = g["group_id"]
+            token = f"{worker_id}:{uuid.uuid4().hex}"
+            try:
+                self._db.query(
+                    self._ACQUIRE, {"g": group_id, "now": now, "tok": token, "exp": now + visibility}
+                )
+            except self._SurrealError:
+                continue  # held by another worker
+            head = self._db.query(
+                "SELECT seq, event FROM messages WHERE group_id=$g ORDER BY seq ASC LIMIT 1", {"g": group_id}
+            )
+            if not head:
+                self._db.query("DELETE type::thing('locks',$g)", {"g": group_id})  # stale group, release
+                continue
+            row = head[0]
+            return Lease(row["seq"], group_id, Event.model_validate_json(row["event"]), token=token)
+        return None
+
+    def _owns(self, group_id: str, token: str) -> bool:
+        res = self._db.query("SELECT token FROM type::thing('locks',$g)", {"g": group_id})
+        return bool(res) and res[0].get("token") == token
+
+    def ack(self, lease: Lease) -> None:
+        if not self._owns(lease.group_id, lease.token):
+            return  # fencing: only the current lock holder removes + releases
+        self._db.query("DELETE messages WHERE seq=$s", {"s": lease.seq})
+        self._db.query("DELETE type::thing('locks',$g)", {"g": lease.group_id})
+
+    def nack(self, lease: Lease, delay: float = 0.0) -> None:
+        if not self._owns(lease.group_id, lease.token):
+            return
+        if delay > 0:
+            # park: keep the lock held for `delay` so the still-present head is not
+            # re-claimed until it expires
+            self._db.query(
+                "UPDATE type::thing('locks',$g) SET lock_expiry=$exp",
+                {"g": lease.group_id, "exp": self._clock() + delay},
+            )
+        else:
+            self._db.query("DELETE type::thing('locks',$g)", {"g": lease.group_id})
+
+    def close(self) -> None:
+        self._db.close()

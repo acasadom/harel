@@ -4,13 +4,16 @@ Configured entirely by environment variables so it runs as a docker-compose
 service scaled to N replicas (each replica is one `Worker` loop):
 
     STM_REDIS_URL        redis URL for the transport (the queue)
-    STM_STORE_BACKEND    "sqlite" (default), "redis", "postgres", "rqlite", or "mongo" for the store
+    STM_STORE_BACKEND    "sqlite" (default), "redis", "postgres", "rqlite", "mongo", "surrealdb" (store)
     STM_STORE_DB         sqlite file for the store        (sqlite backend; a shared volume)
     STM_STORE_REDIS_URL  redis URL for the store, defaults to STM_REDIS_URL (redis backend)
     STM_POSTGRES_DSN     postgres DSN for the store       (postgres backend)
     STM_RQLITE_URL       rqlite HTTP base URL for the store (rqlite backend)
     STM_MONGO_URL        mongodb URL for the store/transport (mongo backend)
     STM_MONGO_DB         mongodb database name (mongo backend; default "harel")
+    STM_SURREAL_URL      surrealdb URL for the store/transport (surrealdb backend)
+    STM_SURREAL_NS       surrealdb namespace (default "harel"); STM_SURREAL_DB database (default "harel")
+    STM_SURREAL_USER     surrealdb username (optional); STM_SURREAL_PASS password
     STM_SQS_ENDPOINT     SQS endpoint URL (e.g. LocalStack) for the sqs transport
     STM_SQS_QUEUE        SQS FIFO queue name (default stm.fifo)
     STM_DEFINITIONS_DIR  directory of *.stm machine files = the Definition registry
@@ -33,6 +36,7 @@ import signal
 import socket
 import threading
 from pathlib import Path
+from typing import Any
 
 from harel.definition.model import Definition
 from harel.definition.validate import ValidationError
@@ -46,6 +50,7 @@ from harel.engine.store import (
     RedisStore,
     RqliteStore,
     SqliteStore,
+    SurrealStore,
 )
 from harel.engine.transport import (
     MongoTransport,
@@ -54,6 +59,7 @@ from harel.engine.transport import (
     RqliteTransport,
     SqliteTransport,
     SqsTransport,
+    SurrealTransport,
     Transport,
 )
 
@@ -76,7 +82,7 @@ def load_definitions(definitions_dir: str) -> dict[str, Definition]:
 
 def build_store() -> ExecutionStore:
     """Build the durable store from STM_STORE_BACKEND (sqlite | redis | postgres |
-    rqlite | mongo)."""
+    rqlite | mongo | surrealdb)."""
     backend = os.environ.get("STM_STORE_BACKEND", "sqlite")
     if backend == "sqlite":
         return SqliteStore(os.environ["STM_STORE_DB"])
@@ -88,13 +94,30 @@ def build_store() -> ExecutionStore:
         return RqliteStore.from_url(os.environ["STM_RQLITE_URL"])
     if backend == "mongo":
         return MongoStore.from_url(os.environ["STM_MONGO_URL"], os.environ.get("STM_MONGO_DB", "harel"))
+    if backend == "surrealdb":
+        return SurrealStore.from_url(**_surreal_kwargs())
     raise ValueError(f"unknown STM_STORE_BACKEND: {backend}")
+
+
+def _surreal_kwargs() -> dict[str, Any]:
+    """SurrealDB connection params from the environment (shared by store/transport):
+    STM_SURREAL_URL + namespace/database + optional auth."""
+    kwargs: dict[str, Any] = {
+        "url": os.environ["STM_SURREAL_URL"],
+        "namespace": os.environ.get("STM_SURREAL_NS", "harel"),
+        "database": os.environ.get("STM_SURREAL_DB", "harel"),
+    }
+    user = os.environ.get("STM_SURREAL_USER")
+    if user is not None:
+        kwargs["username"] = user
+        kwargs["password"] = os.environ.get("STM_SURREAL_PASS", "")
+    return kwargs
 
 
 def build_transport() -> Transport:
     """Build the event transport from STM_TRANSPORT_BACKEND (redis | postgres |
-    rqlite | sqlite | mongo | sqs). Default redis; postgres/rqlite/mongo give a
-    no-Redis stack (one backend can serve both store and transport)."""
+    rqlite | sqlite | mongo | surrealdb | sqs). Default redis; postgres/rqlite/
+    mongo/surrealdb give a no-Redis stack (one backend serves store + transport)."""
     backend = os.environ.get("STM_TRANSPORT_BACKEND", "redis")
     if backend == "redis":
         return RedisTransport.from_url(os.environ["STM_REDIS_URL"])
@@ -106,6 +129,8 @@ def build_transport() -> Transport:
         return SqliteTransport(os.environ["STM_TRANSPORT_DB"])
     if backend == "mongo":
         return MongoTransport.from_url(os.environ["STM_MONGO_URL"], os.environ.get("STM_MONGO_DB", "harel"))
+    if backend == "surrealdb":
+        return SurrealTransport.from_url(**_surreal_kwargs())
     if backend == "sqs":
         return SqsTransport.create(
             os.environ["STM_SQS_ENDPOINT"], os.environ.get("STM_SQS_QUEUE", "stm.fifo")

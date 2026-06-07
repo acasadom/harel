@@ -18,10 +18,11 @@ running. Backends:
 | `PostgresTransport` | `pg_advisory_xact_lock` serializing claims |
 | `RqliteTransport` | queue table on Raft-replicated SQLite |
 | `MongoTransport` | per-group lock document (atomic-upsert lock-as-lease) |
+| `SurrealTransport` | per-group lock record (atomic `BEGIN…COMMIT` + THROW lock-as-lease) |
 | `SqsTransport` | SQS FIFO `MessageGroupId` (runs on LocalStack) |
 
 Store and transport are **independent** — mix freely, or unify on one backend (all-Postgres,
-all-rqlite, all-Mongo: no Redis needed).
+all-rqlite, all-Mongo, all-SurrealDB: no Redis needed).
 
 ## Running with workers
 

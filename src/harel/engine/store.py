@@ -1100,3 +1100,206 @@ class MongoStore:
 
     def close(self) -> None:
         self._client.close()
+
+
+class SurrealStore:
+    """A durable `ExecutionStore` over SurrealDB (the `surrealdb` SDK) — a
+    multi-model database with real ACID transactions, so this is structurally the
+    closest sibling of `PostgresStore`: separate tables (`executions`/`outbox`/
+    `spawns`/`timers`/`processed`) and the whole `commit` is one transaction.
+
+    SurrealDB's embedded connections (and HTTP) do NOT support the client-side
+    session transaction API (`begin()`/`commit()` are WebSocket-only), so the
+    atomic `commit` is sent as a **single server-side `BEGIN … COMMIT` block** in
+    one `query()` — which works on every connection, including the in-process
+    `mem://` engine the unit tests use. The version CAS is gated inside the block:
+    the Execution upsert runs `WHERE version = old` and a `THROW` aborts (rolls
+    back) the whole transaction when it matches nothing, so a stale write never
+    leaks its outbox/spawns/timers. A `THROW` surfaces as a SurrealDB error; we
+    re-read the version to tell a genuine conflict from a real error.
+
+    The client is injected (duck-typed, an already-connected `Surreal`), so
+    `surrealdb` stays an optional dependency. Records use deterministic ids
+    (`type::thing(...)`) so re-entry replaces: composite `[execution_id, path]`
+    for timers and `[execution_id, event_id]` for the dedupe set."""
+
+    def __init__(self, client: Any) -> None:
+        from surrealdb import SurrealError
+
+        self._db = client
+        self._SurrealError = SurrealError
+
+    @classmethod
+    def from_url(
+        cls,
+        url: str,
+        namespace: str = "harel",
+        database: str = "harel",
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        connect_retries: int = 30,
+        retry_delay: float = 1.0,
+    ) -> "SurrealStore":
+        """Connect a blocking `Surreal` client, retrying so a worker starting
+        alongside SurrealDB (compose) waits rather than crashing. `username`/
+        `password` sign in (a real server); `mem://` needs no auth."""
+        import time
+
+        from surrealdb import Surreal
+
+        last: Exception | None = None
+        for _ in range(connect_retries):
+            try:
+                client: Any = Surreal(url)
+                client.connect()
+                if username is not None:
+                    client.signin({"username": username, "password": password})
+                client.use(namespace, database)
+                client.query("INFO FOR DB")  # smoke check the connection is live
+                return cls(client)
+            except Exception as exc:  # noqa: BLE001 — retry any connect-time failure
+                last = exc
+                time.sleep(retry_delay)
+        raise last if last is not None else RuntimeError("surreal connect failed")
+
+    def _next_seq(self, name: str, count: int) -> int:
+        """Reserve `count` monotonic ids from the `name` counter; return the first.
+        A block wasted by a later-aborted commit is harmless (gaps are fine)."""
+        res = self._db.query(
+            "UPSERT type::thing('counter',$n) SET v = (v ?? 0) + $k RETURN v", {"n": name, "k": count}
+        )
+        return int(res[0]["v"]) - count + 1
+
+    def load(self, execution_id: str) -> Optional[Execution]:
+        res = self._db.query("SELECT data FROM type::thing('executions',$id)", {"id": execution_id})
+        return Execution.model_validate_json(res[0]["data"]) if res else None
+
+    def save(self, exe: Execution) -> None:
+        self.commit(exe, [])
+
+    def commit(
+        self,
+        exe: Execution,
+        emits: list[tuple[Optional[str], Event]],
+        processed_event_id: Optional[str] = None,
+        timers: tuple[TimerOp, ...] = (),
+        spawns: tuple[tuple[str, str, dict], ...] = (),
+    ) -> None:
+        # allocate monotonic seqs up front (a seq wasted by a lost CAS is harmless)
+        outbox: list[dict] = []
+        if emits:
+            base = self._next_seq("outbox", len(emits))
+            outbox = [
+                {"seq": base + i, "target_id": t, "event": e.model_dump_json()}
+                for i, (t, e) in enumerate(emits)
+            ]
+        spawn: list[dict] = []
+        if spawns:
+            base = self._next_seq("spawn", len(spawns))
+            spawn = [
+                {"seq": base + i, "child_id": cid, "root_path": rp, "context": json.dumps(ctx)}
+                for i, (cid, rp, ctx) in enumerate(spawns)
+            ]
+
+        old = exe.version
+        exe.version = old + 1
+        data = exe.model_dump_json()
+
+        # one server-side BEGIN…COMMIT block: the CAS-gated Execution upsert (a THROW
+        # aborts the whole txn on a stale write) plus all the side writes
+        stmts = [
+            "BEGIN",
+            "LET $cur = (SELECT version FROM type::thing('executions',$id))",
+            "IF array::len($cur) == 0 { "
+            "IF $ov != 0 { THROW 'conflict' }; "
+            "CREATE type::thing('executions',$id) SET data=$data, version=$nv, definition_id=$def; "
+            "} ELSE { "
+            "LET $u = (UPDATE type::thing('executions',$id) SET data=$data, version=$nv "
+            "WHERE version=$ov RETURN AFTER); "
+            "IF array::len($u) == 0 { THROW 'conflict' }; }",
+        ]
+        bind: dict[str, Any] = {
+            "id": exe.id,
+            "ov": old,
+            "nv": exe.version,
+            "data": data,
+            "def": exe.definition_id,
+        }
+        for i, o in enumerate(outbox):
+            stmts.append(f"CREATE outbox SET seq=$o{i}s, target_id=$o{i}t, event=$o{i}e")
+            bind[f"o{i}s"], bind[f"o{i}t"], bind[f"o{i}e"] = o["seq"], o["target_id"], o["event"]
+        for i, s in enumerate(spawn):
+            stmts.append(
+                f"CREATE spawns SET seq=$s{i}s, parent_id=$id, child_id=$s{i}c, "
+                f"root_path=$s{i}r, context=$s{i}x"
+            )
+            bind[f"s{i}s"], bind[f"s{i}c"] = s["seq"], s["child_id"]
+            bind[f"s{i}r"], bind[f"s{i}x"] = s["root_path"], s["context"]
+        if processed_event_id is not None:
+            stmts.append("UPSERT type::thing('processed',[$id,$pe]) SET execution_id=$id, event_id=$pe")
+            bind["pe"] = processed_event_id
+        for i, op in enumerate(timers):
+            if op.action == "schedule":
+                stmts.append(
+                    f"UPSERT type::thing('timers',[$id,$t{i}p]) SET execution_id=$id, path=$t{i}p, fire_at=$t{i}f"
+                )
+                bind[f"t{i}p"], bind[f"t{i}f"] = op.path, op.fire_at
+            else:
+                stmts.append(f"DELETE type::thing('timers',[$id,$t{i}p])")
+                bind[f"t{i}p"] = op.path
+        stmts.append("COMMIT")
+
+        try:
+            self._db.query(";\n".join(stmts) + ";", bind)
+        except self._SurrealError:
+            exe.version = old  # undo the in-memory bump; the txn rolled back
+            res = self._db.query("SELECT version FROM type::thing('executions',$id)", {"id": exe.id})
+            found = res[0]["version"] if res else None
+            # a CAS miss left the row at a *different* version (someone won) — or an
+            # insert-conflict left a row where we expected none. Same version (or no
+            # row at all on a first insert) means the txn failed for another reason.
+            if found is not None and found != old:
+                raise StoreConflict(exe.id, expected=old, found=found)
+            raise
+
+    def is_processed(self, execution_id: str, event_id: str) -> bool:
+        res = self._db.query(
+            "SELECT id FROM type::thing('processed',[$e,$ev])", {"e": execution_id, "ev": event_id}
+        )
+        return bool(res)
+
+    def pending_outbox(self) -> list[OutboxEntry]:
+        rows = self._db.query("SELECT seq, target_id, event FROM outbox ORDER BY seq ASC")
+        return [OutboxEntry(r["seq"], r["target_id"], Event.model_validate_json(r["event"])) for r in rows]
+
+    def ack_outbox(self, seq: int) -> None:
+        self._db.query("DELETE outbox WHERE seq=$s", {"s": seq})
+
+    def pending_spawns(self) -> list[SpawnEntry]:
+        rows = self._db.query(
+            "SELECT seq, parent_id, child_id, root_path, context FROM spawns ORDER BY seq ASC"
+        )
+        return [
+            SpawnEntry(r["seq"], r["parent_id"], r["child_id"], r["root_path"], json.loads(r["context"]))
+            for r in rows
+        ]
+
+    def ack_spawn(self, seq: int) -> None:
+        self._db.query("DELETE spawns WHERE seq=$s", {"s": seq})
+
+    def due_timers(self, now: float) -> list[tuple[str, str, float]]:
+        rows = self._db.query(
+            "SELECT execution_id, path, fire_at FROM timers WHERE fire_at <= $now ORDER BY fire_at ASC",
+            {"now": now},
+        )
+        return [(r["execution_id"], r["path"], float(r["fire_at"])) for r in rows]
+
+    def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None:
+        # guarded on the stored value: a concurrent re-schedule to a new time wins
+        self._db.query(
+            "DELETE timers WHERE execution_id=$e AND path=$p AND fire_at=$f",
+            {"e": execution_id, "p": path, "f": fire_at},
+        )
+
+    def close(self) -> None:
+        self._db.close()

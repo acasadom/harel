@@ -9,8 +9,8 @@
 #   docker compose -f deploy/docker-compose.yml down -v
 #
 # STM_STORE_BACKEND picks the durable store: sqlite (default, shared volume),
-# redis, postgres, rqlite or mongo (all-network). For each non-sqlite backend
-# also bring up its matching service. See deploy/README.md.
+# redis, postgres, rqlite, mongo or surrealdb (all-network). For each non-sqlite
+# backend also bring up its matching service. See deploy/README.md.
 services:
   redis:
     image: redis:7-alpine
@@ -27,6 +27,10 @@ services:
 
   mongo:
     image: mongo:7
+
+  surrealdb:
+    image: surrealdb/surrealdb:v2.1.4
+    command: ["start", "--user", "root", "--pass", "root", "--bind", "0.0.0.0:8000", "memory"]
 
   localstack:
     image: localstack/localstack:4.14
@@ -51,6 +55,11 @@ services:
       STM_RQLITE_URL: http://rqlite:4001
       STM_MONGO_URL: mongodb://mongo:27017
       STM_MONGO_DB: harel
+      STM_SURREAL_URL: ws://surrealdb:8000/rpc
+      STM_SURREAL_NS: harel
+      STM_SURREAL_DB: harel
+      STM_SURREAL_USER: root
+      STM_SURREAL_PASS: root
       STM_SQS_ENDPOINT: http://localstack:4566
       STM_VISIBILITY: "30"
     volumes:
@@ -75,6 +84,11 @@ services:
       STM_RQLITE_URL: http://rqlite:4001
       STM_MONGO_URL: mongodb://mongo:27017
       STM_MONGO_DB: harel
+      STM_SURREAL_URL: ws://surrealdb:8000/rpc
+      STM_SURREAL_NS: harel
+      STM_SURREAL_DB: harel
+      STM_SURREAL_USER: root
+      STM_SURREAL_PASS: root
       STM_SQS_ENDPOINT: http://localstack:4566
     volumes:
       - state:/state
