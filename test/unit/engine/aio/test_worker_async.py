@@ -104,8 +104,7 @@ async def test_worker_build_store_async_surrealdb(monkeypatch):
 
 
 async def test_worker_build_store_async_dynamodb(monkeypatch):
-    moto = pytest.importorskip("moto")
-    import boto3
+    pytest.importorskip("moto")
     from moto import mock_aws
 
     monkeypatch.setenv("STM_STORE_BACKEND", "dynamodb")
