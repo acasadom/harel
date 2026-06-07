@@ -195,8 +195,20 @@ class DictStore:
         self._processed: set[tuple[str, str]] = set()
         self._timers: dict[tuple[str, str], float] = {}  # (execution_id, path) -> fire_at
         self._spawns: list[SpawnEntry] = []
+        self._trace: dict[str, list[dict]] = {}  # execution_id -> ordered trace steps (preview)
         self._seq = 0
         self._spawn_seq = 0
+
+    # --- execution trace (PREVIEW seam, NOT on the Protocol yet) ---------------------
+    # The engine does not record a step-by-step trace today; this read/append pair lets
+    # the monitor's timeline render (seeded) data while that engine feature is designed.
+
+    def append_trace(self, execution_id: str, entry: dict) -> None:
+        steps = self._trace.setdefault(execution_id, [])
+        steps.append({**entry, "index": entry.get("index", len(steps))})
+
+    def read_trace(self, execution_id: str) -> list[dict]:
+        return list(self._trace.get(execution_id, []))
 
     def load(self, execution_id: str) -> Optional[Execution]:
         return self._by_id.get(execution_id)
@@ -311,7 +323,31 @@ class SqliteStore:
             "(seq INTEGER PRIMARY KEY AUTOINCREMENT, parent_id TEXT NOT NULL, child_id TEXT NOT NULL, "
             "root_path TEXT NOT NULL, context TEXT NOT NULL)"
         )
+        # PREVIEW: execution trace for the monitor timeline (not yet engine-written)
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS trace "
+            "(execution_id TEXT NOT NULL, idx INTEGER NOT NULL, entry TEXT NOT NULL, "
+            "PRIMARY KEY (execution_id, idx))"
+        )
         self._conn.commit()
+
+    def append_trace(self, execution_id: str, entry: dict) -> None:
+        """PREVIEW seam (see DictStore): append a trace step for the monitor timeline."""
+        (count,) = self._conn.execute(
+            "SELECT COUNT(*) FROM trace WHERE execution_id = ?", (execution_id,)
+        ).fetchone()
+        idx = entry.get("index", count)
+        self._conn.execute(
+            "INSERT OR REPLACE INTO trace (execution_id, idx, entry) VALUES (?, ?, ?)",
+            (execution_id, idx, json.dumps({**entry, "index": idx})),
+        )
+        self._conn.commit()
+
+    def read_trace(self, execution_id: str) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT entry FROM trace WHERE execution_id = ? ORDER BY idx", (execution_id,)
+        ).fetchall()
+        return [json.loads(r[0]) for r in rows]
 
     def load(self, execution_id: str) -> Optional[Execution]:
         row = self._conn.execute("SELECT data FROM executions WHERE id = ?", (execution_id,)).fetchone()
