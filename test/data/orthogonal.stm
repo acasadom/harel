@@ -2,6 +2,7 @@
 # ParallelState (composite children of an `orthogonal` block). Data-parallel
 # fan-out is a `fan-out invoke`, not an orthogonal state — see join_sugar.stm.
 
+event Go {}
 machine Join {
   initial Fork
   orthogonal Fork {

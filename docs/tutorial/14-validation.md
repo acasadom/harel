@@ -27,12 +27,17 @@ for issue in validate(defn):
 ```
 
 ```text
+[error] unknown_event at Cart: transition references undeclared event 'Deliver'
+[error] unknown_event at Orphan: transition references undeclared event 'Rescue'
 [warning] unreachable at Orphan: state is not reachable from the root
 [error] terminal_missing_outcome at Shipped: terminal of the machine/region must declare an `outcome` (e.g. success / failed) — the verdict the model routes on
 ```
 
-Two distinct problems, each a structured `Issue` (`severity`, `code`, `path`, `message`):
+Distinct problems, each a structured `Issue` (`severity`, `code`, `path`, `message`):
 
+- **`Deliver` / `Rescue`** are referenced by transitions but never **declared** with an
+  `event` line — an **error**. Declaring your events up front turns them into a checked
+  vocabulary, so a typo (`Delvier`) can't slip through as a silent event that never fires.
 - **`Shipped`** is a leaf sink that *ends the execution* but declares no `outcome` — an
   **error**. This is the rule that backs [step 3](03-outcomes): the engine won't guess a
   verdict, so it makes you state one where it's consumed.
@@ -48,7 +53,8 @@ Two distinct problems, each a structured `Issue` (`severity`, `code`, `path`, `m
 - no non-deterministic automatic transitions;
 - selector branch targets resolve, and declared `returns {…}` branches are exhaustive (no
   phantom or missing branch);
-- event/field references exist, when events are declared;
+- **every referenced event is declared** (and, for events with fields, the field references
+  exist and the operators match) — an undeclared event is an error;
 - `timeout` shape, and a warning for an unhandled `Timeout`;
 - unreachable states.
 
@@ -62,6 +68,8 @@ compiles:
 from harel import definition_from_dsl, validate
 
 FIXED = """
+event Deliver {}
+
 machine order {
   initial Cart
   state Cart {}

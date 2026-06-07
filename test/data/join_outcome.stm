@@ -4,6 +4,7 @@
 # a selector reading the engine-exposed `region_results`, and lands on a terminal
 # whose own `outcome` overrides the aggregated default.
 
+event Go {}
 machine Join {
   initial Fork
   orthogonal Fork {

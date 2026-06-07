@@ -1,5 +1,6 @@
 # base.yaml as DSL — exercises a nested composite + a flat top-level graph.
 
+event Notification {}
 machine base {
   initial Start
 

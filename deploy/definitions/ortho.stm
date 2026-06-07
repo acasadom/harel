@@ -1,3 +1,4 @@
+event Go {}
 machine ortho {
   initial Fork
 

@@ -31,9 +31,15 @@ _STARTER_TEMPLATE = """\
 #   harel render   {file}            # PlantUML (add --mermaid for Mermaid)
 #   harel run      {file} -e Submit -e Approve
 #
-# The DSL in a nutshell: declare the initial state, the states, and the transitions
-# (which live INSIDE the machine: `from <state> to <state> on <Event>`). A
+# The DSL in a nutshell: declare the events, the initial state, the states, and the
+# transitions (which live INSIDE the machine: `from <state> to <state> on <Event>`). A
 # `final <Name> <outcome>` state is a terminal that carries a verdict.
+
+# events are declared up front, so `validate` catches a typo'd event reference:
+event Submit {{}}
+event Approve {{}}
+event Reject {{}}
+event RequestChanges {{}}
 
 machine {name} {{
   initial Draft
