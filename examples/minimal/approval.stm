@@ -1,0 +1,25 @@
+# The smallest machine that actually runs — a two-step approval flow.
+#
+# Copy this to start your own. The whole DSL idea fits here:
+#   - `initial` names the state the machine starts in,
+#   - `state` declares a state,
+#   - `final <Name> <outcome>` is a terminal that carries a verdict,
+#   - transitions live INSIDE the machine: `from <state> to <state> on <Event>`.
+#
+# No actions/bindings needed — it validates and runs as-is:
+#   harel validate examples/minimal/approval.stm
+#   harel run      examples/minimal/approval.stm -e Submit -e Approve
+
+machine approval {
+  initial Draft
+
+  state Draft {}
+  state Review {}
+  final Approved success
+  final Rejected rejected
+
+  from Draft  to Review    on Submit
+  from Review to Approved  on Approve
+  from Review to Rejected  on Reject
+  from Review to Draft     on RequestChanges
+}
