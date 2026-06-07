@@ -22,6 +22,11 @@ dependencies = [
     "lark>=1.2,<2",
     "pydantic>=2,<3",
     "structlog",
+    # the sync API (Driver/DurableRunner) is a thin facade over the async core; anyio's
+    # BlockingPortal bridges sync->async (one background loop), the way Starlette/FastAPI do
+    "anyio>=4,<5",
+    # the async SqliteStore/Transport (the default durable backend) over aiosqlite
+    "aiosqlite>=0.20",
 ]
 
 [project.optional-dependencies]
