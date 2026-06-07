@@ -615,3 +615,113 @@ class AsyncRqliteTransport:
 
     async def close(self) -> None:
         await self._client.aclose()
+
+
+class AsyncMongoTransport:
+    """Async mirror of `MongoTransport` over `motor.motor_asyncio`: per-group exclusivity
+    via a per-group lock document (free/expired lock → upsert wins; `DuplicateKeyError` →
+    held by another worker), cursor aggregation via `async for`. Build with
+    `await AsyncMongoTransport.from_url(url)` or inject an `AsyncIOMotorClient`."""
+
+    def __init__(
+        self,
+        client: Any,
+        db_name: str = "harel",
+        prefix: str = "stm",
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        from pymongo import ReturnDocument
+        from pymongo.errors import DuplicateKeyError
+
+        self._client = client
+        self._db = client[db_name]
+        self._msgs = self._db[f"{prefix}_messages"]
+        self._locks = self._db[f"{prefix}_locks"]
+        self._counters = self._db[f"{prefix}_counters"]
+        self._after = ReturnDocument.AFTER
+        self._DuplicateKeyError = DuplicateKeyError
+        self._clock = clock
+
+    @classmethod
+    async def from_url(
+        cls,
+        url: str,
+        db_name: str = "harel",
+        connect_retries: int = 30,
+        retry_delay: float = 1.0,
+    ) -> "AsyncMongoTransport":
+        import anyio
+        import motor.motor_asyncio
+        from pymongo.errors import PyMongoError
+
+        last: Exception | None = None
+        for _ in range(connect_retries):
+            try:
+                client: Any = motor.motor_asyncio.AsyncIOMotorClient(url)
+                await client.admin.command("ping")
+                return cls(client, db_name)
+            except PyMongoError as exc:
+                last = exc
+                await anyio.sleep(retry_delay)
+        raise last if last is not None else RuntimeError("mongo connect failed")
+
+    async def _next_seq(self) -> int:
+        doc = await self._counters.find_one_and_update(
+            {"_id": "seq"}, {"$inc": {"n": 1}}, upsert=True, return_document=self._after
+        )
+        return int(doc["n"])
+
+    async def publish(self, group_id: str, event: Event) -> None:
+        await self._msgs.insert_one(
+            {"_id": await self._next_seq(), "group_id": group_id, "event": event.model_dump_json()}
+        )
+
+    async def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
+        now = self._clock()
+        groups = self._msgs.aggregate(
+            [{"$group": {"_id": "$group_id", "head": {"$min": "$_id"}}}, {"$sort": {"head": 1}}]
+        )
+        async for g in groups:
+            group_id = g["_id"]
+            token = f"{worker_id}:{uuid.uuid4().hex}"
+            try:
+                await self._locks.find_one_and_update(
+                    {
+                        "_id": group_id,
+                        "$or": [{"lock_expiry": {"$lte": now}}, {"lock_expiry": {"$exists": False}}],
+                    },
+                    {"$set": {"token": token, "lock_expiry": now + visibility}},
+                    upsert=True,
+                )
+            except self._DuplicateKeyError:
+                continue
+            head = await self._msgs.find_one({"group_id": group_id}, sort=[("_id", 1)])
+            if head is None:
+                await self._locks.delete_one({"_id": group_id, "token": token})
+                continue
+            return Lease(head["_id"], group_id, Event.model_validate_json(head["event"]), token=token)
+        return None
+
+    async def _owns(self, group_id: str, token: str) -> bool:
+        doc = await self._locks.find_one({"_id": group_id})
+        return doc is not None and doc.get("token") == token
+
+    async def ack(self, lease: Lease) -> None:
+        if not await self._owns(lease.group_id, lease.token):
+            return
+        await self._msgs.delete_one({"_id": lease.seq})
+        await self._locks.delete_one({"_id": lease.group_id, "token": lease.token})
+
+    async def nack(self, lease: Lease, delay: float = 0.0) -> None:
+        if not await self._owns(lease.group_id, lease.token):
+            return
+        if delay > 0:
+            await self._locks.update_one(
+                {"_id": lease.group_id, "token": lease.token},
+                {"$set": {"lock_expiry": self._clock() + delay}},
+            )
+        else:
+            await self._locks.delete_one({"_id": lease.group_id, "token": lease.token})
+
+    async def close(self) -> None:
+        self._client.close()
