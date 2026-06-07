@@ -11,10 +11,10 @@ engine.
 
 The *formalism* — hierarchy, orthogonal (concurrent) regions, broadcast communication — is
 **David Harel's**, from his 1987 paper *Statecharts: A Visual Formalism for Complex Systems*
-([author's PDF](https://www.wisdom.weizmann.ac.il/~harel/papers/Statecharts.pdf) ·
-[mirror](https://dubroy.com/refs/Statecharts_a_visual_formalism_for_complex_systems.pdf)). This
-engine is named in his honour and makes that formalism durable and distributed; what follows is
-how it does so.
+([PDF](https://dubroy.com/refs/Statecharts_a_visual_formalism_for_complex_systems.pdf); he later
+recounted how it came to be in [*Statecharts in the Making*](https://www.weizmann.ac.il/math/harel/sites/math.harel/files/users/user50/Statecharts.History.pdf), 2007).
+This engine is named in his honour and makes that formalism durable and distributed; what
+follows is how it does so.
 
 ## The shape of the design
 
