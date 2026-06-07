@@ -182,6 +182,16 @@ class AsyncDriver:
             )
             await self._flush()
 
+    async def fire_due_timers(self) -> int:
+        """Deliver every timer due now (a `Timeout` to its execution) and remove it.
+        Returns how many fired. Mirror of the sync `Driver.fire_due_timers`."""
+        fired = 0
+        for execution_id, path, fire_at in await self.store.due_timers(self._clock()):
+            await self._deliver_timeout(execution_id, engine.timeout_event(execution_id, path, fire_at))
+            await self.store.delete_timer(execution_id, path, fire_at)
+            fired += 1
+        return fired
+
     # --- public API --------------------------------------------------------
     async def recover(self) -> None:
         await self._flush()

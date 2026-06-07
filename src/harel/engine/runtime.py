@@ -52,10 +52,10 @@ class _Proxy:
         self.idempotency_key: Optional[str] = None
 
 
-class Driver:
-    """In-memory runtime for a Definition: drives one or more Executions through
-    the pure engine, applying effects. Subclasses customize the action proxy, a
-    pre-action hook, and the action-error policy."""
+class _SyncDriver:
+    """LEGACY sync engine — the in-memory runtime for a Definition. Still the base of
+    `_RuntimeDriver`/`TransportDriver` (the not-yet-migrated sync distributed path); the
+    public `Driver` (below) is now an async facade. Deleted once distributed goes async."""
 
     def __init__(
         self,
@@ -271,7 +271,7 @@ class Driver:
         self._flush()
 
 
-class _RuntimeDriver(Driver):
+class _RuntimeDriver(_SyncDriver):
     """The production driver (durable + distributed). An UNHANDLED exception in a
     user action is a programming bug, not a modelled failure: the controlled path
     is expressed in the statechart (a selector/transition). So we neither propagate
@@ -283,3 +283,75 @@ class _RuntimeDriver(Driver):
         logger.exception("unhandled action error; failing execution %s", exe.id)
         exe.status = Status.FAILED
         exe.error = f"{type(exc).__name__}: {exc}"
+
+
+class Driver:
+    """In-memory runtime for a Definition: drives Executions through the pure engine.
+
+    This is now a thin **synchronous facade** over the async core (`AsyncDriver`), bridged
+    by the shared anyio portal (one background loop) — see `harel.engine.aio.facade`. The
+    bare driver propagates action errors (so test/scenario bugs surface), matching the old
+    sync `Driver`. A sync store passed in is adapted to the async interface, delegating to
+    the same object (so callers still introspect it); with no store it defaults to an async
+    in-memory store. Calling it from inside a running event loop is refused (use the async
+    API). The `Execution` is mutated in place on the portal loop and the bridged call blocks
+    until done, so callers see the mutation — preserving the in-place contract the test
+    harness relies on."""
+
+    def __init__(
+        self,
+        defn: Definition,
+        store: Optional[ExecutionStore] = None,
+        clock: Callable[[], float] = time.time,
+        definitions: Optional[dict[str, Definition]] = None,
+        resolve_machine: Optional[Callable[[str], Definition]] = None,
+    ) -> None:
+        self.defn = defn
+        self.store = store
+        self._clock = clock
+        self._definitions = definitions
+        self.resolve_machine = resolve_machine
+        self._async = self._portal_build(store, defn, clock, definitions, resolve_machine)
+
+    @staticmethod
+    def _portal_build(store, defn, clock, definitions, resolve_machine):
+        from harel.engine.aio import facade
+
+        async def build():
+            from harel.engine.aio.driver import AsyncDriver
+            from harel.engine.aio_store import AsyncDictStore
+
+            astore = facade.as_async_store(store) if store is not None else AsyncDictStore()
+            return AsyncDriver(defn, astore, clock, definitions, resolve_machine)
+
+        return facade.run(build)
+
+    def register(self, exe: Execution) -> None:
+        from harel.engine.aio import facade
+
+        facade.run(self._async.store.save, exe)
+
+    def get(self, execution_id: str) -> Optional[Execution]:
+        from harel.engine.aio import facade
+
+        return facade.run(self._async.store.load, execution_id)
+
+    def start(self, exe: Execution) -> None:
+        from harel.engine.aio import facade
+
+        facade.run(self._async.start, exe)
+
+    def inject(self, exe: Execution, event: Event) -> None:
+        from harel.engine.aio import facade
+
+        facade.run(self._async.inject, exe, event)
+
+    def recover(self) -> None:
+        from harel.engine.aio import facade
+
+        facade.run(self._async.recover)
+
+    def fire_due_timers(self) -> int:
+        from harel.engine.aio import facade
+
+        return facade.run(self._async.fire_due_timers)

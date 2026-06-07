@@ -294,9 +294,13 @@ SCENARIOS = [
 # --- new-engine harness (a tiny in-memory multi-Execution driver) -------------
 
 
-# The in-memory runtime is the production `Driver` (Execution-centric core); the
-# tests drive raw Executions through it directly.
-from harel.engine.runtime import Driver as _Runner  # noqa: E402
+# `_Runner` (used by test_battery) is the public `Driver` — now the async facade — so the
+# battery spec exercises the real async path. `run_new` is the parity ORACLE: it uses the
+# genuine sync engine (`_SyncDriver`) directly, so it is an independent reference AND it is
+# loop-safe (the async parity tests call it from inside an event loop, where the sync facade
+# would refuse to start its portal).
+from harel.engine.runtime import Driver as _Runner  # noqa: E402,F401  (re-exported for test_battery)
+from harel.engine.runtime import _SyncDriver  # noqa: E402
 
 
 def run_new(scenario) -> dict:
@@ -306,7 +310,7 @@ def run_new(scenario) -> dict:
     defn = definition_from_dsl(scenario["dsl"], scenario["stm"])
     exe = Execution(definition_id=defn.id, context=dict(scenario.get("context", {})))
 
-    runner = _Runner(defn)
+    runner = _SyncDriver(defn)
     runner.start(exe)
     trace = [{"event": "Start", "end_state": exe.active_path}]
     for ev in scenario["events"]:

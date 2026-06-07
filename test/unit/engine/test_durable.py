@@ -10,7 +10,7 @@ so a unit test; the genuinely multi-process variant belongs in test/integration.
 from harel.dsl import definition_from_dsl
 from harel.engine.durable import DurableRunner
 from harel.engine.execution import Execution, Status
-from harel.engine.runtime import Driver
+from harel.engine.runtime import Driver, _SyncDriver
 from harel.engine.store import SqliteStore
 from harel.spec.states import Event
 
@@ -119,9 +119,11 @@ def test_orthogonal_children_persist_and_join_after_restart(tmp_path):
     store2.close()
 
 
-class _NoFlushDriver(Driver):
-    """A Driver that never runs the relay — stands in for a crash AFTER the
-    Executions committed but BEFORE their emitted events were delivered."""
+class _NoFlushDriver(_SyncDriver):
+    """A driver that never runs the relay — stands in for a crash AFTER the Executions
+    committed but BEFORE their emitted events were delivered. Built on the genuine sync
+    engine (`_SyncDriver`) so `_flush` is an overridable inline step; the public `Driver`
+    is now an async facade with no inline relay to suppress."""
 
     def _flush(self) -> None:
         pass
