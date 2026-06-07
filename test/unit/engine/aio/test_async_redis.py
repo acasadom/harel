@@ -1,11 +1,16 @@
 """Async Redis backends (fakeredis.aioredis, in-process — no Docker).
 
-Two checks:
+Three checks:
 1. Parity: `AsyncDriver` + `AsyncRedisStore` reproduces the sync oracle on every shared
    scenario (reloading from the serializing store, like the sync redis parity test).
 2. Distributed pipeline: AsyncDistributedRunner + AsyncWorker over `AsyncRedisStore` +
    `AsyncRedisTransport` (the ZSET-claim transport) drains flat + orthogonal machines.
+3. Concurrent CAS: two asyncio.gather'd save() calls — WATCH/MULTI/EXEC interleaves both
+   WATCHes before either EXECs, so the first commit changes the key and the second gets
+   WatchError -> StoreConflict.
 """
+
+import asyncio
 
 import fakeredis.aioredis
 import pytest
@@ -17,6 +22,7 @@ from harel.engine.aio.driver import AsyncDriver
 from harel.engine.aio_store import AsyncRedisStore
 from harel.engine.aio_transport import AsyncRedisTransport
 from harel.engine.execution import Execution, Status
+from harel.engine.store import StoreConflict
 from harel.spec.states import Event
 
 
@@ -107,3 +113,52 @@ async def test_async_redis_pipeline_orthogonal():
     assert final.active_path == "Done" and final.status is Status.DONE
     regions = [await runner.store.load(cid) for cid in child_ids]
     assert sorted(r.context["trace"] for r in regions) == [["A1", "A2"], ["B1", "B2"]]
+
+
+# ---------------------------------------------------------------------------
+# Concurrent CAS — WATCH/MULTI/EXEC under asyncio interleaving
+# ---------------------------------------------------------------------------
+
+
+async def test_concurrent_writers_only_one_wins():
+    store = AsyncRedisStore(fakeredis.aioredis.FakeRedis())
+    e = Execution(definition_id="d")
+    await store.save(e)  # version -> 1
+
+    a = await store.load(e.id)
+    b = await store.load(e.id)
+    a.context["w"] = "a"
+    b.context["w"] = "b"
+
+    results = await asyncio.gather(store.save(a), store.save(b), return_exceptions=True)
+    conflicts = [r for r in results if isinstance(r, StoreConflict)]
+    successes = [r for r in results if r is None]
+    assert len(conflicts) == 1, f"expected 1 conflict, got: {results}"
+    assert len(successes) == 1
+
+    final = await store.load(e.id)
+    assert final.version == 2
+    assert final.context["w"] in ("a", "b")
+    loser = a if a.version == 1 else b
+    assert loser.version == 1  # version rolled back on the loser
+
+
+async def test_concurrent_commits_outbox_not_duplicated():
+    """The loser's outbox emit must not appear in pending_outbox after a conflict."""
+    store = AsyncRedisStore(fakeredis.aioredis.FakeRedis())
+    e = Execution(definition_id="d")
+    await store.save(e)
+
+    a = await store.load(e.id)
+    b = await store.load(e.id)
+
+    results = await asyncio.gather(
+        store.commit(a, [("p", Event(kind="FromA"))]),
+        store.commit(b, [("p", Event(kind="FromB"))]),
+        return_exceptions=True,
+    )
+    assert sum(1 for r in results if isinstance(r, StoreConflict)) == 1
+
+    pending = await store.pending_outbox()
+    kinds = {entry.event.kind for entry in pending}
+    assert len(kinds) == 1  # only the winner's emit persisted
