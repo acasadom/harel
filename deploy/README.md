@@ -40,7 +40,7 @@ docker compose -f deploy/docker-compose.yml down -v   # -v drops the state volum
 Scale workers with `--scale worker=N`. Tail logs with
 `docker compose -f deploy/docker-compose.yml logs -f worker`.
 
-### Store backend: sqlite, redis, postgres, or rqlite
+### Store backend: sqlite, redis, postgres, rqlite, or mongo
 
 `STM_STORE_BACKEND` selects the durable store (default `sqlite`, the shared
 volume above). The others are **all-network** (no shared filesystem); bring up
@@ -58,18 +58,24 @@ STM_STORE_BACKEND=postgres docker compose -f deploy/docker-compose.yml run --rm 
 # rqlite (distributed SQLite, Raft):
 STM_STORE_BACKEND=rqlite docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 redis rqlite worker
 STM_STORE_BACKEND=rqlite docker compose -f deploy/docker-compose.yml run --rm test
+
+# mongo (document store): everything for one Execution in a single document,
+# so a commit is one atomic update_one (no replica set needed).
+STM_STORE_BACKEND=mongo docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 redis mongo worker
+STM_STORE_BACKEND=mongo docker compose -f deploy/docker-compose.yml run --rm test
 ```
 
-sqlite = single machine (or one host's containers); redis / postgres / rqlite =
-distributed across machines. Same engine, workers and test for all of them. The
+sqlite = single machine (or one host's containers); redis / postgres / rqlite /
+mongo = distributed across machines. Same engine, workers and test for all of
+them. The
 test service runs `pytest -m stack`, so the contract tests for the active backend
 run against the real service.
 
 ### Transport backend (the queue)
 
 `STM_TRANSPORT_BACKEND` selects the event transport independently of the store
-(`redis` default, or `postgres` / `rqlite` / `sqlite`). So you can run **no Redis
-at all** — one SQL backend for both state and queue:
+(`redis` default, or `postgres` / `rqlite` / `sqlite` / `mongo` / `sqs`). So you
+can run **no Redis at all** — one backend for both state and queue:
 
 ```bash
 # all-postgres: state + queue both on Postgres, no Redis
@@ -79,6 +85,12 @@ STM_STORE_BACKEND=postgres STM_TRANSPORT_BACKEND=postgres \
   docker compose -f deploy/docker-compose.yml run --rm test
 
 # all-rqlite likewise (STM_STORE_BACKEND=rqlite STM_TRANSPORT_BACKEND=rqlite, bring up `rqlite`)
+
+# all-mongo: state + queue both on MongoDB, no Redis. Bring up the `mongo` service.
+STM_STORE_BACKEND=mongo STM_TRANSPORT_BACKEND=mongo \
+  docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 mongo worker
+STM_STORE_BACKEND=mongo STM_TRANSPORT_BACKEND=mongo \
+  docker compose -f deploy/docker-compose.yml run --rm test
 
 # SQS FIFO via LocalStack (no AWS account): the queue's MessageGroupId is the
 # per-group exclusivity natively. Bring up the `localstack` service.

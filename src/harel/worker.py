@@ -4,19 +4,22 @@ Configured entirely by environment variables so it runs as a docker-compose
 service scaled to N replicas (each replica is one `Worker` loop):
 
     STM_REDIS_URL        redis URL for the transport (the queue)
-    STM_STORE_BACKEND    "sqlite" (default), "redis", or "postgres" for the store
+    STM_STORE_BACKEND    "sqlite" (default), "redis", "postgres", "rqlite", or "mongo" for the store
     STM_STORE_DB         sqlite file for the store        (sqlite backend; a shared volume)
     STM_STORE_REDIS_URL  redis URL for the store, defaults to STM_REDIS_URL (redis backend)
     STM_POSTGRES_DSN     postgres DSN for the store       (postgres backend)
     STM_RQLITE_URL       rqlite HTTP base URL for the store (rqlite backend)
+    STM_MONGO_URL        mongodb URL for the store/transport (mongo backend)
+    STM_MONGO_DB         mongodb database name (mongo backend; default "harel")
     STM_SQS_ENDPOINT     SQS endpoint URL (e.g. LocalStack) for the sqs transport
     STM_SQS_QUEUE        SQS FIFO queue name (default stm.fifo)
     STM_DEFINITIONS_DIR  directory of *.stm machine files = the Definition registry
     STM_WORKER_ID        worker id (defaults to the hostname)
     STM_VISIBILITY       lease seconds while a message is in flight (default 30)
 
-Pure-sqlite (single machine / shared volume), pure-redis (all-network) and
-postgres (distributed SQL) are all supported by swapping STM_STORE_BACKEND.
+Pure-sqlite (single machine / shared volume), pure-redis (all-network), postgres
+(distributed SQL) and mongo (document store) are all supported by swapping
+STM_STORE_BACKEND.
 
 Run with: `python -m harel.worker`. SIGTERM/SIGINT stop the loop cleanly. The
 workers share nothing but the store + the transport — separate processes (here,
@@ -36,8 +39,16 @@ from harel.definition.validate import ValidationError
 from harel.dsl import definition_from_dsl_file, parse
 from harel.dsl.parser import DslError
 from harel.engine.distributed import Worker
-from harel.engine.store import ExecutionStore, PostgresStore, RedisStore, RqliteStore, SqliteStore
+from harel.engine.store import (
+    ExecutionStore,
+    MongoStore,
+    PostgresStore,
+    RedisStore,
+    RqliteStore,
+    SqliteStore,
+)
 from harel.engine.transport import (
+    MongoTransport,
     PostgresTransport,
     RedisTransport,
     RqliteTransport,
@@ -64,7 +75,8 @@ def load_definitions(definitions_dir: str) -> dict[str, Definition]:
 
 
 def build_store() -> ExecutionStore:
-    """Build the durable store from STM_STORE_BACKEND (sqlite | redis)."""
+    """Build the durable store from STM_STORE_BACKEND (sqlite | redis | postgres |
+    rqlite | mongo)."""
     backend = os.environ.get("STM_STORE_BACKEND", "sqlite")
     if backend == "sqlite":
         return SqliteStore(os.environ["STM_STORE_DB"])
@@ -74,13 +86,15 @@ def build_store() -> ExecutionStore:
         return PostgresStore.from_dsn(os.environ["STM_POSTGRES_DSN"])
     if backend == "rqlite":
         return RqliteStore.from_url(os.environ["STM_RQLITE_URL"])
+    if backend == "mongo":
+        return MongoStore.from_url(os.environ["STM_MONGO_URL"], os.environ.get("STM_MONGO_DB", "harel"))
     raise ValueError(f"unknown STM_STORE_BACKEND: {backend}")
 
 
 def build_transport() -> Transport:
     """Build the event transport from STM_TRANSPORT_BACKEND (redis | postgres |
-    rqlite | sqlite). Default redis; postgres/rqlite give a no-Redis stack (one
-    SQL backend can serve both store and transport)."""
+    rqlite | sqlite | mongo | sqs). Default redis; postgres/rqlite/mongo give a
+    no-Redis stack (one backend can serve both store and transport)."""
     backend = os.environ.get("STM_TRANSPORT_BACKEND", "redis")
     if backend == "redis":
         return RedisTransport.from_url(os.environ["STM_REDIS_URL"])
@@ -90,6 +104,8 @@ def build_transport() -> Transport:
         return RqliteTransport.from_url(os.environ["STM_RQLITE_URL"])
     if backend == "sqlite":
         return SqliteTransport(os.environ["STM_TRANSPORT_DB"])
+    if backend == "mongo":
+        return MongoTransport.from_url(os.environ["STM_MONGO_URL"], os.environ.get("STM_MONGO_DB", "harel"))
     if backend == "sqs":
         return SqsTransport.create(
             os.environ["STM_SQS_ENDPOINT"], os.environ.get("STM_SQS_QUEUE", "stm.fifo")

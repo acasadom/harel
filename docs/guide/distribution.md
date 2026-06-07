@@ -17,10 +17,11 @@ running. Backends:
 | `RedisTransport` | `SET lock NX PX` group-lock-as-lease + FIFO list |
 | `PostgresTransport` | `pg_advisory_xact_lock` serializing claims |
 | `RqliteTransport` | queue table on Raft-replicated SQLite |
+| `MongoTransport` | per-group lock document (atomic-upsert lock-as-lease) |
 | `SqsTransport` | SQS FIFO `MessageGroupId` (runs on LocalStack) |
 
 Store and transport are **independent** — mix freely, or unify on one backend (all-Postgres,
-all-rqlite: no Redis needed).
+all-rqlite, all-Mongo: no Redis needed).
 
 ## Running with workers
 

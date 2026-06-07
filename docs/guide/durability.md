@@ -16,8 +16,9 @@ store and the same machine survives crashes and restarts.
 | `RedisStore` | distributed (WATCH/MULTI CAS) |
 | `PostgresStore` | distributed (UPDATE-WHERE-version CAS) |
 | `RqliteStore` | distributed SQLite over Raft (HTTP) |
+| `MongoStore` | distributed document store (single-document atomic `update_one` CAS) |
 
-The networked ones are optional extras (`harel[redis]`, `[postgres]`, `[rqlite]`) and take an
+The networked ones are optional extras (`harel[redis]`, `[postgres]`, `[rqlite]`, `[mongo]`) and take an
 injected client. Selecting one is the *only* change — the machine and the driving loop are
 identical.
 
