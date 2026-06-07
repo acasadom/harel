@@ -4,6 +4,7 @@ Installing harel puts a single `harel` command on your `PATH` that wraps the sta
 an in-memory `run`, the formatter, and the language server.
 
 ```text
+harel new      FILE [NAME] [--force]        # scaffold a starter .stm (validates + runs as-is)
 harel validate FILE [NAME]                 # parse + validate; exit 1 on errors
 harel render   FILE [NAME] [--mermaid]      # PlantUML (default) or Mermaid
 harel list     FILE                         # machines / fragments / events in a file
@@ -14,6 +15,28 @@ harel --version
 ```
 
 `NAME` selects the machine when a file declares more than one.
+
+## Starting from scratch
+
+`harel new` writes a small, commented machine that **validates and runs with no setup** —
+zero to a working state machine in one command:
+
+```text
+$ harel new approval.stm
+created approval.stm  (machine approval)
+next:
+  harel validate approval.stm
+  harel run      approval.stm -e Submit -e Approve
+
+$ harel run approval.stm -e Submit -e Approve
+(start)              -> Draft
+Submit               -> Review
+Approve              -> Approved
+status: DONE  outcome: success
+```
+
+The machine name defaults to the file name (sanitised to a valid identifier); pass `NAME`
+to override, and `--force` to overwrite an existing file.
 
 ## Examples
 

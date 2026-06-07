@@ -16,6 +16,9 @@ pip install harel
 `harel` needs Python 3.11+. The core install has everything in this tutorial; optional
 backends (Redis, Postgres, …) and the editor tooling are extras you add later.
 
+> In a hurry? `harel new mymachine.stm` writes a commented starter machine that already
+> validates and runs — then edit it as you read on.
+
 ## Author the machine
 
 A machine is written in the `.stm` DSL. The transitions live **inside** the machine, each one

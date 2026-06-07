@@ -59,7 +59,15 @@ Requires Python 3.11+.
 
 ## Quickstart
 
-Author a machine — transitions live **inside** the state they leave, events are named,
+Scaffold a starter machine that validates and runs out of the box — zero to a working
+state machine in one command:
+
+```bash
+harel new approval.stm
+harel run approval.stm -e Submit -e Approve   # (start) -> Draft -> Review -> Approved
+```
+
+Or author one yourself — transitions live **inside** the state they leave, events are named,
 terminals declare their verdict:
 
 ```

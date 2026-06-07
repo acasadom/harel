@@ -16,15 +16,66 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Optional
+
+# A starter machine emitted by `harel new`: commented, and VALID + runnable with no
+# actions (no binding needed) so a newcomer goes from zero to a working machine in one
+# command. Teaches the essentials — initial, states, `final <Name> <outcome>`, and
+# transitions that live inside the machine (`from <state> to <state> on <Event>`).
+_STARTER_TEMPLATE = """\
+# A starter harel machine. Next steps:
+#   harel validate {file}
+#   harel render   {file}            # PlantUML (add --mermaid for Mermaid)
+#   harel run      {file} -e Submit -e Approve
+#
+# The DSL in a nutshell: declare the initial state, the states, and the transitions
+# (which live INSIDE the machine: `from <state> to <state> on <Event>`). A
+# `final <Name> <outcome>` state is a terminal that carries a verdict.
+
+machine {name} {{
+  initial Draft
+
+  state Draft {{}}
+  state Review {{}}
+  final Approved success
+  final Rejected rejected
+
+  from Draft  to Review    on Submit
+  from Review to Approved  on Approve
+  from Review to Rejected  on Reject
+  from Review to Draft     on RequestChanges
+}}
+"""
+
+
+def _sanitize(stem: str) -> str:
+    """Turn a file stem into a valid DSL machine identifier: non-word chars -> `_`,
+    and a leading digit gets an `m_` prefix (identifiers can't start with a digit)."""
+    name = re.sub(r"\W", "_", stem) or "machine"
+    return f"m_{name}" if name[0].isdigit() else name
 
 
 def _load(file: str, name: Optional[str]):
     from harel.dsl import definition_from_dsl_file
 
     return definition_from_dsl_file(Path(file), name)
+
+
+def _cmd_new(args: argparse.Namespace) -> int:
+    path = Path(args.file)
+    if path.exists() and not args.force:
+        print(f"error: {path} already exists (use --force to overwrite)", file=sys.stderr)
+        return 1
+    name = args.name or _sanitize(path.stem)
+    path.write_text(_STARTER_TEMPLATE.format(name=name, file=path))
+    print(f"created {path}  (machine {name})")
+    print("next:")
+    print(f"  harel validate {path}")
+    print(f"  harel run      {path} -e Submit -e Approve")
+    return 0
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:
@@ -113,6 +164,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"harel {_version()}")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("new", help="scaffold a starter .stm machine (validates + runs out of the box)")
+    p.add_argument("file", help="path of the .stm to create")
+    p.add_argument("name", nargs="?", help="machine name (default: derived from the file name)")
+    p.add_argument("--force", action="store_true", help="overwrite the file if it already exists")
+    p.add_argument("--template", choices=["flat"], default="flat", help="starter template (default: flat)")
+    p.set_defaults(func=_cmd_new)
 
     p = sub.add_parser("validate", help="parse and validate a .stm file")
     p.add_argument("file")
