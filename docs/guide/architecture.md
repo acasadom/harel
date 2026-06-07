@@ -9,6 +9,13 @@ If you only want to *author and run* machines, the [tutorial](../tutorial/01-get
 and the [CLI](cli) / [durability](durability) guides are enough. This page is for changing the
 engine.
 
+The *formalism* — hierarchy, orthogonal (concurrent) regions, broadcast communication — is
+**David Harel's**, from his 1987 paper *Statecharts: A Visual Formalism for Complex Systems*
+([author's PDF](https://www.wisdom.weizmann.ac.il/~harel/papers/Statecharts.pdf) ·
+[mirror](https://dubroy.com/refs/Statecharts_a_visual_formalism_for_complex_systems.pdf)). This
+engine is named in his honour and makes that formalism durable and distributed; what follows is
+how it does so.
+
 ## The shape of the design
 
 harel splits a running statechart into three layers with a hard rule between them: **the
