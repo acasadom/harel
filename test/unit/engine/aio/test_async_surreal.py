@@ -324,3 +324,27 @@ async def test_pipeline_orthogonal_async_surreal(client):
     assert final.context["trace"] == ["Done"]
     regions = [await store.load(cid) for cid in child_ids]
     assert sorted(r.context["trace"] for r in regions) == [["A1", "A2"], ["B1", "B2"]]
+
+
+async def test_concurrent_writers_only_one_wins(store):
+    import asyncio
+
+    e = Execution(definition_id="d")
+    await store.save(e)  # version -> 1
+
+    a = await store.load(e.id)
+    b = await store.load(e.id)
+    a.context["w"] = "a"
+    b.context["w"] = "b"
+
+    results = await asyncio.gather(store.save(a), store.save(b), return_exceptions=True)
+    conflicts = [r for r in results if isinstance(r, StoreConflict)]
+    successes = [r for r in results if r is None]
+    assert len(conflicts) == 1, f"expected 1 conflict, got: {results}"
+    assert len(successes) == 1
+
+    final = await store.load(e.id)
+    assert final.version == 2
+    assert final.context["w"] in ("a", "b")
+    loser = a if a.version == 1 else b
+    assert loser.version == 1  # version rolled back on the loser

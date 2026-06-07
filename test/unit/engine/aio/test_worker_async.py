@@ -1,13 +1,21 @@
 """The async-native worker: AsyncWorker.run (the concurrent semaphore loop) + worker.py's
-async backend builders. In-memory / aiosqlite — no Docker."""
+async backend builders. In-memory / aiosqlite / mem:// / moto — no Docker."""
 
 import asyncio
+from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from harel import worker
 from harel.dsl import definition_from_dsl
 from harel.engine.aio.distributed import AsyncDistributedRunner
-from harel.engine.aio_store import AsyncDictStore, AsyncRedisStore, AsyncSqliteStore
-from harel.engine.aio_transport import AsyncInMemoryTransport, AsyncRedisTransport, AsyncSqliteTransport
+from harel.engine.aio_store import AsyncDictStore, AsyncDynamoDBStore, AsyncRedisStore, AsyncSqliteStore
+from harel.engine.aio_transport import (
+    AsyncInMemoryTransport,
+    AsyncRedisTransport,
+    AsyncSqliteTransport,
+    AsyncSqsTransport,
+)
 from harel.engine.execution import Status
 from harel.spec.states import Event
 
@@ -75,3 +83,108 @@ async def test_worker_build_transport_async(monkeypatch):
     monkeypatch.setenv("STM_TRANSPORT_BACKEND", "redis")
     monkeypatch.setenv("STM_REDIS_URL", "redis://localhost:6379/0")
     assert isinstance(await worker.build_transport_async(), AsyncRedisTransport)
+
+
+# ---------------------------------------------------------------------------
+# Routing tests for the 5 backends wired in fix/async-worker-wiring
+# ---------------------------------------------------------------------------
+
+
+async def test_worker_build_store_async_surrealdb(monkeypatch):
+    pytest.importorskip("surrealdb")
+    monkeypatch.setenv("STM_STORE_BACKEND", "surrealdb")
+    monkeypatch.setenv("STM_SURREAL_URL", "mem://")
+    monkeypatch.setenv("STM_SURREAL_NS", "test")
+    monkeypatch.setenv("STM_SURREAL_DB", "test")
+    from harel.engine.aio_store import AsyncSurrealStore
+
+    store = await worker.build_store_async()
+    assert isinstance(store, AsyncSurrealStore)
+    await store.close()
+
+
+async def test_worker_build_store_async_dynamodb(monkeypatch):
+    moto = pytest.importorskip("moto")
+    import boto3
+    from moto import mock_aws
+
+    monkeypatch.setenv("STM_STORE_BACKEND", "dynamodb")
+    monkeypatch.setenv("STM_AWS_REGION", "us-east-1")
+    with mock_aws():
+        store = await worker.build_store_async()
+        assert isinstance(store, AsyncDynamoDBStore)
+        await store.close()
+
+
+async def test_worker_build_store_async_mongo(monkeypatch):
+    monkeypatch.setenv("STM_STORE_BACKEND", "mongo")
+    monkeypatch.setenv("STM_MONGO_URL", "mongodb://localhost:27017")
+    from harel.engine.aio_store import AsyncMongoStore
+
+    sentinel = object()
+    with patch.object(AsyncMongoStore, "from_url", new=AsyncMock(return_value=sentinel)):
+        result = await worker.build_store_async()
+    assert result is sentinel
+
+
+async def test_worker_build_store_async_rqlite(monkeypatch):
+    monkeypatch.setenv("STM_STORE_BACKEND", "rqlite")
+    monkeypatch.setenv("STM_RQLITE_URL", "http://localhost:4001")
+    from harel.engine.aio_store import AsyncRqliteStore
+
+    sentinel = object()
+    with patch.object(AsyncRqliteStore, "from_url", new=AsyncMock(return_value=sentinel)):
+        result = await worker.build_store_async()
+    assert result is sentinel
+
+
+async def test_worker_build_transport_async_surrealdb(monkeypatch):
+    pytest.importorskip("surrealdb")
+    monkeypatch.setenv("STM_TRANSPORT_BACKEND", "surrealdb")
+    monkeypatch.setenv("STM_SURREAL_URL", "mem://")
+    monkeypatch.setenv("STM_SURREAL_NS", "test")
+    monkeypatch.setenv("STM_SURREAL_DB", "test")
+    from harel.engine.aio_transport import AsyncSurrealTransport
+
+    transport = await worker.build_transport_async()
+    assert isinstance(transport, AsyncSurrealTransport)
+    await transport.close()
+
+
+async def test_worker_build_transport_async_mongo(monkeypatch):
+    monkeypatch.setenv("STM_TRANSPORT_BACKEND", "mongo")
+    monkeypatch.setenv("STM_MONGO_URL", "mongodb://localhost:27017")
+    from harel.engine.aio_transport import AsyncMongoTransport
+
+    sentinel = object()
+    with patch.object(AsyncMongoTransport, "from_url", new=AsyncMock(return_value=sentinel)):
+        result = await worker.build_transport_async()
+    assert result is sentinel
+
+
+async def test_worker_build_transport_async_rqlite(monkeypatch):
+    monkeypatch.setenv("STM_TRANSPORT_BACKEND", "rqlite")
+    monkeypatch.setenv("STM_RQLITE_URL", "http://localhost:4001")
+    from harel.engine.aio_transport import AsyncRqliteTransport
+
+    sentinel = object()
+    with patch.object(AsyncRqliteTransport, "from_url", new=AsyncMock(return_value=sentinel)):
+        result = await worker.build_transport_async()
+    assert result is sentinel
+
+
+async def test_worker_build_transport_async_sqs(monkeypatch):
+    pytest.importorskip("moto")
+    import boto3
+    from moto import mock_aws
+
+    monkeypatch.setenv("STM_TRANSPORT_BACKEND", "sqs")
+    monkeypatch.setenv("STM_AWS_REGION", "us-east-1")
+    monkeypatch.setenv("STM_SQS_QUEUE", "stm.fifo")
+    monkeypatch.delenv("STM_SQS_ENDPOINT", raising=False)
+    with mock_aws():
+        boto3.client("sqs", region_name="us-east-1").create_queue(
+            QueueName="stm.fifo", Attributes={"FifoQueue": "true"}
+        )
+        transport = await worker.build_transport_async()
+        assert isinstance(transport, AsyncSqsTransport)

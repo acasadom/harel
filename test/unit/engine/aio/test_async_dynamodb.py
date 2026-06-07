@@ -265,3 +265,36 @@ async def test_pipeline_flat_async_sqs():
         assert final.active_path == "C"
         assert final.status is Status.DONE
         assert final.context["trace"] == ["A.enter", "B.enter", "C.enter"]
+
+
+# ---------------------------------------------------------------------------
+# Concurrent CAS — asyncio.to_thread means truly parallel threads, so this
+# exercises the DynamoDB TransactWriteItems ConditionExpression under real
+# thread concurrency (moto patches botocore globally, safe from threads).
+# ---------------------------------------------------------------------------
+
+
+async def test_concurrent_writers_only_one_wins():
+    import asyncio
+
+    with mock_aws():
+        store = AsyncDynamoDBStore(boto3.client("dynamodb", region_name="us-east-1"))
+        e = Execution(definition_id="d")
+        await store.save(e)  # version -> 1
+
+        a = await store.load(e.id)
+        b = await store.load(e.id)
+        a.context["w"] = "a"
+        b.context["w"] = "b"
+
+        results = await asyncio.gather(store.save(a), store.save(b), return_exceptions=True)
+        conflicts = [r for r in results if isinstance(r, StoreConflict)]
+        successes = [r for r in results if r is None]
+        assert len(conflicts) == 1, f"expected 1 conflict, got: {results}"
+        assert len(successes) == 1
+
+        final = await store.load(e.id)
+        assert final.version == 2
+        assert final.context["w"] in ("a", "b")
+        loser = a if a.version == 1 else b
+        assert loser.version == 1  # version rolled back on the loser
