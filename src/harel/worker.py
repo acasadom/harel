@@ -29,9 +29,7 @@ STM_STORE_BACKEND.
 
 The worker is **async-native**: one `asyncio` event loop (via `anyio.run`) drives up to
 `STM_CONCURRENCY` events in flight at once with `AsyncWorker.run` (the throughput win).
-Backends with a native async port (sqlite, redis) run async end-to-end; the others are
-adapted from their sync store/transport (correct, but their store IO blocks the loop until
-they get a native async port).
+All backends have a native async port and run async end-to-end.
 
 Run with: `python -m harel.worker`. SIGTERM/SIGINT stop the loop cleanly. The
 workers share nothing but the store + the transport — separate processes (here,
@@ -51,7 +49,6 @@ from harel.definition.model import Definition
 from harel.definition.validate import ValidationError
 from harel.dsl import definition_from_dsl_file, parse
 from harel.dsl.parser import DslError
-from harel.engine.aio import facade
 from harel.engine.aio.distributed import AsyncWorker
 from harel.engine.store import (
     DynamoDBStore,
@@ -154,9 +151,7 @@ def build_transport() -> Transport:
 
 
 async def build_store_async() -> Any:
-    """The async store for STM_STORE_BACKEND: a native async backend where one exists
-    (sqlite, redis), else the sync store adapted to the async interface (correct, but its
-    IO blocks the loop until it gets a native async port)."""
+    """The async store for STM_STORE_BACKEND: all backends have a native async port."""
     backend = os.environ.get("STM_STORE_BACKEND", "sqlite")
     if backend == "sqlite":
         from harel.engine.aio_store import AsyncSqliteStore
@@ -170,12 +165,36 @@ async def build_store_async() -> Any:
         from harel.engine.aio_store import AsyncPostgresStore
 
         return await AsyncPostgresStore.from_dsn(os.environ["STM_POSTGRES_DSN"])
-    return facade.as_async_store(build_store())  # not-yet-ported: adapt the sync store
+    if backend == "surrealdb":
+        from harel.engine.aio_store import AsyncSurrealStore
+
+        return await AsyncSurrealStore.from_url(**_surreal_kwargs())
+    if backend == "mongo":
+        from harel.engine.aio_store import AsyncMongoStore
+
+        return await AsyncMongoStore.from_url(
+            os.environ["STM_MONGO_URL"], os.environ.get("STM_MONGO_DB", "harel")
+        )
+    if backend == "rqlite":
+        from harel.engine.aio_store import AsyncRqliteStore
+
+        return await AsyncRqliteStore.from_url(os.environ["STM_RQLITE_URL"])
+    if backend == "dynamodb":
+        import boto3
+
+        from harel.engine.aio_store import AsyncDynamoDBStore
+
+        endpoint = os.environ.get("STM_DYNAMODB_ENDPOINT")
+        region = os.environ.get("STM_AWS_REGION", "us-east-1")
+        client = boto3.client(
+            "dynamodb", region_name=region, **({"endpoint_url": endpoint} if endpoint else {})
+        )
+        return AsyncDynamoDBStore(client)
+    raise ValueError(f"unknown STM_STORE_BACKEND: {backend}")
 
 
 async def build_transport_async() -> Any:
-    """The async transport for STM_TRANSPORT_BACKEND: native async where one exists (sqlite,
-    redis), else the sync transport adapted."""
+    """The async transport for STM_TRANSPORT_BACKEND: all backends have a native async port."""
     backend = os.environ.get("STM_TRANSPORT_BACKEND", "redis")
     if backend == "redis":
         from harel.engine.aio_transport import AsyncRedisTransport
@@ -189,7 +208,32 @@ async def build_transport_async() -> Any:
         from harel.engine.aio_transport import AsyncPostgresTransport
 
         return await AsyncPostgresTransport.from_dsn(os.environ["STM_POSTGRES_DSN"])
-    return facade.as_async_transport(build_transport())  # not-yet-ported: adapt the sync transport
+    if backend == "surrealdb":
+        from harel.engine.aio_transport import AsyncSurrealTransport
+
+        return await AsyncSurrealTransport.from_url(**_surreal_kwargs())
+    if backend == "mongo":
+        from harel.engine.aio_transport import AsyncMongoTransport
+
+        return await AsyncMongoTransport.from_url(
+            os.environ["STM_MONGO_URL"], os.environ.get("STM_MONGO_DB", "harel")
+        )
+    if backend == "rqlite":
+        from harel.engine.aio_transport import AsyncRqliteTransport
+
+        return await AsyncRqliteTransport.from_url(os.environ["STM_RQLITE_URL"])
+    if backend == "sqs":
+        import boto3
+
+        from harel.engine.aio_transport import AsyncSqsTransport
+
+        endpoint = os.environ.get("STM_SQS_ENDPOINT")
+        region = os.environ.get("STM_AWS_REGION", "us-east-1")
+        client = boto3.client("sqs", region_name=region, **({"endpoint_url": endpoint} if endpoint else {}))
+        queue_name = os.environ.get("STM_SQS_QUEUE", "stm.fifo")
+        resp = client.get_queue_url(QueueName=queue_name)
+        return AsyncSqsTransport(client, resp["QueueUrl"])
+    raise ValueError(f"unknown STM_TRANSPORT_BACKEND: {backend}")
 
 
 async def amain() -> None:
