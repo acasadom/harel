@@ -55,6 +55,7 @@ guide/distribution
 guide/control-plane
 guide/faas
 guide/monitor
+guide/architecture
 guide/dsl-reference
 guide/api-reference
 ```
