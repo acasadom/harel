@@ -84,24 +84,37 @@ def _make_actions(use_sleep: bool) -> Any:
 # ---------------------------------------------------------------------------
 
 
-async def _build_store(pool_size: int) -> Any:
+async def _build_store(pg_pool_size: int, redis_pool_size: int) -> Any:
     backend = os.environ.get("STM_STORE_BACKEND", "redis")
     if backend == "postgres":
         from harel.engine.aio_store import AsyncPostgresStore
 
-        return await AsyncPostgresStore.from_dsn(os.environ["STM_POSTGRES_DSN"], pool_size=pool_size)
-    # delegate the rest to worker.build_store_async
+        return await AsyncPostgresStore.from_dsn(os.environ["STM_POSTGRES_DSN"], pool_size=pg_pool_size)
+    if backend == "redis":
+        import redis.asyncio as aioredis
+
+        from harel.engine.aio_store import AsyncRedisStore
+
+        url = os.environ.get("STM_STORE_REDIS_URL") or os.environ["STM_REDIS_URL"]
+        return AsyncRedisStore(aioredis.Redis.from_url(url, max_connections=redis_pool_size))
     from harel.worker import build_store_async
 
     return await build_store_async()
 
 
-async def _build_transport(pool_size: int) -> Any:
+async def _build_transport(pg_pool_size: int, redis_pool_size: int) -> Any:
     backend = os.environ.get("STM_TRANSPORT_BACKEND", os.environ.get("STM_STORE_BACKEND", "redis"))
     if backend == "postgres":
         from harel.engine.aio_transport import AsyncPostgresTransport
 
-        return await AsyncPostgresTransport.from_dsn(os.environ["STM_POSTGRES_DSN"], pool_size=pool_size)
+        return await AsyncPostgresTransport.from_dsn(os.environ["STM_POSTGRES_DSN"], pool_size=pg_pool_size)
+    if backend == "redis":
+        import redis.asyncio as aioredis
+
+        from harel.engine.aio_transport import AsyncRedisTransport
+
+        url = os.environ["STM_REDIS_URL"]
+        return AsyncRedisTransport(aioredis.Redis.from_url(url, max_connections=redis_pool_size))
     from harel.worker import build_transport_async
 
     return await build_transport_async()
@@ -122,8 +135,10 @@ async def _run_once(
     """Returns (elapsed_seconds, events_per_second) for n machines × 2 events."""
     runner = AsyncDistributedRunner(store, transport, {defn.id: defn})
 
-    # create all executions in parallel
-    exes = await asyncio.gather(*[runner.create(defn.id) for _ in range(n)])
+    # creates are setup (not measured) — sequential avoids exhausting the Redis connection pool
+    exes = []
+    for _ in range(n):
+        exes.append(await runner.create(defn.id))
     exe_ids = [e.id for e in exes]
 
     stop = asyncio.Event()
@@ -186,9 +201,12 @@ async def _main(args: argparse.Namespace) -> None:
     levels = [int(c) for c in args.concurrency.split(",")]
 
     for level in levels:
-        pool_size = args.pool_size if args.pool_size else level * 2 + 4
-        store = await _build_store(pool_size)
-        transport = await _build_transport(pool_size)
+        pg_pool_size = args.pool_size if args.pool_size else level * 2 + 4
+        # Redis pipelines need one connection each; size for both worker concurrency and
+        # the n_executions fan-out during setup (gather of sends).
+        redis_pool_size = max(pg_pool_size, args.n_executions) + 10
+        store = await _build_store(pg_pool_size, redis_pool_size)
+        transport = await _build_transport(pg_pool_size, redis_pool_size)
 
         try:
             elapsed, eps = await _run_once(defn, store, transport, args.n_executions, level)

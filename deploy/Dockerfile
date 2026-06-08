@@ -12,6 +12,11 @@ COPY src ./src
 COPY test ./test
 COPY deploy ./deploy
 
+# setuptools-scm needs a git repo to detect the version; supply a fallback so the
+# Docker build (which has no .git) succeeds.
+ARG SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=${SETUPTOOLS_SCM_PRETEND_VERSION}
+
 # runtime + the redis/postgres/rqlite/mongo/surrealdb/sqs extras (the backend
 # clients) + dev group (pytest, for the test service). One image keeps the stack
 # simple; it's a dev/integration stack.
