@@ -180,16 +180,12 @@ async def build_store_async() -> Any:
 
         return await AsyncRqliteStore.from_url(os.environ["STM_RQLITE_URL"])
     if backend == "dynamodb":
-        import boto3
-
         from harel.engine.aio_store import AsyncDynamoDBStore
 
-        endpoint = os.environ.get("STM_DYNAMODB_ENDPOINT")
-        region = os.environ.get("STM_AWS_REGION", "us-east-1")
-        client = boto3.client(
-            "dynamodb", region_name=region, **({"endpoint_url": endpoint} if endpoint else {})
+        return await AsyncDynamoDBStore.create(
+            endpoint_url=os.environ.get("STM_DYNAMODB_ENDPOINT"),
+            region=os.environ.get("STM_AWS_REGION", "us-east-1"),
         )
-        return AsyncDynamoDBStore(client)
     raise ValueError(f"unknown STM_STORE_BACKEND: {backend}")
 
 
@@ -223,16 +219,13 @@ async def build_transport_async() -> Any:
 
         return await AsyncRqliteTransport.from_url(os.environ["STM_RQLITE_URL"])
     if backend == "sqs":
-        import boto3
-
         from harel.engine.aio_transport import AsyncSqsTransport
 
-        endpoint = os.environ.get("STM_SQS_ENDPOINT")
-        region = os.environ.get("STM_AWS_REGION", "us-east-1")
-        client = boto3.client("sqs", region_name=region, **({"endpoint_url": endpoint} if endpoint else {}))
-        queue_name = os.environ.get("STM_SQS_QUEUE", "stm.fifo")
-        resp = client.get_queue_url(QueueName=queue_name)
-        return AsyncSqsTransport(client, resp["QueueUrl"])
+        return await AsyncSqsTransport.create(
+            endpoint_url=os.environ.get("STM_SQS_ENDPOINT"),
+            queue_name=os.environ.get("STM_SQS_QUEUE", "stm.fifo"),
+            region=os.environ.get("STM_AWS_REGION", "us-east-1"),
+        )
     raise ValueError(f"unknown STM_TRANSPORT_BACKEND: {backend}")
 
 

@@ -1,5 +1,5 @@
 """The async-native worker: AsyncWorker.run (the concurrent semaphore loop) + worker.py's
-async backend builders. In-memory / aiosqlite / mem:// / moto — no Docker."""
+async backend builders. In-memory / aiosqlite / mem:// / aiomoto — no Docker."""
 
 import asyncio
 from unittest.mock import AsyncMock, patch
@@ -104,12 +104,11 @@ async def test_worker_build_store_async_surrealdb(monkeypatch):
 
 
 async def test_worker_build_store_async_dynamodb(monkeypatch):
-    pytest.importorskip("moto")
-    from moto import mock_aws
+    aiomoto = pytest.importorskip("aiomoto")
 
     monkeypatch.setenv("STM_STORE_BACKEND", "dynamodb")
     monkeypatch.setenv("STM_AWS_REGION", "us-east-1")
-    with mock_aws():
+    async with aiomoto.mock_aws():
         store = await worker.build_store_async()
         assert isinstance(store, AsyncDynamoDBStore)
         await store.close()
@@ -173,17 +172,14 @@ async def test_worker_build_transport_async_rqlite(monkeypatch):
 
 
 async def test_worker_build_transport_async_sqs(monkeypatch):
-    pytest.importorskip("moto")
-    import boto3
-    from moto import mock_aws
+    aiomoto = pytest.importorskip("aiomoto")
 
     monkeypatch.setenv("STM_TRANSPORT_BACKEND", "sqs")
     monkeypatch.setenv("STM_AWS_REGION", "us-east-1")
     monkeypatch.setenv("STM_SQS_QUEUE", "stm.fifo")
     monkeypatch.delenv("STM_SQS_ENDPOINT", raising=False)
-    with mock_aws():
-        boto3.client("sqs", region_name="us-east-1").create_queue(
-            QueueName="stm.fifo", Attributes={"FifoQueue": "true"}
-        )
+    async with aiomoto.mock_aws():
+        # create() makes the FIFO queue itself (idempotent), so no pre-seeding needed
         transport = await worker.build_transport_async()
         assert isinstance(transport, AsyncSqsTransport)
+        await transport.close()
