@@ -121,8 +121,39 @@ async def _build_transport(pg_pool_size: int, redis_pool_size: int) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Single benchmark run at one concurrency level
+# Minimal-overhead drain measurement
 # ---------------------------------------------------------------------------
+
+
+class _AckCounter:
+    """Wraps a transport, counting `ack`s; fires `done` when `target` acks are seen.
+    This is the whole measurement instrument — one increment per processed event, no
+    polling probe and no sleeps in the measured path (the old probe-drain loop stole
+    work and added fixed 50ms latency per idle check, capping the apparent rate)."""
+
+    def __init__(self, inner: Any, target: int) -> None:
+        self._inner = inner
+        self._target = target
+        self.count = 0
+        self.done = asyncio.Event()
+
+    async def publish(self, group_id: str, event: Event) -> None:
+        await self._inner.publish(group_id, event)
+
+    async def claim(self, worker_id: str, visibility: float) -> Any:
+        return await self._inner.claim(worker_id, visibility)
+
+    async def ack(self, lease: Any) -> None:
+        await self._inner.ack(lease)
+        self.count += 1
+        if self.count >= self._target:
+            self.done.set()
+
+    async def nack(self, lease: Any, delay: float = 0.0) -> None:
+        await self._inner.nack(lease, delay)
+
+    async def close(self) -> None:
+        await self._inner.close()
 
 
 async def _run_once(
@@ -132,51 +163,33 @@ async def _run_once(
     n: int,
     concurrency: int,
 ) -> tuple[float, float]:
-    """Returns (elapsed_seconds, events_per_second) for n machines × 2 events."""
-    runner = AsyncDistributedRunner(store, transport, {defn.id: defn})
+    """Drain throughput for n machines × 2 events (Start, Finish). Everything before
+    `t0` (create + publish the whole backlog) is setup and NOT measured; we time only
+    the worker draining the pre-loaded queue, and detect the end by counting acks (no
+    probe). Returns (elapsed_seconds, events_per_second)."""
+    counting = _AckCounter(transport, target=n * 2)
+    runner = AsyncDistributedRunner(store, counting, {defn.id: defn})
 
-    # creates are setup (not measured) — sequential avoids exhausting the Redis connection pool
-    exes = []
-    for _ in range(n):
-        exes.append(await runner.create(defn.id))
-    exe_ids = [e.id for e in exes]
+    # --- setup (not measured): create executions and pre-load the full backlog ---
+    exe_ids = [(await runner.create(defn.id)).id for _ in range(n)]
+    # publish Start then Finish for each group; FIFO-per-group delivers Start first, so
+    # the worker advances Idle->Working->Done in order (Finish queues behind Start).
+    for eid in exe_ids:
+        await runner.send(eid, Event(kind="Start"))
+    for eid in exe_ids:
+        await runner.send(eid, Event(kind="Finish"))
 
+    # --- measured: drain the backlog until every event has been acked ---
     stop = asyncio.Event()
-    worker = AsyncWorker(store, transport, {defn.id: defn}, concurrency=concurrency)
-
-    async def _drain() -> None:
-        await worker.run(stop)
-
+    worker = AsyncWorker(store, counting, {defn.id: defn}, concurrency=concurrency)
     t0 = time.perf_counter()
-
-    # send Start to all, drain
-    drain_task = asyncio.create_task(_drain())
-    await asyncio.gather(*[runner.send(eid, Event(kind="Start")) for eid in exe_ids])
-    # wait until the worker goes idle (no more claimable messages)
-    await asyncio.sleep(0)
-    while True:
-        lease = await transport.claim("probe", visibility=0.01)
-        if lease is None:
-            break
-        await transport.nack(lease)
-        await asyncio.sleep(0.05)
-
-    # send Finish to all, drain again
-    await asyncio.gather(*[runner.send(eid, Event(kind="Finish")) for eid in exe_ids])
-    await asyncio.sleep(0)
-    while True:
-        lease = await transport.claim("probe", visibility=0.01)
-        if lease is None:
-            break
-        await transport.nack(lease)
-        await asyncio.sleep(0.05)
+    drain_task = asyncio.create_task(worker.run(stop))
+    await counting.done.wait()
+    elapsed = time.perf_counter() - t0
 
     stop.set()
     await drain_task
-
-    elapsed = time.perf_counter() - t0
-    events = n * 2  # Start + Finish per execution
-    return elapsed, events / elapsed
+    return elapsed, (n * 2) / elapsed
 
 
 # ---------------------------------------------------------------------------

@@ -75,7 +75,7 @@ async def test_async_postgres_distributed_pipeline():
     transport = await AsyncPostgresTransport.from_dsn(_dsn(), prefix=f"t{uuid.uuid4().hex[:8]}")
     async with transport._pool.connection() as conn:
         async with conn.cursor() as cur:
-            await cur.execute("TRUNCATE transport_messages")
+            await cur.execute("TRUNCATE transport_messages, transport_groups")
         await conn.commit()
     runner = AsyncDistributedRunner(store, transport, {defn.id: defn})
 
