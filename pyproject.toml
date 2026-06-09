@@ -43,11 +43,13 @@ mongo = ["pymongo>=4,<5", "motor>=3,<4"]
 # the SurrealStore / SurrealTransport backend; the package bundles an in-process
 # `mem://` engine, which the unit tests run against (no server needed)
 surrealdb = ["surrealdb>=2,<3"]
-# the SqsTransport backend (AWS SQS FIFO; works against LocalStack with no AWS account)
-sqs = ["boto3>=1.26"]
+# the SqsTransport backend (AWS SQS FIFO; works against LocalStack with no AWS account).
+# boto3 drives the sync transport; aioboto3 (aiobotocore) drives the native async one.
+sqs = ["boto3>=1.26", "aioboto3>=12"]
 # the DynamoDBStore backend (AWS serverless; pairs with sqs for an all-AWS stack;
-# works against LocalStack / moto with no AWS account — tests use moto from dev)
-dynamodb = ["boto3>=1.26"]
+# works against LocalStack / moto with no AWS account — tests use moto/aiomoto from dev).
+# boto3 drives the sync store; aioboto3 (aiobotocore) drives the native async one.
+dynamodb = ["boto3>=1.26", "aioboto3>=12"]
 # the DSL language server (editor diagnostics over parse() + validate()); the
 # VSCode extension in editor/vscode/ launches `python -m harel.lsp`
 lsp = ["pygls>=1.3,<2"]
@@ -84,6 +86,10 @@ dev = [
     "textual>=0.60",
     "pytest-asyncio>=0.24",
     "aioboto3>=12",
+    # moto-backed mocking for aiobotocore (aioboto3): plain moto.mock_aws patches
+    # botocore's HTTP send, which aiobotocore bypasses (it uses aiohttp), so the native
+    # async AWS backends need aiomoto to mock in-process — no LocalStack/Docker
+    "aiomoto>=0.5",
     "httpx>=0.27",
     "motor>=3,<4",
     "psycopg-pool>=3,<4",

@@ -1,19 +1,17 @@
-"""Async DynamoDB store + SQS transport (moto mock_aws, in-process — no Docker).
+"""Native-async DynamoDB store + SQS transport (aiomoto, in-process — no Docker).
 
-AsyncDynamoDBStore wraps DynamoDBStore via asyncio.to_thread: event-loop non-blocking,
-moto patches botocore process-wide so the mock applies in threads too.
-AsyncSqsTransport does the same for SqsTransport.
+AsyncDynamoDBStore/AsyncSqsTransport are native aioboto3/aiobotocore ports (every call
+awaited on one aiohttp-backed client). Plain `moto.mock_aws` patches botocore's HTTP send,
+which aiobotocore bypasses (it uses aiohttp), so these tests mock with **aiomoto** instead.
 
 Store contract mirrors test_dynamodb_store.py. Pipeline tests use AsyncDistributedRunner
-with AsyncInMemoryTransport (store under test, same as the sync pipeline tests). A
-separate SQS pipeline test uses AsyncSqsTransport end-to-end.
+with AsyncInMemoryTransport (store under test, same as the sync pipeline tests). A separate
+SQS pipeline test uses AsyncSqsTransport end-to-end.
 """
 
 import pytest
 
-moto = pytest.importorskip("moto")
-import boto3  # noqa: E402
-from moto import mock_aws  # noqa: E402
+aiomoto = pytest.importorskip("aiomoto")
 
 from harel.dsl import definition_from_dsl  # noqa: E402
 from harel.engine.aio.distributed import AsyncDistributedRunner  # noqa: E402
@@ -58,9 +56,11 @@ machine M {
 
 
 @pytest.fixture
-def store():
-    with mock_aws():
-        yield AsyncDynamoDBStore(boto3.client("dynamodb", region_name="us-east-1"))
+async def store():
+    async with aiomoto.mock_aws():
+        s = await AsyncDynamoDBStore.create(region="us-east-1")
+        yield s
+        await s.close()
 
 
 # ---------------------------------------------------------------------------
@@ -193,9 +193,9 @@ async def test_delete_timer_is_guarded_on_fire_at(store):
 
 
 async def test_pipeline_flat_async_dynamodb():
-    with mock_aws():
+    async with aiomoto.mock_aws():
         defn = definition_from_dsl(FLAT, "M")
-        store = AsyncDynamoDBStore(boto3.client("dynamodb", region_name="us-east-1"))
+        store = await AsyncDynamoDBStore.create(region="us-east-1")
         runner = AsyncDistributedRunner(store, AsyncInMemoryTransport(), {defn.id: defn})
 
         exe = await runner.create(defn.id)
@@ -209,12 +209,13 @@ async def test_pipeline_flat_async_dynamodb():
         assert final.active_path == "C"
         assert final.status is Status.DONE
         assert final.context["trace"] == ["A.enter", "B.enter", "C.enter"]
+        await store.close()
 
 
 async def test_pipeline_orthogonal_async_dynamodb():
-    with mock_aws():
+    async with aiomoto.mock_aws():
         defn = definition_from_dsl(ORTHO, "M")
-        store = AsyncDynamoDBStore(boto3.client("dynamodb", region_name="us-east-1"))
+        store = await AsyncDynamoDBStore.create(region="us-east-1")
         runner = AsyncDistributedRunner(store, AsyncInMemoryTransport(), {defn.id: defn})
 
         exe = await runner.create(defn.id)
@@ -231,27 +232,20 @@ async def test_pipeline_orthogonal_async_dynamodb():
         assert final.context["trace"] == ["Done"]
         regions = [await store.load(cid) for cid in child_ids]
         assert sorted(r.context["trace"] for r in regions) == [["A1", "A2"], ["B1", "B2"]]
+        await store.close()
 
 
 # ---------------------------------------------------------------------------
-# AsyncSqsTransport pipeline (moto mock_aws, no Docker)
+# AsyncSqsTransport pipeline (aiomoto, no Docker)
 # ---------------------------------------------------------------------------
 
 
 async def test_pipeline_flat_async_sqs():
-    with mock_aws():
-        sqs_client = boto3.client(
-            "sqs",
-            region_name="us-east-1",
-            endpoint_url=None,
-            aws_access_key_id="test",
-            aws_secret_access_key="test",
-        )
-        resp = sqs_client.create_queue(QueueName="stm.fifo", Attributes={"FifoQueue": "true"})
-        transport = AsyncSqsTransport(sqs_client, resp["QueueUrl"], wait_seconds=0)
+    async with aiomoto.mock_aws():
+        transport = await AsyncSqsTransport.create(region="us-east-1", queue_name="stm.fifo", wait_seconds=0)
 
         defn = definition_from_dsl(FLAT, "M")
-        store = AsyncDynamoDBStore(boto3.client("dynamodb", region_name="us-east-1"))
+        store = await AsyncDynamoDBStore.create(region="us-east-1")
         runner = AsyncDistributedRunner(store, transport, {defn.id: defn})
 
         exe = await runner.create(defn.id)
@@ -265,20 +259,22 @@ async def test_pipeline_flat_async_sqs():
         assert final.active_path == "C"
         assert final.status is Status.DONE
         assert final.context["trace"] == ["A.enter", "B.enter", "C.enter"]
+        await transport.close()
+        await store.close()
 
 
 # ---------------------------------------------------------------------------
-# Concurrent CAS — asyncio.to_thread means truly parallel threads, so this
-# exercises the DynamoDB TransactWriteItems ConditionExpression under real
-# thread concurrency (moto patches botocore globally, safe from threads).
+# Concurrent CAS — two awaited commits multiplexed on the one aiobotocore client.
+# moto serializes the two TransactWriteItems server-side, so the second's
+# ConditionExpression (version = 1) fails once the first has bumped to 2.
 # ---------------------------------------------------------------------------
 
 
 async def test_concurrent_writers_only_one_wins():
     import asyncio
 
-    with mock_aws():
-        store = AsyncDynamoDBStore(boto3.client("dynamodb", region_name="us-east-1"))
+    async with aiomoto.mock_aws():
+        store = await AsyncDynamoDBStore.create(region="us-east-1")
         e = Execution(definition_id="d")
         await store.save(e)  # version -> 1
 
@@ -298,3 +294,4 @@ async def test_concurrent_writers_only_one_wins():
         assert final.context["w"] in ("a", "b")
         loser = a if a.version == 1 else b
         assert loser.version == 1  # version rolled back on the loser
+        await store.close()

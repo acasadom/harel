@@ -189,6 +189,20 @@ wheels = [
 ]
 
 [[package]]
+name = "aiomoto"
+version = "0.5.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiobotocore" },
+    { name = "moto" },
+    { name = "platformdirs" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6e/12/ca1bbf7b65c10902b9d7d784d3209ba6391e12879ca52648066e2e350e1b/aiomoto-0.5.3.tar.gz", hash = "sha256:78a1a929a8ad7855460113eae71785cf4b15610c33b38b3432d2c1f54055eada", size = 17951, upload-time = "2026-05-30T16:25:23.633Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5b/02/f2a1c2ab94c7935a37416885a80c8d959e3d214ad7da0f52f625e56615a5/aiomoto-0.5.3-py3-none-any.whl", hash = "sha256:9a08ac1879c7111e88a9f5ab639c6e9c50903e728da09a760111afd49703ffdb", size = 19580, upload-time = "2026-05-30T16:25:24.624Z" },
+]
+
+[[package]]
 name = "aiosignal"
 version = "1.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -743,6 +757,7 @@ dependencies = [
 
 [package.optional-dependencies]
 dynamodb = [
+    { name = "aioboto3" },
     { name = "boto3" },
 ]
 faas = [
@@ -768,6 +783,7 @@ rqlite = [
     { name = "requests" },
 ]
 sqs = [
+    { name = "aioboto3" },
     { name = "boto3" },
 ]
 surrealdb = [
@@ -780,6 +796,7 @@ tui = [
 [package.dev-dependencies]
 dev = [
     { name = "aioboto3" },
+    { name = "aiomoto" },
     { name = "fakeredis" },
     { name = "httpx" },
     { name = "mongomock" },
@@ -802,6 +819,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aioboto3", marker = "extra == 'dynamodb'", specifier = ">=12" },
+    { name = "aioboto3", marker = "extra == 'sqs'", specifier = ">=12" },
     { name = "aiosqlite", specifier = ">=0.20" },
     { name = "anyio", specifier = ">=4,<5" },
     { name = "boto3", marker = "extra == 'dynamodb'", specifier = ">=1.26" },
@@ -827,6 +846,7 @@ provides-extras = ["dynamodb", "faas", "lsp", "mongo", "postgres", "redis", "rql
 [package.metadata.requires-dev]
 dev = [
     { name = "aioboto3", specifier = ">=12" },
+    { name = "aiomoto", specifier = ">=0.5" },
     { name = "fakeredis", specifier = ">=2.36.0" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "mongomock", specifier = ">=4.1" },
