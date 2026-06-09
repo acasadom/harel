@@ -866,9 +866,11 @@ class AsyncDynamoDBStore:
     def _item(self, raw: dict) -> dict:
         return {k: self._deser.deserialize(v) for k, v in raw.items()}
 
-    async def _scan(self, table: str) -> list[dict]:
+    async def _scan(self, table: str, **params: Any) -> list[dict]:
+        """Scan a table, following `LastEvaluatedKey` to drain every page (a single Scan
+        returns at most 1MB). `params` adds scan options such as a `FilterExpression`."""
         items: list[dict] = []
-        kwargs: dict[str, Any] = {"TableName": self._t(table)}
+        kwargs: dict[str, Any] = {"TableName": self._t(table), **params}
         while True:
             resp = await self._db.scan(**kwargs)
             items.extend(self._item(it) for it in resp.get("Items", []))
@@ -1032,15 +1034,12 @@ class AsyncDynamoDBStore:
         await self._db.delete_item(TableName=self._t("spawns"), Key=self._raw({"seq": seq}))
 
     async def due_timers(self, now: float) -> list[tuple[str, str, float]]:
-        resp = await self._db.scan(
-            TableName=self._t("timers"),
+        rows = await self._scan(
+            "timers",
             FilterExpression="fire_at <= :now",
             ExpressionAttributeValues={":now": {"N": str(now)}},
         )
-        out = [
-            (r["execution_id"], r["path"], float(r["fire_at"]))
-            for r in (self._item(it) for it in resp.get("Items", []))
-        ]
+        out = [(r["execution_id"], r["path"], float(r["fire_at"])) for r in rows]
         return sorted(out, key=lambda t: t[2])
 
     async def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None:

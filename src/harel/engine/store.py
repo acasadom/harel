@@ -1730,9 +1730,11 @@ class DynamoDBStore:
         """DynamoDB's typed form → a native dict (numbers come back as Decimal)."""
         return {k: self._deser.deserialize(v) for k, v in raw.items()}
 
-    def _scan(self, table: str) -> list[dict]:
+    def _scan(self, table: str, **params: Any) -> list[dict]:
+        """Scan a table, following `LastEvaluatedKey` to drain every page (a single Scan
+        returns at most 1MB). `params` adds scan options such as a `FilterExpression`."""
         items: list[dict] = []
-        kwargs: dict[str, Any] = {"TableName": self._t(table)}
+        kwargs: dict[str, Any] = {"TableName": self._t(table), **params}
         while True:
             resp = self._db.scan(**kwargs)
             items.extend(self._item(it) for it in resp.get("Items", []))
@@ -1932,15 +1934,12 @@ class DynamoDBStore:
         self._db.delete_item(TableName=self._t("spawns"), Key=self._raw({"seq": seq}))
 
     def due_timers(self, now: float) -> list[tuple[str, str, float]]:
-        resp = self._db.scan(
-            TableName=self._t("timers"),
+        rows = self._scan(
+            "timers",
             FilterExpression="fire_at <= :now",
             ExpressionAttributeValues={":now": {"N": str(now)}},
         )
-        out = [
-            (r["execution_id"], r["path"], float(r["fire_at"]))
-            for r in (self._item(it) for it in resp.get("Items", []))
-        ]
+        out = [(r["execution_id"], r["path"], float(r["fire_at"])) for r in rows]
         return sorted(out, key=lambda t: t[2])
 
     def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None:
