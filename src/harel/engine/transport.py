@@ -646,30 +646,38 @@ class SqsTransport:
 class MongoTransport:
     """`Transport` over MongoDB — a multi-machine queue (the document-store
     sibling of the SQL queues), no Redis. MongoDB has no native message groups,
-    so — like `RedisTransport` — the per-group exclusivity is built by hand with a
-    **per-group lock document**:
+    so — like `RedisTransport` — the per-group exclusivity is built by hand:
 
     - ``{prefix}_messages`` — the FIFO, one document per message keyed by a
       monotonic `_id` seq (oldest = smallest seq).
-    - ``{prefix}_locks`` — one document per group; held via an atomic
-      `find_one_and_update(..., upsert=True)` whose filter only matches a free or
-      expired lock, so a `DuplicateKeyError` on the upsert means "another worker
-      holds it" (skip). `lock_expiry` is the lease — a crashed worker's lock
-      expires and the group becomes claimable again.
+    - ``{prefix}_locks`` — one document per group that has messages, the
+      **ready-index + lock in one**: `available_at` is the epoch at which the
+      group is next claimable (0 = now), and `token` is the current lease (for
+      fencing). `claim` reads only the few lowest `available_at <= now` groups
+      (`find(...).sort(available_at).limit(K)`), so its cost is O(log N + K) in the
+      number of *active groups* — NOT a `$group` aggregation over every message (the
+      old design, which scanned the whole `messages` collection on each claim and
+      collapsed under a backlog). Leasing bumps `available_at` to `now + visibility`,
+      so concurrent claimers skip the group AND it reappears on its own once the
+      lease expires (crash recovery, no separate sweep).
 
-    `claim` walks the groups ordered by their oldest message, takes the first
-    group whose lock is free, and returns its head without removing it; `ack`
-    (lock still owned) deletes the message + releases; `nack` releases (or, with
-    `delay>0`, extends the lock = park). The client is injected (duck-typed), so
-    `pymongo` is an optional extra and tests use mongomock. NOTE: like the other
-    lease backends, a lock that expires mid-ack can let two workers touch one
-    group; the store's version/CAS is the backstop."""
+    `claim` atomically leases the group (a `find_one_and_update` whose filter still
+    requires `available_at <= now`, so only one worker wins the race) and returns its
+    head without removing it; `ack` (lock still owned) deletes the head and re-readies
+    the group (`available_at=0`) or drops it if empty; `nack` re-readies now, or parks
+    it for `delay`. The client is injected (duck-typed), so `pymongo` is an optional
+    extra and tests use mongomock. NOTE: like the other lease backends, a lock that
+    expires mid-ack can let two workers touch one group; the store's version/CAS is the
+    backstop."""
+
+    # how many lowest-`available_at` due groups `claim` considers per call — bounds the
+    # work so it never scales with the total number of active groups.
+    _CANDIDATES = 8
 
     def __init__(
         self, client: Any, db_name: str = "harel", prefix: str = "stm", clock: Callable[[], float] = time.time
     ) -> None:
         from pymongo import ReturnDocument
-        from pymongo.errors import DuplicateKeyError
 
         self._client = client
         self._db = client[db_name]
@@ -677,7 +685,6 @@ class MongoTransport:
         self._locks = self._db[f"{prefix}_locks"]
         self._counters = self._db[f"{prefix}_counters"]
         self._after = ReturnDocument.AFTER
-        self._DuplicateKeyError = DuplicateKeyError
         self._clock = clock
 
     @classmethod
@@ -694,7 +701,9 @@ class MongoTransport:
             try:
                 client: Any = pymongo.MongoClient(url)
                 client.admin.command("ping")
-                return cls(client, db_name)
+                inst = cls(client, db_name)
+                inst._locks.create_index("available_at")  # the claim index (O(log N + K))
+                return inst
             except PyMongoError as exc:
                 last = exc
                 _time.sleep(retry_delay)
@@ -710,29 +719,29 @@ class MongoTransport:
         self._msgs.insert_one(
             {"_id": self._next_seq(), "group_id": group_id, "event": event.model_dump_json()}
         )
+        # ready the group NOW iff it is new ($setOnInsert): a publish into an in-flight or
+        # parked group must not make it claimable before its lease/park elapses.
+        self._locks.update_one(
+            {"_id": group_id}, {"$setOnInsert": {"available_at": 0.0, "token": None}}, upsert=True
+        )
 
     def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
         now = self._clock()
-        # groups that still have messages, ordered by their oldest message
-        groups = self._msgs.aggregate(
-            [{"$group": {"_id": "$group_id", "head": {"$min": "$_id"}}}, {"$sort": {"head": 1}}]
+        # only the few lowest-`available_at` groups due now — O(log N + K), not a scan
+        candidates = (
+            self._locks.find({"available_at": {"$lte": now}}).sort("available_at", 1).limit(self._CANDIDATES)
         )
-        for g in groups:
-            group_id = g["_id"]
+        for c in list(candidates):
+            group_id = c["_id"]
             token = f"{worker_id}:{uuid.uuid4().hex}"
-            try:
-                # acquire iff free/expired; an existing live lock makes the upsert
-                # collide on _id -> DuplicateKeyError -> held by another worker
-                self._locks.find_one_and_update(
-                    {
-                        "_id": group_id,
-                        "$or": [{"lock_expiry": {"$lte": now}}, {"lock_expiry": {"$exists": False}}],
-                    },
-                    {"$set": {"token": token, "lock_expiry": now + visibility}},
-                    upsert=True,
-                )
-            except self._DuplicateKeyError:
-                continue
+            # atomic lease: re-check `available_at <= now` in the filter so only one worker
+            # wins; the loser's filter no longer matches once the winner bumps it out.
+            leased = self._locks.find_one_and_update(
+                {"_id": group_id, "available_at": {"$lte": now}},
+                {"$set": {"token": token, "available_at": now + visibility}},
+            )
+            if leased is None:
+                continue  # another worker leased it first
             head = self._msgs.find_one({"group_id": group_id}, sort=[("_id", 1)])
             if head is None:
                 self._locks.delete_one({"_id": group_id, "token": token})  # stale group, release
@@ -746,22 +755,32 @@ class MongoTransport:
 
     def ack(self, lease: Lease) -> None:
         if not self._owns(lease.group_id, lease.token):
-            return  # fencing: only the current lock holder removes + releases
+            return  # fencing: only the current lock holder removes + re-readies
         self._msgs.delete_one({"_id": lease.seq})
-        self._locks.delete_one({"_id": lease.group_id, "token": lease.token})
+        if self._msgs.find_one({"group_id": lease.group_id}) is not None:
+            # more messages: claimable now, in FIFO order (next head)
+            self._locks.update_one(
+                {"_id": lease.group_id, "token": lease.token},
+                {"$set": {"available_at": 0.0, "token": None}},
+            )
+        else:
+            self._locks.delete_one({"_id": lease.group_id, "token": lease.token})
 
     def nack(self, lease: Lease, delay: float = 0.0) -> None:
         if not self._owns(lease.group_id, lease.token):
             return
         if delay > 0:
-            # park: keep the lock held for `delay` so the still-present head is not
-            # re-claimed until it expires
+            # park: not claimable until `delay` passes; keep the token so the still-present
+            # head isn't re-claimed before then
             self._locks.update_one(
                 {"_id": lease.group_id, "token": lease.token},
-                {"$set": {"lock_expiry": self._clock() + delay}},
+                {"$set": {"available_at": self._clock() + delay}},
             )
         else:
-            self._locks.delete_one({"_id": lease.group_id, "token": lease.token})
+            self._locks.update_one(
+                {"_id": lease.group_id, "token": lease.token},
+                {"$set": {"available_at": 0.0, "token": None}},
+            )
 
     def close(self) -> None:
         self._client.close()
@@ -769,21 +788,29 @@ class MongoTransport:
 
 class SurrealTransport:
     """`Transport` over SurrealDB — a multi-machine queue with no Redis. Like
-    `MongoTransport`, the per-group exclusivity is a **per-group lock record**
-    (SurrealDB has no native message groups). Acquiring the lock is one atomic
-    server-side `BEGIN … COMMIT` block: it `THROW`s (aborting the txn) if the
-    lock is still live, so a collision means "held by another worker" (skip);
-    otherwise it upserts the lock. The lock's `lock_expiry` is the lease — a
-    crashed worker's lock expires and the group becomes claimable again.
+    `MongoTransport`, the per-group control is a **per-group `locks` record** that is
+    the ready-index + lock in one (SurrealDB has no native message groups):
+    `available_at` is the epoch at which the group is next claimable (0 = now) and
+    `token` is the current lease. `claim` reads only the few lowest `available_at <=
+    now` groups (`SELECT … WHERE available_at <= $now ORDER BY available_at LIMIT K`),
+    so its cost is O(active groups), not a `GROUP BY` over every message (the old
+    design, which scanned the whole `messages` table on each claim and collapsed under
+    a backlog). Acquiring is one atomic server-side `BEGIN … COMMIT` block that `THROW`s
+    (aborting the txn) if the group is no longer due — so only one racing worker wins;
+    otherwise it stamps the token and bumps `available_at` to `now + visibility`. The
+    bumped time is the lease: a crashed worker's group reappears once it elapses.
 
-    `messages` is the FIFO (one record per message, monotonic `seq`); `claim`
-    walks the groups ordered by their oldest message, takes the first whose lock
-    is free, and returns its head without removing it; `ack` (lock still owned)
-    deletes the message + releases; `nack` releases (or, with `delay>0`, extends
-    the lock = park). The client is injected (an already-connected `Surreal`), so
-    `surrealdb` is an optional extra and tests use the in-process `mem://` engine.
-    NOTE: like the other lease backends, a lock that expires mid-ack can let two
+    `messages` is the FIFO (one record per message, monotonic `seq`); `claim` leases a
+    due group and returns its head without removing it; `ack` (lock still owned) deletes
+    the head and re-readies the group (`available_at=0`) or drops it if empty; `nack`
+    re-readies now, or parks it for `delay`. The client is injected (an already-connected
+    `Surreal`), so `surrealdb` is an optional extra and tests use the in-process `mem://`
+    engine. NOTE: like the other lease backends, a lock that expires mid-ack can let two
     workers touch one group; the store's version/CAS is the backstop."""
+
+    # how many lowest-`available_at` due groups `claim` considers per call (a trusted int
+    # constant, inlined into the query since SurrealDB wants a literal LIMIT).
+    _CANDIDATES = 8
 
     def __init__(self, client: Any, clock: Callable[[], float] = time.time) -> None:
         from surrealdb import SurrealError
@@ -816,6 +843,7 @@ class SurrealTransport:
                     client.signin({"username": username, "password": password})
                 client.use(namespace, database)
                 client.query("INFO FOR DB")
+                client.query("DEFINE INDEX IF NOT EXISTS locks_avail ON TABLE locks COLUMNS available_at")
                 return cls(client)
             except Exception as exc:  # noqa: BLE001 — retry any connect-time failure
                 last = exc
@@ -831,21 +859,32 @@ class SurrealTransport:
             "CREATE messages SET seq=$s, group_id=$g, event=$e",
             {"s": self._next_seq(), "g": group_id, "e": event.model_dump_json()},
         )
+        # ready the group NOW iff it is new (`available_at ?? 0` keeps an existing value):
+        # a publish into an in-flight or parked group must not make it claimable early.
+        self._db.query(
+            "UPSERT type::thing('locks',$g) SET available_at = available_at ?? 0, group_id = $g",
+            {"g": group_id},
+        )
 
+    # atomic lease: THROW (abort) unless the group is still due, so only one racing worker
+    # wins; the winner stamps its token and pushes `available_at` out by the visibility window
     _ACQUIRE = (
         "BEGIN;\n"
-        "LET $l = (SELECT id FROM type::thing('locks',$g) WHERE lock_expiry > $now);\n"
-        "IF array::len($l) > 0 { THROW 'held' };\n"
-        "UPSERT type::thing('locks',$g) SET token=$tok, lock_expiry=$exp;\n"
+        "LET $d = (SELECT id FROM type::thing('locks',$g) WHERE available_at <= $now);\n"
+        "IF array::len($d) == 0 { THROW 'taken' };\n"
+        "UPDATE type::thing('locks',$g) SET token=$tok, available_at=$exp;\n"
         "COMMIT;"
     )
 
     def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
         now = self._clock()
-        groups = self._db.query(
-            "SELECT group_id, math::min(seq) AS head FROM messages GROUP BY group_id ORDER BY head ASC"
+        # only the few lowest-`available_at` groups due now — O(active groups), not a scan
+        candidates = self._db.query(
+            f"SELECT group_id, available_at FROM locks WHERE available_at <= $now "
+            f"ORDER BY available_at ASC LIMIT {self._CANDIDATES}",
+            {"now": now},
         )
-        for g in groups:
+        for g in candidates:
             group_id = g["group_id"]
             token = f"{worker_id}:{uuid.uuid4().hex}"
             try:
@@ -853,7 +892,7 @@ class SurrealTransport:
                     self._ACQUIRE, {"g": group_id, "now": now, "tok": token, "exp": now + visibility}
                 )
             except self._SurrealError:
-                continue  # held by another worker
+                continue  # another worker leased it first
             head = self._db.query(
                 "SELECT seq, event FROM messages WHERE group_id=$g ORDER BY seq ASC LIMIT 1", {"g": group_id}
             )
@@ -870,22 +909,32 @@ class SurrealTransport:
 
     def ack(self, lease: Lease) -> None:
         if not self._owns(lease.group_id, lease.token):
-            return  # fencing: only the current lock holder removes + releases
+            return  # fencing: only the current lock holder removes + re-readies
         self._db.query("DELETE messages WHERE seq=$s", {"s": lease.seq})
-        self._db.query("DELETE type::thing('locks',$g)", {"g": lease.group_id})
+        remaining = self._db.query(
+            "SELECT seq FROM messages WHERE group_id=$g LIMIT 1", {"g": lease.group_id}
+        )
+        if remaining:  # more messages: claimable now, in FIFO order (next head)
+            self._db.query(
+                "UPDATE type::thing('locks',$g) SET available_at=0, token=NONE", {"g": lease.group_id}
+            )
+        else:
+            self._db.query("DELETE type::thing('locks',$g)", {"g": lease.group_id})
 
     def nack(self, lease: Lease, delay: float = 0.0) -> None:
         if not self._owns(lease.group_id, lease.token):
             return
         if delay > 0:
-            # park: keep the lock held for `delay` so the still-present head is not
-            # re-claimed until it expires
+            # park: not claimable until `delay` passes; keep the token so the still-present
+            # head isn't re-claimed before then
             self._db.query(
-                "UPDATE type::thing('locks',$g) SET lock_expiry=$exp",
+                "UPDATE type::thing('locks',$g) SET available_at=$exp",
                 {"g": lease.group_id, "exp": self._clock() + delay},
             )
         else:
-            self._db.query("DELETE type::thing('locks',$g)", {"g": lease.group_id})
+            self._db.query(
+                "UPDATE type::thing('locks',$g) SET available_at=0, token=NONE", {"g": lease.group_id}
+            )
 
     def close(self) -> None:
         self._db.close()

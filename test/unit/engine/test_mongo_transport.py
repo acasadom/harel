@@ -109,6 +109,20 @@ def test_one_in_flight_per_group_but_other_groups_proceed(transport):
     assert nxt.group_id == "G" and nxt.event.kind == "g2"
 
 
+def test_more_groups_than_the_candidate_window_all_get_claimed(transport):
+    # claim() only looks at the few lowest-`available_at` groups per call (_CANDIDATES);
+    # with more ready groups than that window, every group must still get claimed across
+    # successive claims (no group beyond the window is starved).
+    n = MongoTransport._CANDIDATES + 5
+    for i in range(n):
+        transport.publish(f"G{i}", _event(f"e{i}"))
+    claimed = set()
+    while (lease := transport.claim("w", visibility=30)) is not None:
+        claimed.add(lease.group_id)
+        transport.ack(lease)
+    assert len(claimed) == n
+
+
 def test_ack_removes_the_message(transport):
     transport.publish("G", _event("only"))
     transport.ack(transport.claim("w", visibility=30))

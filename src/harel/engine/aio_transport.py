@@ -346,10 +346,14 @@ class AsyncRedisTransport:
 
 
 class AsyncSurrealTransport:
-    """Async mirror of `SurrealTransport`: per-group exclusivity via a `THROW`-gated
-    `BEGIN … COMMIT` lock-acquire block (awaited), FIFO via a `messages` table,
-    `lock_expiry` lease for crash recovery. The client is injected (an already-connected
+    """Async mirror of `SurrealTransport`: per-group control via a `locks` record that is the
+    ready-index + lock in one (`available_at` = next claimable epoch, `token` = the lease).
+    `claim` reads only the few lowest `available_at <= now` groups (`SELECT … ORDER BY
+    available_at LIMIT K`) and leases one with a `THROW`-gated `BEGIN … COMMIT` block — O(active
+    groups), not a `GROUP BY` over every message. The client is injected (an already-connected
     `AsyncSurreal`), so tests use the in-process `mem://` engine."""
+
+    _CANDIDATES = 8
 
     def __init__(self, client: Any, clock: Callable[[], float] = time.time) -> None:
         from surrealdb import SurrealError
@@ -381,6 +385,9 @@ class AsyncSurrealTransport:
                     await client.signin({"username": username, "password": password})
                 await client.use(namespace, database)
                 await client.query("INFO FOR DB")
+                await client.query(
+                    "DEFINE INDEX IF NOT EXISTS locks_avail ON TABLE locks COLUMNS available_at"
+                )
                 return cls(client)
             except Exception as exc:  # noqa: BLE001
                 last = exc
@@ -396,21 +403,30 @@ class AsyncSurrealTransport:
             "CREATE messages SET seq=$s, group_id=$g, event=$e",
             {"s": await self._next_seq(), "g": group_id, "e": event.model_dump_json()},
         )
+        # ready the group NOW iff it is new (`available_at ?? 0` keeps an existing value)
+        await self._db.query(
+            "UPSERT type::thing('locks',$g) SET available_at = available_at ?? 0, group_id = $g",
+            {"g": group_id},
+        )
 
+    # atomic lease: THROW (abort) unless the group is still due, so only one racing worker wins
     _ACQUIRE = (
         "BEGIN;\n"
-        "LET $l = (SELECT id FROM type::thing('locks',$g) WHERE lock_expiry > $now);\n"
-        "IF array::len($l) > 0 { THROW 'held' };\n"
-        "UPSERT type::thing('locks',$g) SET token=$tok, lock_expiry=$exp;\n"
+        "LET $d = (SELECT id FROM type::thing('locks',$g) WHERE available_at <= $now);\n"
+        "IF array::len($d) == 0 { THROW 'taken' };\n"
+        "UPDATE type::thing('locks',$g) SET token=$tok, available_at=$exp;\n"
         "COMMIT;"
     )
 
     async def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
         now = self._clock()
-        groups = await self._db.query(
-            "SELECT group_id, math::min(seq) AS head FROM messages GROUP BY group_id ORDER BY head ASC"
+        # only the few lowest-`available_at` groups due now — O(active groups), not a scan
+        candidates = await self._db.query(
+            f"SELECT group_id, available_at FROM locks WHERE available_at <= $now "
+            f"ORDER BY available_at ASC LIMIT {self._CANDIDATES}",
+            {"now": now},
         )
-        for g in groups:
+        for g in candidates:
             group_id = g["group_id"]
             token = f"{worker_id}:{uuid.uuid4().hex}"
             try:
@@ -419,7 +435,7 @@ class AsyncSurrealTransport:
                     {"g": group_id, "now": now, "tok": token, "exp": now + visibility},
                 )
             except self._SurrealError:
-                continue  # held by another worker
+                continue  # another worker leased it first
             head = await self._db.query(
                 "SELECT seq, event FROM messages WHERE group_id=$g ORDER BY seq ASC LIMIT 1",
                 {"g": group_id},
@@ -439,18 +455,29 @@ class AsyncSurrealTransport:
         if not await self._owns(lease.group_id, lease.token):
             return
         await self._db.query("DELETE messages WHERE seq=$s", {"s": lease.seq})
-        await self._db.query("DELETE type::thing('locks',$g)", {"g": lease.group_id})
+        remaining = await self._db.query(
+            "SELECT seq FROM messages WHERE group_id=$g LIMIT 1", {"g": lease.group_id}
+        )
+        if remaining:
+            await self._db.query(
+                "UPDATE type::thing('locks',$g) SET available_at=0, token=NONE", {"g": lease.group_id}
+            )
+        else:
+            await self._db.query("DELETE type::thing('locks',$g)", {"g": lease.group_id})
 
     async def nack(self, lease: Lease, delay: float = 0.0) -> None:
         if not await self._owns(lease.group_id, lease.token):
             return
         if delay > 0:
+            # park: keep the token so the still-present head isn't re-claimed before `delay`
             await self._db.query(
-                "UPDATE type::thing('locks',$g) SET lock_expiry=$exp",
+                "UPDATE type::thing('locks',$g) SET available_at=$exp",
                 {"g": lease.group_id, "exp": self._clock() + delay},
             )
         else:
-            await self._db.query("DELETE type::thing('locks',$g)", {"g": lease.group_id})
+            await self._db.query(
+                "UPDATE type::thing('locks',$g) SET available_at=0, token=NONE", {"g": lease.group_id}
+            )
 
     async def close(self) -> None:
         await self._db.close()
@@ -671,10 +698,14 @@ class AsyncRqliteTransport:
 
 
 class AsyncMongoTransport:
-    """Async mirror of `MongoTransport` over `motor.motor_asyncio`: per-group exclusivity
-    via a per-group lock document (free/expired lock → upsert wins; `DuplicateKeyError` →
-    held by another worker), cursor aggregation via `async for`. Build with
+    """Async mirror of `MongoTransport` over `motor.motor_asyncio`: per-group exclusivity via
+    a per-group `locks` document that is the ready-index + lock in one (`available_at` = next
+    claimable epoch, `token` = the lease). `claim` reads only the few lowest `available_at <=
+    now` groups (`find(...).sort(available_at).limit(K)`) and atomically leases one — O(log N + K)
+    in active groups, not a `$group` over every message. Build with
     `await AsyncMongoTransport.from_url(url)` or inject an `AsyncIOMotorClient`."""
+
+    _CANDIDATES = 8
 
     def __init__(
         self,
@@ -684,7 +715,6 @@ class AsyncMongoTransport:
         clock: Callable[[], float] = time.time,
     ) -> None:
         from pymongo import ReturnDocument
-        from pymongo.errors import DuplicateKeyError
 
         self._client = client
         self._db = client[db_name]
@@ -692,7 +722,6 @@ class AsyncMongoTransport:
         self._locks = self._db[f"{prefix}_locks"]
         self._counters = self._db[f"{prefix}_counters"]
         self._after = ReturnDocument.AFTER
-        self._DuplicateKeyError = DuplicateKeyError
         self._clock = clock
 
     @classmethod
@@ -712,7 +741,9 @@ class AsyncMongoTransport:
             try:
                 client: Any = motor.motor_asyncio.AsyncIOMotorClient(url)
                 await client.admin.command("ping")
-                return cls(client, db_name)
+                inst = cls(client, db_name)
+                await inst._locks.create_index("available_at")  # the claim index
+                return inst
             except PyMongoError as exc:
                 last = exc
                 await anyio.sleep(retry_delay)
@@ -728,29 +759,31 @@ class AsyncMongoTransport:
         await self._msgs.insert_one(
             {"_id": await self._next_seq(), "group_id": group_id, "event": event.model_dump_json()}
         )
+        # ready the group NOW iff it is new ($setOnInsert): don't make an in-flight/parked
+        # group claimable before its lease/park elapses
+        await self._locks.update_one(
+            {"_id": group_id}, {"$setOnInsert": {"available_at": 0.0, "token": None}}, upsert=True
+        )
 
     async def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
         now = self._clock()
-        groups = self._msgs.aggregate(
-            [{"$group": {"_id": "$group_id", "head": {"$min": "$_id"}}}, {"$sort": {"head": 1}}]
+        # only the few lowest-`available_at` groups due now — O(log N + K), not a scan
+        cursor = (
+            self._locks.find({"available_at": {"$lte": now}}).sort("available_at", 1).limit(self._CANDIDATES)
         )
-        async for g in groups:
-            group_id = g["_id"]
+        for c in [doc async for doc in cursor]:
+            group_id = c["_id"]
             token = f"{worker_id}:{uuid.uuid4().hex}"
-            try:
-                await self._locks.find_one_and_update(
-                    {
-                        "_id": group_id,
-                        "$or": [{"lock_expiry": {"$lte": now}}, {"lock_expiry": {"$exists": False}}],
-                    },
-                    {"$set": {"token": token, "lock_expiry": now + visibility}},
-                    upsert=True,
-                )
-            except self._DuplicateKeyError:
-                continue
+            # atomic lease: re-check `available_at <= now` so only one racing worker wins
+            leased = await self._locks.find_one_and_update(
+                {"_id": group_id, "available_at": {"$lte": now}},
+                {"$set": {"token": token, "available_at": now + visibility}},
+            )
+            if leased is None:
+                continue  # another worker leased it first
             head = await self._msgs.find_one({"group_id": group_id}, sort=[("_id", 1)])
             if head is None:
-                await self._locks.delete_one({"_id": group_id, "token": token})
+                await self._locks.delete_one({"_id": group_id, "token": token})  # stale group, release
                 continue
             return Lease(head["_id"], group_id, Event.model_validate_json(head["event"]), token=token)
         return None
@@ -763,18 +796,28 @@ class AsyncMongoTransport:
         if not await self._owns(lease.group_id, lease.token):
             return
         await self._msgs.delete_one({"_id": lease.seq})
-        await self._locks.delete_one({"_id": lease.group_id, "token": lease.token})
+        if await self._msgs.find_one({"group_id": lease.group_id}) is not None:
+            await self._locks.update_one(
+                {"_id": lease.group_id, "token": lease.token},
+                {"$set": {"available_at": 0.0, "token": None}},
+            )
+        else:
+            await self._locks.delete_one({"_id": lease.group_id, "token": lease.token})
 
     async def nack(self, lease: Lease, delay: float = 0.0) -> None:
         if not await self._owns(lease.group_id, lease.token):
             return
         if delay > 0:
+            # park: keep the token so the still-present head isn't re-claimed before `delay`
             await self._locks.update_one(
                 {"_id": lease.group_id, "token": lease.token},
-                {"$set": {"lock_expiry": self._clock() + delay}},
+                {"$set": {"available_at": self._clock() + delay}},
             )
         else:
-            await self._locks.delete_one({"_id": lease.group_id, "token": lease.token})
+            await self._locks.update_one(
+                {"_id": lease.group_id, "token": lease.token},
+                {"$set": {"available_at": 0.0, "token": None}},
+            )
 
     async def close(self) -> None:
         self._client.close()
