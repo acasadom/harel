@@ -175,8 +175,9 @@ it idempotently.
 
 ## Walkthrough — creating and running a machine (in-memory)
 
-`DurableRunner` ([durable.py](../../src/harel/engine/durable.py)) is the headless, synchronous
-host over a store. **Create** starts the engine and checkpoints; **process** loads, runs the
+`DurableRunner` ([durable.py](../../src/harel/engine/durable.py)) is the headless host over a
+store (a synchronous façade over the async core — see *Async core, sync façade* below).
+**Create** starts the engine and checkpoints; **process** loads, runs the
 engine, checkpoints, and flushes.
 
 ```{mermaid}
@@ -266,10 +267,24 @@ is why retry/backoff is modelled as a composite, not an engine feature.
 The same engine and the same `commit` run in two hosts:
 
 - **In-memory** (`Driver` / `DurableRunner`): the relay delivers emitted events *inline* (it
-  calls `process` on the target itself). One process, synchronous. Used for embedding and tests.
+  calls `process` on the target itself). One process. Used for embedding and tests.
 - **Distributed** (`TransportDriver` + `Worker` + `Transport`, [distributed.py](../../src/harel/engine/distributed.py)): the relay **publishes** emitted events to a
   `Transport` (a queue) instead of delivering inline; workers claim and process them. Same code,
   many processes.
+
+### Async core, sync façade
+
+The engine in `core.py` is a **synchronous generator that does no IO** — it only `yield`s
+effects. That is exactly what lets the *shell* be either synchronous or asynchronous without
+touching the engine: the runner that interprets the effect stream decides whether to `await` the
+action or call it inline. harel's runtime is **async-first** — the real implementation lives in
+`harel/engine/aio/` (`AsyncDriver` / `AsyncDurableRunner` / `AsyncWorker`), and `python -m
+harel.worker` runs one `asyncio` loop driving up to `STM_CONCURRENCY` events in flight. The
+public **synchronous** API (`Driver`, `DurableRunner`, `DistributedRunner`, `Worker`) is a thin
+**façade** that bridges to the async core through an [anyio](https://anyio.readthedocs.io/)
+blocking portal (one background event loop), the way Starlette/FastAPI expose sync over async.
+So the deterministic, synchronous snippets in this guide and the async production worker are the
+same engine and the same commit, just two interpreters of the effect stream.
 
 A `Transport` is a queue with **single-active-consumer per group**, where `group_id =
 execution_id` — so at most one message per Execution is in flight, which is what upholds the
