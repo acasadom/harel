@@ -140,9 +140,19 @@ def _worker_proc(
 
 
 _BACKEND_ENV_KEYS = (
-    "STM_STORE_BACKEND", "STM_TRANSPORT_BACKEND", "STM_REDIS_URL", "STM_STORE_REDIS_URL",
-    "STM_POSTGRES_DSN", "STM_RQLITE_URL", "STM_MONGO_URL", "STM_MONGO_DB",
-    "STM_SURREAL_URL", "STM_SURREAL_NS", "STM_SURREAL_DB", "STM_SURREAL_USER", "STM_SURREAL_PASS",
+    "STM_STORE_BACKEND",
+    "STM_TRANSPORT_BACKEND",
+    "STM_REDIS_URL",
+    "STM_STORE_REDIS_URL",
+    "STM_POSTGRES_DSN",
+    "STM_RQLITE_URL",
+    "STM_MONGO_URL",
+    "STM_MONGO_DB",
+    "STM_SURREAL_URL",
+    "STM_SURREAL_NS",
+    "STM_SURREAL_DB",
+    "STM_SURREAL_USER",
+    "STM_SURREAL_PASS",
 )
 
 
@@ -157,8 +167,7 @@ def _run_level(workers: int, n: int, concurrency: int, grace: float) -> tuple[fl
     barrier = ctx.Barrier(workers)
     out: Any = ctx.Queue()
     procs = [
-        ctx.Process(target=_worker_proc, args=(env, concurrency, grace, barrier, out))
-        for _ in range(workers)
+        ctx.Process(target=_worker_proc, args=(env, concurrency, grace, barrier, out)) for _ in range(workers)
     ]
     for p in procs:
         p.start()
@@ -179,7 +188,9 @@ _HEADER = "{:>8}  {:>12}  {:>12}  {}".format("workers", "agg events/s", "total e
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--n-executions", type=int, default=3000, metavar="N", help="backlog size (execs)")
     parser.add_argument("--workers", default="1,2,4", metavar="W[,W...]")
     parser.add_argument("--concurrency", type=int, default=64, help="in-flight per worker")
@@ -188,8 +199,10 @@ def main() -> None:
 
     store = os.environ.get("STM_STORE_BACKEND", "redis")
     transport = os.environ.get("STM_TRANSPORT_BACKEND", store)
-    print(f"store={store}  transport={transport}  backlog={args.n_executions} execs "
-          f"({args.n_executions * 2} events)  concurrency/worker={args.concurrency}")
+    print(
+        f"store={store}  transport={transport}  backlog={args.n_executions} execs "
+        f"({args.n_executions * 2} events)  concurrency/worker={args.concurrency}"
+    )
     print(_HEADER)
     print("-" * len(_HEADER))
     for w in [int(x) for x in args.workers.split(",")]:

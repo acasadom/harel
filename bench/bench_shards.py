@@ -110,10 +110,10 @@ _HEADER = "{:>8}  {:>14}  {:>14}  {}".format("shards", "agg events/s", "per-shar
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument(
-        "--redis-urls", required=True, metavar="URL[,URL...]", help="one Redis URL per shard"
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
+    parser.add_argument("--redis-urls", required=True, metavar="URL[,URL...]", help="one Redis URL per shard")
     parser.add_argument("--shards", default="1,2,4", metavar="K[,K...]")
     parser.add_argument("--n-executions", type=int, default=3000, metavar="N", help="backlog per shard")
     parser.add_argument("--concurrency", type=int, default=64, help="in-flight per shard worker")
@@ -121,7 +121,9 @@ def main() -> None:
     args = parser.parse_args()
 
     all_urls = [u.strip() for u in args.redis_urls.split(",") if u.strip()]
-    print(f"backend=redis (sharded)  backlog/shard={args.n_executions} execs  concurrency/shard={args.concurrency}")
+    print(
+        f"backend=redis (sharded)  backlog/shard={args.n_executions} execs  concurrency/shard={args.concurrency}"
+    )
     print(_HEADER)
     print("-" * len(_HEADER))
     for k in [int(x) for x in args.shards.split(",")]:

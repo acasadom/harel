@@ -53,30 +53,38 @@ balance across processes.
 | 4 | 1389 | 1.66× | [1502, 1501, 1506, 1491] |
 | 8 | 1417 | 1.69× | [~750 each] |
 
-**Postgres** (backlog 2000 execs = 4000 events):
+**Postgres — before vs after the claim fix** (backlog ~2–2.5k execs):
 
-| workers | agg events/s | vs 1 worker | per-worker split |
-|---:|---:|---:|---|
-| 1 | 726 | 1.00× | [4000] |
-| 2 | 781 | 1.08× | [1999, 2001] |
-| 4 | 710 | 0.98× | [1000×4] |
+The original `claim` took a global `pg_advisory_xact_lock`, serializing every claim → flat,
+no worker scaling. It was replaced with a per-group row claimed via `FOR UPDATE SKIP LOCKED`
+(workers lease *different* groups in parallel; the DBOS approach):
+
+| workers | global advisory lock (before) | FOR UPDATE SKIP LOCKED (after) |
+|---:|---:|---:|
+| 1 | 726 (1.00×) | 624 (1.00×) |
+| 2 | 781 (1.08×) | 769 (1.23×) |
+| 4 | 710 (0.98×) | 862 (1.38×) |
+| 8 | —           | 932 (1.49×) |
+
+The advisory lock was completely flat (0.98× at 4 workers — extra workers just queued on the
+lock). With SKIP LOCKED it scales (1.49× at 8 workers). A single worker dips slightly
+(726→624) — the per-group bookkeeping costs a little more per event — but that fixed cost pays
+off the moment you add workers.
 
 ### Reading — the limit is the **backend**, not the worker
 - Work is split evenly across processes (the single-active-consumer-per-group transport
-  load-balances correctly), so it is genuinely parallel — yet the aggregate does not grow
-  linearly.
+  load-balances correctly), so it is genuinely parallel — yet the aggregate grows sub-linearly.
 - **Redis**: scales to ~1.7× and plateaus near **~1400 ev/s**. A single worker already
   extracts ~60% of the achievable aggregate. The ceiling is the shared backend (one Redis
   instance; contention on the hot shared keys — the `ready` ZSET and the outbox seq — plus
   per-event round-trips), not a single event loop.
-- **Postgres**: essentially **flat** (~750 ev/s) regardless of worker count — adding workers
-  does not help at all. Its `claim` takes a **global `pg_advisory_xact_lock`**, which
-  serializes every claim across all workers; extra workers just queue on that lock.
+- **Postgres**: now scales with workers (after the SKIP LOCKED fix), but sub-linearly. The
+  remaining limits are (a) head-of-queue contention on the shared `transport_groups` table —
+  the exact effect DBOS documents ("SKIP LOCKED isn't enough; partition the queue"), which a
+  future per-partition queue would address — and (b) in an all-Postgres run the store's
+  full-Execution-snapshot commit per event shares the same DB and dominates the per-event cost.
 - **Takeaway**: to go past a single worker's throughput you scale the **backend**
-  (shard/partition executions across instances), not the worker count. For Postgres
-  specifically the global advisory lock is the hard ceiling — a future optimization would be
-  a non-global claim (e.g. `FOR UPDATE SKIP LOCKED` on the queue table) to let claims run
-  concurrently.
+  (shard/partition executions across instances), not the worker count.
 
 ## Horizontal scaling — sharding across independent backends
 
@@ -106,13 +114,15 @@ the bench all co-located), backlog 3000 execs/shard, concurrency 64/shard:
 
 ### Per-instance headroom (the honest gap)
 DBOS sustains ~40K steps/s on a **single** Postgres (via `FOR UPDATE SKIP LOCKED` dequeue +
-queue partitioning). Our single-Postgres number (~750 ev/s, and flat across workers) is far
-below that, for two fixable reasons: (1) our `claim` takes a **global `pg_advisory_xact_lock`**
-that serializes every claim — `FOR UPDATE SKIP LOCKED` would let claims run concurrently; and
-(2) a heavier per-event protocol (load + rewrite the whole Execution JSON + separate transport
-claim/ack + outbox + dedupe each event) vs DBOS's leaner step checkpoint. Part of the gap is
-inherent to being a full hierarchical statechart (richer per-transition work than a linear
-durable function), but the claim lock and the per-event write are real, addressable headroom.
+queue partitioning). Our single-Postgres number is still well below that. Of the two original
+causes, the first is now **fixed**: the `claim` no longer takes a global `pg_advisory_xact_lock`
+(which serialized every claim) — it uses `FOR UPDATE SKIP LOCKED` on a per-group row, so claims
+run concurrently and Postgres now scales with workers (above). The remaining gap is (a) the
+**per-event protocol** (load + rewrite the whole Execution JSON + separate transport claim/ack +
+outbox + dedupe each event) vs DBOS's leaner step checkpoint, and (b) head-of-queue contention
+that DBOS only beats by **partitioning the queue** (a future per-partition queue here). Part of
+the gap is also inherent to being a full hierarchical statechart (richer per-transition work
+than a linear durable function).
 
 ## Methodology notes
 - Setup (create executions + publish the backlog) is **not** measured; only the drain is.
