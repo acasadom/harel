@@ -13,13 +13,19 @@ running. Backends:
 | Transport | Exclusivity mechanism |
 | --------- | --------------------- |
 | `InMemoryTransport` | in-process (tests, single process) |
-| `SqliteTransport` | `BEGIN IMMEDIATE` + lease |
-| `RedisTransport` | `SET lock NX PX` group-lock-as-lease + FIFO list |
-| `PostgresTransport` | `pg_advisory_xact_lock` serializing claims |
+| `SqliteTransport` | `BEGIN IMMEDIATE` (global write-lock) + lease |
+| `RedisTransport` | `SET lock NX PX` group-lock-as-lease + FIFO list; a `ready` ZSET scored by available-at indexes claimable groups so `claim` is O(log N + K), not a scan of every group |
+| `PostgresTransport` | per-group row claimed with `SELECT … FOR UPDATE SKIP LOCKED` — concurrent workers lease *different* groups in parallel (no global lock) |
 | `RqliteTransport` | queue table on Raft-replicated SQLite |
-| `MongoTransport` | per-group lock document (atomic-upsert lock-as-lease) |
-| `SurrealTransport` | per-group lock record (atomic `BEGIN…COMMIT` + THROW lock-as-lease) |
+| `MongoTransport` | per-group ready-index/lock document (`available_at` + token; `find_one_and_update` lease) |
+| `SurrealTransport` | per-group ready-index/lock record (`available_at` + token; atomic `BEGIN…COMMIT` + THROW lease) |
 | `SqsTransport` | SQS FIFO `MessageGroupId` (runs on LocalStack) |
+
+Backends without a cheap global serialization primitive (Redis, Mongo, SurrealDB) build
+per-group exclusivity by hand with a per-group lock record indexed by when it next becomes
+claimable, so `claim` reads only the few due groups rather than scanning the whole queue;
+SQLite and Postgres lean on the database instead (SQLite's write-lock; Postgres's row lock via
+`SKIP LOCKED`).
 
 Store and transport are **independent** — mix freely, or unify on one backend (all-Postgres,
 all-rqlite, all-Mongo, all-SurrealDB: no Redis needed).
@@ -77,9 +83,41 @@ after Deliver    -> Delivered / DONE / success
 
 In production you don't call `step()` in a loop — a worker runs `run(stop_event)`, looping
 claim→process and, on its idle path, sweeping due timers (`fire_due_timers`) so timeouts fire
-without a separate scheduler. Today's workers are threads (`test/integration/` covers the
-genuinely-concurrent, multi-process variant); the multi-process deployment is the same code with
-a networked store and transport.
+without a separate scheduler.
+
+### Async-native workers
+
+The worker is **async-native**. The bundled `python -m harel.worker` runs one `asyncio` event
+loop (via `anyio.run`) that drives up to `STM_CONCURRENCY` events in flight at once
+(`AsyncWorker.run`, default 256): while one execution's action awaits IO, the loop processes
+others — so a single worker process saturates an IO-bound backend without a thread per event.
+The synchronous façades shown above (`DistributedRunner`, `worker.step()`) are thin wrappers
+over that async core through an [anyio](https://anyio.readthedocs.io/) blocking portal, so the
+deterministic `step()`-in-a-loop style still works for embedding and tests.
+
+Scale out by running more worker **processes** (or machines) against the same store and
+transport — the single-active-consumer-per-group property keeps each execution on one worker at
+a time regardless of how many are running.
+
+## Scaling & throughput
+
+Two independent dials:
+
+- **Concurrency within a worker** (`STM_CONCURRENCY`): how many events one event loop keeps in
+  flight. Raising it lifts throughput until the backend's per-event round-trips (load → commit →
+  claim → ack) become the limit.
+- **More workers / shards**: a single backend instance is the ceiling — piling workers on one
+  backend plateaus (the backend, not the worker, is the bottleneck). Throughput scales
+  **horizontally by sharding**: because executions are independent (single-consumer per group,
+  no cross-execution coordination), you partition them across independent `(store, transport)`
+  instances — each shard shares nothing with the others. This is the same model Temporal (hash
+  the id to a shard, add shards) and DBOS (partition, "your ceiling is your Postgres") use.
+
+The Postgres transport's `SKIP LOCKED` claim lets workers on one Postgres lease different groups
+concurrently rather than serializing on a global lock. Measured numbers, the worker-vs-backend
+and sharding experiments, and the methodology live in
+[`bench/RESULTS.md`](https://github.com/acasadom/harel/blob/main/bench/RESULTS.md) (run them
+yourself with `bench/bench_async.py`, `bench_workers.py`, `bench_shards.py`).
 
 ## Orthogonal & fan-out, distributed
 
