@@ -49,7 +49,7 @@ pip install harel        # core: DSL + engine + in-memory/sqlite durability
 pip install "harel[redis]"     # Redis store + transport
 pip install "harel[postgres]"  # Postgres store + transport
 pip install "harel[mongo]"     # MongoDB store + transport
-pip install "harel[libsql]"    # libSQL store + transport (local file, sqld, or Turso)
+pip install "harel[libsql]"    # libSQL store + transport — EXPERIMENTAL (local file tested; Turso/sqld path needs a Turso account to validate)
 pip install "harel[dynamodb]"  # DynamoDB store (pairs with sqs for an all-AWS stack)
 pip install "harel[sqs]"       # AWS SQS FIFO transport
 pip install "harel[lsp]"       # DSL language server (editor tooling)
@@ -173,8 +173,8 @@ order with retries", a workflow engine is the better fit — this is not trying 
 - **Durable & distributed execution**: optimistic-concurrency (CAS) checkpointing, a
   transactional outbox, event dedupe, durable timers, and a control plane
   (`cancel`/`suspend`/`resume`/`terminate`). Stores: in-memory, SQLite, Redis, Postgres,
-  rqlite, MongoDB, libSQL/Turso, DynamoDB. Transports: in-memory, SQLite, Redis, Postgres,
-  rqlite, MongoDB, libSQL/Turso, SQS — mix freely.
+  rqlite, MongoDB, DynamoDB (+ libSQL/Turso, experimental). Transports: in-memory, SQLite,
+  Redis, Postgres, rqlite, MongoDB, SQS (+ libSQL/Turso, experimental) — mix freely.
 - **Static validation** (`validate`): unreachable states, non-deterministic transitions,
   unresolved selector targets, missing terminal verdicts, timeout shape — surface-independent,
   run it before you execute.

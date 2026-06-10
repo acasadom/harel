@@ -516,7 +516,12 @@ class SqliteStore:
 class LibsqlStore:
     """Durable `ExecutionStore` over **libSQL** (Turso's SQLite fork) via the `libsql`
     package — SQLite-compatible (DB-API), so the SQL, the version-CAS and the one-transaction
-    `commit` are identical to `SqliteStore`. The connection adapts by argument:
+    `commit` are identical to `SqliteStore`.
+
+    **EXPERIMENTAL**: the local-file path is covered in-process by the test suite; the Turso/
+    `sqld` embedded-replica path (``sync_url``) is wired but not yet validated against a real
+    Turso account, and its primary-follower replication is eventually consistent (read from the
+    primary for CAS, or expect extra `StoreConflict` retries). The connection adapts by argument:
 
     - a local file (``LibsqlStore("state.db")``) — like SQLite;
     - an **embedded replica** (``sync_url=`` + ``auth_token=``) — local reads from the file,

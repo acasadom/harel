@@ -17,7 +17,7 @@ store and the same machine survives crashes and restarts.
 | `PostgresStore` | distributed (UPDATE-WHERE-version CAS) |
 | `RqliteStore` | distributed SQLite over Raft (HTTP) |
 | `MongoStore` | distributed document store (single-document atomic `update_one` CAS) |
-| `LibsqlStore` | libSQL (Turso's SQLite fork): a local file, a `sqld` server, or an embedded Turso replica — same CAS as SQLite |
+| `LibsqlStore` | libSQL (Turso's SQLite fork): a local file, a `sqld` server, or an embedded Turso replica — same CAS as SQLite. **Experimental**: the local-file path is tested in-process; the Turso/`sqld` path is wired but not yet validated against a real account |
 | `DynamoDBStore` | AWS serverless (conditional-write CAS, atomic `TransactWriteItems`; pairs with `SqsTransport`) |
 
 The networked ones are optional extras (`harel[redis]`, `[postgres]`, `[rqlite]`, `[mongo]`, `[libsql]`, `[dynamodb]`) and take an

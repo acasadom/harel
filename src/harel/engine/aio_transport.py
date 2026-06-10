@@ -164,7 +164,9 @@ class AsyncSqliteTransport:
 
 
 class AsyncLibsqlTransport:
-    """Async transport over **libSQL** — wraps the synchronous `LibsqlTransport` (the `libsql`
+    """Async transport over **libSQL**. **EXPERIMENTAL** (local-file path tested in-process; the
+    Turso/`sqld` path is wired but unvalidated against a real account). Wraps the synchronous
+    `LibsqlTransport` (the `libsql`
     package is sqlite3-style/sync), off-loading each call to a thread, serialized by a lock (one
     connection, one op at a time; the `BEGIN IMMEDIATE` claim is single-writer anyway). `file:`
     local, or an embedded replica / Turso via `sync_url` + `auth_token`. Build with

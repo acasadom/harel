@@ -305,7 +305,9 @@ class AsyncSqliteStore:
 
 
 class AsyncLibsqlStore:
-    """Async store over **libSQL** (Turso's SQLite fork). The `libsql` package is a synchronous
+    """Async store over **libSQL** (Turso's SQLite fork). **EXPERIMENTAL** (local-file path
+    tested in-process; the Turso/`sqld` path is wired but unvalidated against a real account).
+    The `libsql` package is a synchronous
     sqlite3-style driver, so this wraps the sync `LibsqlStore` and off-loads each call to a
     thread (`asyncio.to_thread`) — not blocking the event loop — serialized by a lock (one libSQL
     connection, used one op at a time, which suits this single-writer-class backend). `file:`

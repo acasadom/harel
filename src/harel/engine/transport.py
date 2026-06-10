@@ -225,8 +225,9 @@ class SqliteTransport:
 
 
 class LibsqlTransport:
-    """Durable `Transport` over **libSQL** (Turso's SQLite fork) via the `libsql` package —
-    SQLite-compatible, so identical to `SqliteTransport`: `claim` runs inside `BEGIN IMMEDIATE`
+    """Durable `Transport` over **libSQL** (Turso's SQLite fork) via the `libsql` package.
+    **EXPERIMENTAL** (local-file path tested in-process; the Turso/`sqld` path is wired but
+    unvalidated against a real account). SQLite-compatible, so identical to `SqliteTransport`: `claim` runs inside `BEGIN IMMEDIATE`
     so the write-lock serializes claims (race-free per-group exclusivity, no row/advisory
     locks), and `lock_expiry` is the lease. The connection is a local file, or an embedded
     replica against a Turso/`sqld` primary (`sync_url` + `auth_token`). `libsql` is synchronous;

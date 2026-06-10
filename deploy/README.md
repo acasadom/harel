@@ -70,9 +70,11 @@ STM_STORE_BACKEND=mongo docker compose -f deploy/docker-compose.yml run --rm tes
 STM_STORE_BACKEND=dynamodb docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 redis localstack worker
 STM_STORE_BACKEND=dynamodb docker compose -f deploy/docker-compose.yml run --rm test
 
-# libsql (Turso's SQLite fork): STM_LIBSQL_DB is a local file on the shared /state volume
-# (single machine, like sqlite). For distributed, set STM_LIBSQL_SYNC_URL (+ STM_LIBSQL_AUTH_TOKEN)
-# to a Turso/sqld primary — each worker keeps a synced embedded replica.
+# libsql (Turso's SQLite fork) — EXPERIMENTAL (local-file path tested in-process; the
+# Turso/sqld path below needs a Turso account / sqld server to validate). STM_LIBSQL_DB is a
+# local file on the shared /state volume (single machine, like sqlite). For distributed, set
+# STM_LIBSQL_SYNC_URL (+ STM_LIBSQL_AUTH_TOKEN) to a Turso/sqld primary — each worker keeps a
+# synced embedded replica.
 STM_STORE_BACKEND=libsql docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 redis worker
 STM_STORE_BACKEND=libsql docker compose -f deploy/docker-compose.yml run --rm test
 ```

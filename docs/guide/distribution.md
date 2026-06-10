@@ -18,7 +18,7 @@ running. Backends:
 | `PostgresTransport` | per-group row claimed with `SELECT … FOR UPDATE SKIP LOCKED` — concurrent workers lease *different* groups in parallel (no global lock) |
 | `RqliteTransport` | queue table on Raft-replicated SQLite |
 | `MongoTransport` | per-group ready-index/lock document (`available_at` + token; `find_one_and_update` lease) |
-| `LibsqlTransport` | libSQL (Turso's SQLite fork): `BEGIN IMMEDIATE` + lease, like `SqliteTransport`; local file, `sqld`, or a Turso replica |
+| `LibsqlTransport` | libSQL (Turso's SQLite fork): `BEGIN IMMEDIATE` + lease, like `SqliteTransport`; local file, `sqld`, or a Turso replica. **Experimental** (local-file tested; Turso/`sqld` path unvalidated against a real account) |
 | `SqsTransport` | SQS FIFO `MessageGroupId` (runs on LocalStack) |
 
 Backends without a cheap global serialization primitive (Redis, Mongo) build per-group
