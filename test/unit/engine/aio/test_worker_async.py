@@ -157,3 +157,19 @@ async def test_worker_build_transport_async_sqs(monkeypatch):
         transport = await worker.build_transport_async()
         assert isinstance(transport, AsyncSqsTransport)
         await transport.close()
+
+
+async def test_worker_build_libsql_async(monkeypatch, tmp_path):
+    pytest.importorskip("libsql")
+    from harel.engine.aio_store import AsyncLibsqlStore
+    from harel.engine.aio_transport import AsyncLibsqlTransport
+
+    monkeypatch.setenv("STM_STORE_BACKEND", "libsql")
+    monkeypatch.setenv("STM_TRANSPORT_BACKEND", "libsql")
+    monkeypatch.setenv("STM_LIBSQL_DB", str(tmp_path / "wk.db"))
+    monkeypatch.delenv("STM_LIBSQL_SYNC_URL", raising=False)
+    store = await worker.build_store_async()
+    transport = await worker.build_transport_async()
+    assert isinstance(store, AsyncLibsqlStore) and isinstance(transport, AsyncLibsqlTransport)
+    await store.close()
+    await transport.close()

@@ -4,8 +4,10 @@ Configured entirely by environment variables so it runs as a docker-compose
 service scaled to N replicas (each replica is one `Worker` loop):
 
     STM_REDIS_URL        redis URL for the transport (the queue)
-    STM_STORE_BACKEND    "sqlite" (default), "redis", "postgres", "rqlite", "mongo", "dynamodb"
+    STM_STORE_BACKEND    "sqlite" (default), "redis", "postgres", "rqlite", "mongo", "libsql", "dynamodb"
     STM_STORE_DB         sqlite file for the store        (sqlite backend; a shared volume)
+    STM_LIBSQL_DB        libSQL database file (libsql backend; store + transport share it)
+    STM_LIBSQL_SYNC_URL  Turso/sqld URL for an embedded replica (optional); STM_LIBSQL_AUTH_TOKEN its token
     STM_STORE_REDIS_URL  redis URL for the store, defaults to STM_REDIS_URL (redis backend)
     STM_POSTGRES_DSN     postgres DSN for the store       (postgres backend)
     STM_RQLITE_URL       rqlite HTTP base URL for the store (rqlite backend)
@@ -50,6 +52,7 @@ from harel.engine.aio.distributed import AsyncWorker
 from harel.engine.store import (
     DynamoDBStore,
     ExecutionStore,
+    LibsqlStore,
     MongoStore,
     PostgresStore,
     RedisStore,
@@ -57,6 +60,7 @@ from harel.engine.store import (
     SqliteStore,
 )
 from harel.engine.transport import (
+    LibsqlTransport,
     MongoTransport,
     PostgresTransport,
     RedisTransport,
@@ -85,7 +89,7 @@ def load_definitions(definitions_dir: str) -> dict[str, Definition]:
 
 def build_store() -> ExecutionStore:
     """Build the durable store from STM_STORE_BACKEND (sqlite | redis | postgres |
-    rqlite | mongo | dynamodb)."""
+    rqlite | mongo | libsql | dynamodb)."""
     backend = os.environ.get("STM_STORE_BACKEND", "sqlite")
     if backend == "sqlite":
         return SqliteStore(os.environ["STM_STORE_DB"])
@@ -97,6 +101,8 @@ def build_store() -> ExecutionStore:
         return RqliteStore.from_url(os.environ["STM_RQLITE_URL"])
     if backend == "mongo":
         return MongoStore.from_url(os.environ["STM_MONGO_URL"], os.environ.get("STM_MONGO_DB", "harel"))
+    if backend == "libsql":
+        return LibsqlStore(os.environ["STM_LIBSQL_DB"], **_libsql_kwargs())
     if backend == "dynamodb":
         return DynamoDBStore.create(
             os.environ.get("STM_DYNAMODB_ENDPOINT"), os.environ.get("STM_AWS_REGION", "us-east-1")
@@ -104,10 +110,22 @@ def build_store() -> ExecutionStore:
     raise ValueError(f"unknown STM_STORE_BACKEND: {backend}")
 
 
+def _libsql_kwargs() -> dict[str, Any]:
+    """libSQL connection args from the env. STM_LIBSQL_DB is the local database file (used by
+    store + transport). For an embedded replica against a Turso/`sqld` primary, set
+    STM_LIBSQL_SYNC_URL (+ STM_LIBSQL_AUTH_TOKEN); otherwise it is a plain local libSQL file."""
+    kwargs: dict[str, Any] = {}
+    sync_url = os.environ.get("STM_LIBSQL_SYNC_URL")
+    if sync_url:
+        kwargs["sync_url"] = sync_url
+        kwargs["auth_token"] = os.environ.get("STM_LIBSQL_AUTH_TOKEN", "")
+    return kwargs
+
+
 def build_transport() -> Transport:
     """Build the event transport from STM_TRANSPORT_BACKEND (redis | postgres |
-    rqlite | sqlite | mongo | sqs). Default redis; postgres/rqlite/mongo give a
-    no-Redis stack (one backend serves store + transport)."""
+    rqlite | sqlite | mongo | libsql | sqs). Default redis; postgres/rqlite/mongo/libsql
+    give a no-Redis stack (one backend serves store + transport)."""
     backend = os.environ.get("STM_TRANSPORT_BACKEND", "redis")
     if backend == "redis":
         return RedisTransport.from_url(os.environ["STM_REDIS_URL"])
@@ -119,6 +137,8 @@ def build_transport() -> Transport:
         return SqliteTransport(os.environ["STM_TRANSPORT_DB"])
     if backend == "mongo":
         return MongoTransport.from_url(os.environ["STM_MONGO_URL"], os.environ.get("STM_MONGO_DB", "harel"))
+    if backend == "libsql":
+        return LibsqlTransport(os.environ["STM_LIBSQL_DB"], **_libsql_kwargs())
     if backend == "sqs":
         return SqsTransport.create(
             os.environ["STM_SQS_ENDPOINT"], os.environ.get("STM_SQS_QUEUE", "stm.fifo")
@@ -151,6 +171,10 @@ async def build_store_async() -> Any:
         from harel.engine.aio_store import AsyncRqliteStore
 
         return await AsyncRqliteStore.from_url(os.environ["STM_RQLITE_URL"])
+    if backend == "libsql":
+        from harel.engine.aio_store import AsyncLibsqlStore
+
+        return await AsyncLibsqlStore.create(os.environ["STM_LIBSQL_DB"], **_libsql_kwargs())
     if backend == "dynamodb":
         from harel.engine.aio_store import AsyncDynamoDBStore
 
@@ -186,6 +210,10 @@ async def build_transport_async() -> Any:
         from harel.engine.aio_transport import AsyncRqliteTransport
 
         return await AsyncRqliteTransport.from_url(os.environ["STM_RQLITE_URL"])
+    if backend == "libsql":
+        from harel.engine.aio_transport import AsyncLibsqlTransport
+
+        return await AsyncLibsqlTransport.create(os.environ["STM_LIBSQL_DB"], **_libsql_kwargs())
     if backend == "sqs":
         from harel.engine.aio_transport import AsyncSqsTransport
 
