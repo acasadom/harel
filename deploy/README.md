@@ -40,7 +40,7 @@ docker compose -f deploy/docker-compose.yml down -v   # -v drops the state volum
 Scale workers with `--scale worker=N`. Tail logs with
 `docker compose -f deploy/docker-compose.yml logs -f worker`.
 
-### Store backend: sqlite, redis, postgres, rqlite, mongo, surrealdb, or dynamodb
+### Store backend: sqlite, redis, postgres, rqlite, mongo, or dynamodb
 
 `STM_STORE_BACKEND` selects the durable store (default `sqlite`, the shared
 volume above). The others are **all-network** (no shared filesystem); bring up
@@ -64,11 +64,6 @@ STM_STORE_BACKEND=rqlite docker compose -f deploy/docker-compose.yml run --rm te
 STM_STORE_BACKEND=mongo docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 redis mongo worker
 STM_STORE_BACKEND=mongo docker compose -f deploy/docker-compose.yml run --rm test
 
-# surrealdb (multi-model, ACID): a commit is one server-side BEGIN…COMMIT block
-# with a THROW-gated version CAS (closest to the postgres backend).
-STM_STORE_BACKEND=surrealdb docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 redis surrealdb worker
-STM_STORE_BACKEND=surrealdb docker compose -f deploy/docker-compose.yml run --rm test
-
 # dynamodb (AWS serverless, on localstack): conditional writes are the CAS and
 # TransactWriteItems makes the commit atomic. Pairs with the sqs transport for an
 # all-AWS stack. No AWS account needed.
@@ -77,7 +72,7 @@ STM_STORE_BACKEND=dynamodb docker compose -f deploy/docker-compose.yml run --rm 
 ```
 
 sqlite = single machine (or one host's containers); redis / postgres / rqlite /
-mongo / surrealdb / dynamodb = distributed across machines. Same engine, workers
+mongo / dynamodb = distributed across machines. Same engine, workers
 and test for all of them. The
 test service runs `pytest -m stack`, so the contract tests for the active backend
 run against the real service.
@@ -85,8 +80,8 @@ run against the real service.
 ### Transport backend (the queue)
 
 `STM_TRANSPORT_BACKEND` selects the event transport independently of the store
-(`redis` default, or `postgres` / `rqlite` / `sqlite` / `mongo` / `surrealdb` /
-`sqs`). So you can run **no Redis at all** — one backend for both state and queue:
+(`redis` default, or `postgres` / `rqlite` / `sqlite` / `mongo` / `sqs`). So you
+can run **no Redis at all** — one backend for both state and queue:
 
 ```bash
 # all-postgres: state + queue both on Postgres, no Redis
@@ -102,8 +97,6 @@ STM_STORE_BACKEND=mongo STM_TRANSPORT_BACKEND=mongo \
   docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 mongo worker
 STM_STORE_BACKEND=mongo STM_TRANSPORT_BACKEND=mongo \
   docker compose -f deploy/docker-compose.yml run --rm test
-
-# all-surrealdb likewise (STM_STORE_BACKEND=surrealdb STM_TRANSPORT_BACKEND=surrealdb, bring up `surrealdb`)
 
 # SQS FIFO via LocalStack (no AWS account): the queue's MessageGroupId is the
 # per-group exclusivity natively. Bring up the `localstack` service.

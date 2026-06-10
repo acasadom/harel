@@ -1,5 +1,5 @@
 """`ExecutionStore.list_executions` contract against the REAL networked backends
-(Postgres / rqlite / Mongo / SurrealDB / DynamoDB-on-LocalStack) in the stack.
+(Postgres / rqlite / Mongo / DynamoDB-on-LocalStack) in the stack.
 
 The in-process fakes are covered in test/unit/engine/test_store_listing.py; this runs
 the same shared contract (`listing_contract.assert_contract`) over a real server, gated
@@ -59,27 +59,6 @@ def test_mongo_listing():
     from harel.engine.store import MongoStore
 
     store = MongoStore.from_url(url, os.environ.get("STM_MONGO_DB", "harel"))
-    try:
-        assert_contract(store, ordered=True, ns=_ns())
-    finally:
-        store.close()
-
-
-def test_surreal_listing():
-    if os.environ.get("STM_STORE_BACKEND") != "surrealdb":
-        pytest.skip("not the surrealdb backend")
-    url = os.environ.get("STM_SURREAL_URL")
-    if not url:
-        pytest.skip("STM_SURREAL_URL not set")
-    from harel.engine.store import SurrealStore
-
-    store = SurrealStore.from_url(
-        url,
-        namespace=os.environ.get("STM_SURREAL_NS", "harel"),
-        database=os.environ.get("STM_SURREAL_DB", "harel"),
-        username=os.environ.get("STM_SURREAL_USER"),
-        password=os.environ.get("STM_SURREAL_PASS", ""),
-    )
     try:
         assert_contract(store, ordered=True, ns=_ns())
     finally:

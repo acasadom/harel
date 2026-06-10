@@ -1,12 +1,10 @@
 """`ExecutionStore.list_executions` contract over every in-process backend (no Docker):
-Dict, Sqlite, RedisStore (fakeredis), MongoStore (mongomock), DynamoDBStore (moto),
-SurrealStore (mem://). The networked servers are covered in test/integration/ (stack).
+Dict, Sqlite, RedisStore (fakeredis), MongoStore (mongomock), DynamoDBStore (moto).
+The networked servers are covered in test/integration/ (stack).
 
 The shared seed + assertions live in `_listing_contract`; here we just build each store
 and say whether its listing is order-stable (Redis/Dynamo Scan are unordered).
 """
-
-import contextlib
 
 import pytest
 from listing_contract import assert_contract  # noqa: E402 (test-root bare import)
@@ -50,18 +48,3 @@ def test_dynamodb_listing():
     with moto.mock_aws():
         # DynamoDB Scan is unordered
         assert_contract(DynamoDBStore(boto3.client("dynamodb", region_name="us-east-1")), ordered=False)
-
-
-def test_surreal_listing():
-    surrealdb = pytest.importorskip("surrealdb")
-    from harel.engine.store import SurrealStore
-
-    db = surrealdb.Surreal("mem://")
-    db.connect()
-    db.use("test", "test")
-    store = SurrealStore(db)
-    try:
-        assert_contract(store, ordered=True)
-    finally:
-        with contextlib.suppress(Exception):
-            store.close()

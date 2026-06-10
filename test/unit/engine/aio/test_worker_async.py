@@ -90,19 +90,6 @@ async def test_worker_build_transport_async(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-async def test_worker_build_store_async_surrealdb(monkeypatch):
-    pytest.importorskip("surrealdb")
-    monkeypatch.setenv("STM_STORE_BACKEND", "surrealdb")
-    monkeypatch.setenv("STM_SURREAL_URL", "mem://")
-    monkeypatch.setenv("STM_SURREAL_NS", "test")
-    monkeypatch.setenv("STM_SURREAL_DB", "test")
-    from harel.engine.aio_store import AsyncSurrealStore
-
-    store = await worker.build_store_async()
-    assert isinstance(store, AsyncSurrealStore)
-    await store.close()
-
-
 async def test_worker_build_store_async_dynamodb(monkeypatch):
     aiomoto = pytest.importorskip("aiomoto")
 
@@ -134,19 +121,6 @@ async def test_worker_build_store_async_rqlite(monkeypatch):
     with patch.object(AsyncRqliteStore, "from_url", new=AsyncMock(return_value=sentinel)):
         result = await worker.build_store_async()
     assert result is sentinel
-
-
-async def test_worker_build_transport_async_surrealdb(monkeypatch):
-    pytest.importorskip("surrealdb")
-    monkeypatch.setenv("STM_TRANSPORT_BACKEND", "surrealdb")
-    monkeypatch.setenv("STM_SURREAL_URL", "mem://")
-    monkeypatch.setenv("STM_SURREAL_NS", "test")
-    monkeypatch.setenv("STM_SURREAL_DB", "test")
-    from harel.engine.aio_transport import AsyncSurrealTransport
-
-    transport = await worker.build_transport_async()
-    assert isinstance(transport, AsyncSurrealTransport)
-    await transport.close()
 
 
 async def test_worker_build_transport_async_mongo(monkeypatch):
