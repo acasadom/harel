@@ -124,6 +124,53 @@ that DBOS only beats by **partitioning the queue** (a future per-partition queue
 the gap is also inherent to being a full hierarchical statechart (richer per-transition work
 than a linear durable function).
 
+## Per-event round-trips — folding the dedupe into the load
+
+The per-event protocol is `claim → load → is_processed → commit → ack` — ~5 round-trips, two of
+them store reads (`load` then a separate `is_processed` dedupe check). On real backends the
+system is **IO-bound** (it runs at ~1k ev/s, far below the in-memory CPU ceiling of ~47k ev/s),
+so cutting a round-trip per event is a direct win.
+
+`store.load_for_event(execution_id, event_id) -> (Execution, processed)` returns both in **one**
+round-trip (the worker prefers it, falling back to `load` + `is_processed` for any store that
+lacks it). Implemented across all networked async stores: Postgres (`SELECT data, EXISTS(...)`),
+Redis (pipelined `GET` + `SISMEMBER`), Rqlite (one HTTP `SELECT` + `EXISTS` subquery), SQLite,
+SurrealDB (a `processed` subquery in the `SELECT`), Mongo (an aggregation with a server-side
+`$in` so the growing `processed` array is never shipped), DynamoDB (`BatchGetItem` across the
+two tables).
+
+Controlled A/B on **real Postgres** (store+transport both PG, fresh container, 2 runs each,
+no-op action), aggregate events/s:
+
+| workers | load + is_processed (before) | load_for_event (after) | gain |
+|---:|---:|---:|---:|
+| 1 | ~578 | ~640 | **+11%** |
+| 4 | ~842 | ~903 | **+7%** |
+| 8 | ~852 | ~957 | **+12%** |
+
+A consistent ~7–12% from removing one of ~5 round-trips. The dominant remaining per-event cost
+is the `commit` (the full-Execution snapshot write + outbox + transport ack), the next thing to
+attack.
+
+**Across backends** (all-`<backend>` store+transport, single runs so ±noise, n=2500, no-op
+action), baseline → `load_for_event`, events/s at 1/4/8 workers:
+
+| backend | 1w | 4w | 8w | effect |
+|---|---|---|---|---|
+| **rqlite** | 149→158 | 256→**343** | 406→**495** | **biggest win (+20–34%)** — every round-trip is an HTTP request, so dropping one matters most |
+| **postgres** | 578→640 | 842→903 | 852→957 | **+7–12%** (the controlled A/B above) |
+| **mongo** | 460→488 | 699→**784** | 706→694 | **small win (~+6–12%)**, 8w within noise |
+| **redis** | 816→847 | 1386→1167 | 1381→1425 | **~neutral** — `GET`+`SISMEMBER` are sub-ms, so pipelining them saves almost nothing (the 4w dip is run-to-run noise) |
+
+The gain scales with **how expensive a round-trip is** on the backend: large for rqlite (HTTP),
+moderate for postgres/mongo, negligible for redis (already sub-ms ops). It's free everywhere
+(one combined query) and never a regression beyond noise.
+
+> **SurrealDB** could not be measured under concurrency: its transport `claim` (an optimistic
+> server-side `BEGIN…COMMIT`) raises *"Transaction read conflict"* once several workers claim at
+> once, which aborts the run. That is a transport-claim concurrency limit, orthogonal to this
+> store change — a separate item to investigate.
+
 ## Methodology notes
 - Setup (create executions + publish the backlog) is **not** measured; only the drain is.
 - `--no-sleep` isolates backend cost. With the default 10 ms async action, all backends

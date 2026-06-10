@@ -177,6 +177,18 @@ class AsyncSqliteStore:
         row = await cur.fetchone()
         return Execution.model_validate_json(row[0]) if row is not None else None
 
+    async def load_for_event(self, execution_id: str, event_id: str) -> tuple[Optional[Execution], bool]:
+        """Load + dedupe-check in one round-trip (the worker's per-event pair)."""
+        cur = await self._conn.execute(
+            "SELECT (SELECT data FROM executions WHERE id = ?), "
+            "EXISTS(SELECT 1 FROM processed_events WHERE execution_id = ? AND event_id = ?)",
+            (execution_id, execution_id, event_id),
+        )
+        row = await cur.fetchone()
+        if row is None or row[0] is None:
+            return None, False
+        return Execution.model_validate_json(row[0]), bool(row[1])
+
     async def _write(self, exe: Execution) -> None:
         """CAS write WITHOUT committing (so it batches atomically with the outbox inserts)."""
         old = exe.version
@@ -342,6 +354,23 @@ class AsyncPostgresStore:
             await conn.commit()
         return Execution.model_validate_json(row[0]) if row is not None else None
 
+    async def load_for_event(self, execution_id: str, event_id: str) -> tuple[Optional[Execution], bool]:
+        """Load the Execution and whether `event_id` is already processed in **one** round-trip
+        (the worker's per-event dedupe check, folded into the load instead of a second query)."""
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT e.data, EXISTS(SELECT 1 FROM processed_events p "
+                    "WHERE p.execution_id = %s AND p.event_id = %s) "
+                    "FROM executions e WHERE e.id = %s",
+                    (execution_id, event_id, execution_id),
+                )
+                row = await cur.fetchone()
+            await conn.commit()
+        if row is None:
+            return None, False
+        return Execution.model_validate_json(row[0]), bool(row[1])
+
     async def save(self, exe: Execution) -> None:
         await self.commit(exe, [])
 
@@ -506,6 +535,16 @@ class AsyncRedisStore:
         raw = await self._r.get(self._k(f"exe:{execution_id}"))
         return Execution.model_validate_json(raw) if raw is not None else None
 
+    async def load_for_event(self, execution_id: str, event_id: str) -> tuple[Optional[Execution], bool]:
+        """Load + dedupe-check in one round-trip: pipeline the GET and the SISMEMBER."""
+        pipe = self._r.pipeline(transaction=False)
+        pipe.get(self._k(f"exe:{execution_id}"))
+        pipe.sismember(self._k(f"processed:{execution_id}"), event_id)
+        raw, hit = await pipe.execute()
+        if raw is None:
+            return None, False
+        return Execution.model_validate_json(raw), bool(hit)
+
     async def save(self, exe: Execution) -> None:
         await self.commit(exe, [])
 
@@ -645,6 +684,18 @@ class AsyncSurrealStore:
     async def load(self, execution_id: str) -> Optional[Execution]:
         res = await self._db.query("SELECT data FROM type::thing('executions',$id)", {"id": execution_id})
         return Execution.model_validate_json(res[0]["data"]) if res else None
+
+    async def load_for_event(self, execution_id: str, event_id: str) -> tuple[Optional[Execution], bool]:
+        """Load + dedupe-check in one round-trip: a subquery on the `processed` record yields
+        the flag alongside the data (a multi-statement query only returns the first result)."""
+        res = await self._db.query(
+            "SELECT data, array::len((SELECT id FROM type::thing('processed',[$id,$ev]))) > 0 AS proc "
+            "FROM type::thing('executions',$id)",
+            {"id": execution_id, "ev": event_id},
+        )
+        if not res:
+            return None, False
+        return Execution.model_validate_json(res[0]["data"]), bool(res[0]["proc"])
 
     async def save(self, exe: Execution) -> None:
         await self.commit(exe, [])
@@ -901,6 +952,28 @@ class AsyncDynamoDBStore:
         item = resp.get("Item")
         return Execution.model_validate_json(self._item(item)["data"]) if item else None
 
+    async def load_for_event(self, execution_id: str, event_id: str) -> tuple[Optional[Execution], bool]:
+        """Load + dedupe-check in one round-trip: BatchGetItem across the executions and
+        processed tables."""
+        resp = await self._db.batch_get_item(
+            RequestItems={
+                self._t("executions"): {
+                    "Keys": [self._raw({"id": execution_id})],
+                    "ProjectionExpression": "#d",
+                    "ExpressionAttributeNames": {"#d": "data"},
+                },
+                self._t("processed"): {
+                    "Keys": [self._raw({"execution_id": execution_id, "event_id": event_id})],
+                },
+            }
+        )
+        responses = resp.get("Responses", {})
+        exe_items = responses.get(self._t("executions"), [])
+        proc_items = responses.get(self._t("processed"), [])
+        if not exe_items:
+            return None, False
+        return Execution.model_validate_json(self._item(exe_items[0])["data"]), bool(proc_items)
+
     async def save(self, exe: Execution) -> None:
         await self.commit(exe, [])
 
@@ -1145,6 +1218,17 @@ class AsyncRqliteStore:
         rows = await self._query("SELECT data FROM executions WHERE id = ?", (execution_id,))
         return Execution.model_validate_json(rows[0][0]) if rows else None
 
+    async def load_for_event(self, execution_id: str, event_id: str) -> tuple[Optional[Execution], bool]:
+        """Load + dedupe-check in one HTTP request (one SELECT with an EXISTS subquery)."""
+        rows = await self._query(
+            "SELECT data, EXISTS(SELECT 1 FROM processed_events WHERE execution_id = ? AND event_id = ?) "
+            "FROM executions WHERE id = ?",
+            (execution_id, event_id, execution_id),
+        )
+        if not rows:
+            return None, False
+        return Execution.model_validate_json(rows[0][0]), bool(rows[0][1])
+
     async def save(self, exe: Execution) -> None:
         await self.commit(exe, [])
 
@@ -1340,6 +1424,20 @@ class AsyncMongoStore:
     async def load(self, execution_id: str) -> Optional[Execution]:
         doc = await self._exes.find_one({"_id": execution_id}, {"data": 1})
         return Execution.model_validate_json(doc["data"]) if doc is not None else None
+
+    async def load_for_event(self, execution_id: str, event_id: str) -> tuple[Optional[Execution], bool]:
+        """Load + dedupe-check in one round-trip: an aggregation projects `data` plus a
+        server-side `$in` membership flag, so the (growing) `processed` array is never shipped."""
+        cursor = self._exes.aggregate(
+            [
+                {"$match": {"_id": execution_id}},
+                {"$project": {"data": 1, "hit": {"$in": [event_id, {"$ifNull": ["$processed", []]}]}}},
+            ]
+        )
+        docs = [d async for d in cursor]
+        if not docs:
+            return None, False
+        return Execution.model_validate_json(docs[0]["data"]), bool(docs[0].get("hit"))
 
     async def save(self, exe: Execution) -> None:
         await self.commit(exe, [])
