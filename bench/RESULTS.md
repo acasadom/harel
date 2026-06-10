@@ -124,6 +124,34 @@ that DBOS only beats by **partitioning the queue** (a future per-partition queue
 the gap is also inherent to being a full hierarchical statechart (richer per-transition work
 than a linear durable function).
 
+## Per-event round-trips — folding the dedupe into the load
+
+The per-event protocol is `claim → load → is_processed → commit → ack` — ~5 round-trips, two of
+them store reads (`load` then a separate `is_processed` dedupe check). On real backends the
+system is **IO-bound** (it runs at ~1k ev/s, far below the in-memory CPU ceiling of ~47k ev/s),
+so cutting a round-trip per event is a direct win.
+
+`store.load_for_event(execution_id, event_id) -> (Execution, processed)` returns both in **one**
+round-trip (the worker prefers it, falling back to `load` + `is_processed` for any store that
+lacks it). Implemented across all networked async stores: Postgres (`SELECT data, EXISTS(...)`),
+Redis (pipelined `GET` + `SISMEMBER`), Rqlite (one HTTP `SELECT` + `EXISTS` subquery), SQLite,
+SurrealDB (a `processed` subquery in the `SELECT`), Mongo (an aggregation with a server-side
+`$in` so the growing `processed` array is never shipped), DynamoDB (`BatchGetItem` across the
+two tables).
+
+Controlled A/B on **real Postgres** (store+transport both PG, fresh container, 2 runs each,
+no-op action), aggregate events/s:
+
+| workers | load + is_processed (before) | load_for_event (after) | gain |
+|---:|---:|---:|---:|
+| 1 | ~578 | ~640 | **+11%** |
+| 4 | ~842 | ~903 | **+7%** |
+| 8 | ~852 | ~957 | **+12%** |
+
+A consistent ~7–12% from removing one of ~5 round-trips. Modest but real, and free for every
+networked backend. The dominant remaining per-event cost is the `commit` (the full-Execution
+snapshot write + outbox + transport ack), which is the next thing to attack.
+
 ## Methodology notes
 - Setup (create executions + publish the backlog) is **not** measured; only the drain is.
 - `--no-sleep` isolates backend cost. With the default 10 ms async action, all backends
