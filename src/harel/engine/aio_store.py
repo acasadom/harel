@@ -177,9 +177,7 @@ class AsyncSqliteStore:
         row = await cur.fetchone()
         return Execution.model_validate_json(row[0]) if row is not None else None
 
-    async def load_for_event(
-        self, execution_id: str, event_id: str
-    ) -> tuple[Optional[Execution], bool]:
+    async def load_for_event(self, execution_id: str, event_id: str) -> tuple[Optional[Execution], bool]:
         """Load + dedupe-check in one round-trip (the worker's per-event pair)."""
         cur = await self._conn.execute(
             "SELECT (SELECT data FROM executions WHERE id = ?), "
@@ -356,9 +354,7 @@ class AsyncPostgresStore:
             await conn.commit()
         return Execution.model_validate_json(row[0]) if row is not None else None
 
-    async def load_for_event(
-        self, execution_id: str, event_id: str
-    ) -> tuple[Optional[Execution], bool]:
+    async def load_for_event(self, execution_id: str, event_id: str) -> tuple[Optional[Execution], bool]:
         """Load the Execution and whether `event_id` is already processed in **one** round-trip
         (the worker's per-event dedupe check, folded into the load instead of a second query)."""
         async with self._pool.connection() as conn:
@@ -539,9 +535,7 @@ class AsyncRedisStore:
         raw = await self._r.get(self._k(f"exe:{execution_id}"))
         return Execution.model_validate_json(raw) if raw is not None else None
 
-    async def load_for_event(
-        self, execution_id: str, event_id: str
-    ) -> tuple[Optional[Execution], bool]:
+    async def load_for_event(self, execution_id: str, event_id: str) -> tuple[Optional[Execution], bool]:
         """Load + dedupe-check in one round-trip: pipeline the GET and the SISMEMBER."""
         pipe = self._r.pipeline(transaction=False)
         pipe.get(self._k(f"exe:{execution_id}"))
@@ -691,9 +685,7 @@ class AsyncSurrealStore:
         res = await self._db.query("SELECT data FROM type::thing('executions',$id)", {"id": execution_id})
         return Execution.model_validate_json(res[0]["data"]) if res else None
 
-    async def load_for_event(
-        self, execution_id: str, event_id: str
-    ) -> tuple[Optional[Execution], bool]:
+    async def load_for_event(self, execution_id: str, event_id: str) -> tuple[Optional[Execution], bool]:
         """Load + dedupe-check in one round-trip: a subquery on the `processed` record yields
         the flag alongside the data (a multi-statement query only returns the first result)."""
         res = await self._db.query(
@@ -960,9 +952,7 @@ class AsyncDynamoDBStore:
         item = resp.get("Item")
         return Execution.model_validate_json(self._item(item)["data"]) if item else None
 
-    async def load_for_event(
-        self, execution_id: str, event_id: str
-    ) -> tuple[Optional[Execution], bool]:
+    async def load_for_event(self, execution_id: str, event_id: str) -> tuple[Optional[Execution], bool]:
         """Load + dedupe-check in one round-trip: BatchGetItem across the executions and
         processed tables."""
         resp = await self._db.batch_get_item(
@@ -1228,9 +1218,7 @@ class AsyncRqliteStore:
         rows = await self._query("SELECT data FROM executions WHERE id = ?", (execution_id,))
         return Execution.model_validate_json(rows[0][0]) if rows else None
 
-    async def load_for_event(
-        self, execution_id: str, event_id: str
-    ) -> tuple[Optional[Execution], bool]:
+    async def load_for_event(self, execution_id: str, event_id: str) -> tuple[Optional[Execution], bool]:
         """Load + dedupe-check in one HTTP request (one SELECT with an EXISTS subquery)."""
         rows = await self._query(
             "SELECT data, EXISTS(SELECT 1 FROM processed_events WHERE execution_id = ? AND event_id = ?) "
@@ -1437,9 +1425,7 @@ class AsyncMongoStore:
         doc = await self._exes.find_one({"_id": execution_id}, {"data": 1})
         return Execution.model_validate_json(doc["data"]) if doc is not None else None
 
-    async def load_for_event(
-        self, execution_id: str, event_id: str
-    ) -> tuple[Optional[Execution], bool]:
+    async def load_for_event(self, execution_id: str, event_id: str) -> tuple[Optional[Execution], bool]:
         """Load + dedupe-check in one round-trip: an aggregation projects `data` plus a
         server-side `$in` membership flag, so the (growing) `processed` array is never shipped."""
         cursor = self._exes.aggregate(
