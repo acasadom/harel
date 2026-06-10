@@ -123,8 +123,6 @@ async def test_worker_build_store_async_rqlite(monkeypatch):
     assert result is sentinel
 
 
-
-
 async def test_worker_build_transport_async_mongo(monkeypatch):
     monkeypatch.setenv("STM_TRANSPORT_BACKEND", "mongo")
     monkeypatch.setenv("STM_MONGO_URL", "mongodb://localhost:27017")

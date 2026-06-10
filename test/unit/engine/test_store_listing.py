@@ -6,7 +6,6 @@ The shared seed + assertions live in `_listing_contract`; here we just build eac
 and say whether its listing is order-stable (Redis/Dynamo Scan are unordered).
 """
 
-
 import pytest
 from listing_contract import assert_contract  # noqa: E402 (test-root bare import)
 
