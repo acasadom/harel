@@ -79,6 +79,28 @@ def _redis_pool(concurrency: int) -> int:
     return concurrency * 2 + 16
 
 
+async def _flush(store: Any, transport: Any) -> None:
+    """Empty the backend so each level starts clean — without this, executions and drained
+    group rows accumulate across levels/runs and pollute the measurement. Covers the backends
+    we worker-bench (redis, postgres); a no-op elsewhere."""
+    sb = os.environ.get("STM_STORE_BACKEND", "redis")
+    tb = os.environ.get("STM_TRANSPORT_BACKEND", sb)
+    if sb == "redis":
+        await store._r.flushdb()
+    elif sb == "postgres":
+        async with store._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("TRUNCATE executions, outbox, processed_events, timers, spawns")
+            await conn.commit()
+    if tb == "postgres":
+        async with transport._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("TRUNCATE transport_messages, transport_groups")
+            await conn.commit()
+    elif tb == "redis" and transport is not store:
+        await transport._r.flushdb()
+
+
 async def _setup(n: int, concurrency: int) -> None:
     """Create n executions and pre-load the full backlog (Start, then Finish per group).
     Runs in the parent before any worker starts; not part of the measured window."""
@@ -86,6 +108,7 @@ async def _setup(n: int, concurrency: int) -> None:
     store = await _build_store(concurrency * 2 + 4, _redis_pool(concurrency))
     transport = await _build_transport(concurrency * 2 + 4, _redis_pool(concurrency))
     try:
+        await _flush(store, transport)  # clean slate: no leftover execs/groups from a prior level
         runner = AsyncDistributedRunner(store, transport, {defn.id: defn})
         ids = [(await runner.create(defn.id)).id for _ in range(n)]
         for eid in ids:
