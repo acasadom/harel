@@ -17,9 +17,10 @@ store and the same machine survives crashes and restarts.
 | `PostgresStore` | distributed (UPDATE-WHERE-version CAS) |
 | `RqliteStore` | distributed SQLite over Raft (HTTP) |
 | `MongoStore` | distributed document store (single-document atomic `update_one` CAS) |
+| `LibsqlStore` | libSQL (Turso's SQLite fork): a local file, a `sqld` server, or an embedded Turso replica — same CAS as SQLite |
 | `DynamoDBStore` | AWS serverless (conditional-write CAS, atomic `TransactWriteItems`; pairs with `SqsTransport`) |
 
-The networked ones are optional extras (`harel[redis]`, `[postgres]`, `[rqlite]`, `[mongo]`, `[dynamodb]`) and take an
+The networked ones are optional extras (`harel[redis]`, `[postgres]`, `[rqlite]`, `[mongo]`, `[libsql]`, `[dynamodb]`) and take an
 injected client. Selecting one is the *only* change — the machine and the driving loop are
 identical.
 

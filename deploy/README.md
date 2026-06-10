@@ -40,7 +40,7 @@ docker compose -f deploy/docker-compose.yml down -v   # -v drops the state volum
 Scale workers with `--scale worker=N`. Tail logs with
 `docker compose -f deploy/docker-compose.yml logs -f worker`.
 
-### Store backend: sqlite, redis, postgres, rqlite, mongo, or dynamodb
+### Store backend: sqlite, redis, postgres, rqlite, mongo, libsql, or dynamodb
 
 `STM_STORE_BACKEND` selects the durable store (default `sqlite`, the shared
 volume above). The others are **all-network** (no shared filesystem); bring up
@@ -69,10 +69,16 @@ STM_STORE_BACKEND=mongo docker compose -f deploy/docker-compose.yml run --rm tes
 # all-AWS stack. No AWS account needed.
 STM_STORE_BACKEND=dynamodb docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 redis localstack worker
 STM_STORE_BACKEND=dynamodb docker compose -f deploy/docker-compose.yml run --rm test
+
+# libsql (Turso's SQLite fork): STM_LIBSQL_DB is a local file on the shared /state volume
+# (single machine, like sqlite). For distributed, set STM_LIBSQL_SYNC_URL (+ STM_LIBSQL_AUTH_TOKEN)
+# to a Turso/sqld primary — each worker keeps a synced embedded replica.
+STM_STORE_BACKEND=libsql docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 redis worker
+STM_STORE_BACKEND=libsql docker compose -f deploy/docker-compose.yml run --rm test
 ```
 
-sqlite = single machine (or one host's containers); redis / postgres / rqlite /
-mongo / dynamodb = distributed across machines. Same engine, workers
+sqlite / libsql-file = single machine (or one host's containers); redis / postgres / rqlite /
+mongo / dynamodb / libsql-on-Turso = distributed across machines. Same engine, workers
 and test for all of them. The
 test service runs `pytest -m stack`, so the contract tests for the active backend
 run against the real service.
@@ -80,7 +86,7 @@ run against the real service.
 ### Transport backend (the queue)
 
 `STM_TRANSPORT_BACKEND` selects the event transport independently of the store
-(`redis` default, or `postgres` / `rqlite` / `sqlite` / `mongo` / `sqs`). So you
+(`redis` default, or `postgres` / `rqlite` / `sqlite` / `mongo` / `libsql` / `sqs`). So you
 can run **no Redis at all** — one backend for both state and queue:
 
 ```bash
@@ -91,6 +97,9 @@ STM_STORE_BACKEND=postgres STM_TRANSPORT_BACKEND=postgres \
   docker compose -f deploy/docker-compose.yml run --rm test
 
 # all-rqlite likewise (STM_STORE_BACKEND=rqlite STM_TRANSPORT_BACKEND=rqlite, bring up `rqlite`)
+
+# all-libsql likewise (STM_STORE_BACKEND=libsql STM_TRANSPORT_BACKEND=libsql) — file mode on the
+# shared volume, or point STM_LIBSQL_SYNC_URL at Turso/sqld for distributed
 
 # all-mongo: state + queue both on MongoDB, no Redis. Bring up the `mongo` service.
 STM_STORE_BACKEND=mongo STM_TRANSPORT_BACKEND=mongo \
