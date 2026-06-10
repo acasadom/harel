@@ -80,14 +80,12 @@ def _redis_pool(concurrency: int) -> int:
 
 
 _STORE_TABLES = ("executions", "outbox", "processed_events", "timers", "spawns")
-_SURREAL_STORE_TABLES = ("executions", "outbox", "processed", "timers", "spawns", "counter")
-_SURREAL_TX_TABLES = ("messages", "locks", "counter")
 
 
 async def _flush(store: Any, transport: Any) -> None:
     """Empty the backend so each level starts clean — without this, executions and drained
     group rows accumulate across levels/runs and pollute the measurement. Covers every backend
-    we worker-bench (redis, postgres, rqlite, mongo, surrealdb)."""
+    we worker-bench (redis, postgres, rqlite, mongo)."""
     sb = os.environ.get("STM_STORE_BACKEND", "redis")
     tb = os.environ.get("STM_TRANSPORT_BACKEND", sb)
     if sb == "redis":
@@ -101,9 +99,6 @@ async def _flush(store: Any, transport: Any) -> None:
         await store._execute([[f"DELETE FROM {t}"] for t in _STORE_TABLES])
     elif sb == "mongo":
         await store._db.client.drop_database(store._db.name)  # one DB holds store + transport
-    elif sb == "surrealdb":
-        for t in _SURREAL_STORE_TABLES:
-            await store._db.query(f"DELETE {t}")
 
     if tb == "postgres":
         async with transport._pool.connection() as conn:
@@ -114,9 +109,6 @@ async def _flush(store: Any, transport: Any) -> None:
         await transport._r.flushdb()
     elif tb == "rqlite":
         await transport._execute([["DELETE FROM messages"]])
-    elif tb == "surrealdb":
-        for t in _SURREAL_TX_TABLES:
-            await transport._db.query(f"DELETE {t}")
     # mongo transport shares the dropped database (handled above)
 
 
@@ -190,11 +182,6 @@ _BACKEND_ENV_KEYS = (
     "STM_RQLITE_URL",
     "STM_MONGO_URL",
     "STM_MONGO_DB",
-    "STM_SURREAL_URL",
-    "STM_SURREAL_NS",
-    "STM_SURREAL_DB",
-    "STM_SURREAL_USER",
-    "STM_SURREAL_PASS",
 )
 
 

@@ -50,21 +50,6 @@ async def test_redis_load_for_event():
         await store.close()
 
 
-async def test_surreal_load_for_event():
-    pytest.importorskip("surrealdb")
-    from surrealdb import AsyncSurreal
-
-    from harel.engine.aio_store import AsyncSurrealStore
-
-    db = AsyncSurreal("mem://")
-    await db.connect()
-    await db.use("test", "test")
-    try:
-        await _check(AsyncSurrealStore(db))
-    finally:
-        await db.close()
-
-
 async def test_dynamodb_load_for_event():
     aiomoto = pytest.importorskip("aiomoto")
 

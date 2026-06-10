@@ -17,21 +17,21 @@ n = 200 executions × 2 events (Start, Finish) = 400 events per run. Throughput 
 | Redis      | 311 | 672 | **833** | fastest; in-memory backend |
 | Postgres   | 262 | **706** | 593 | peaks ~c=16; slight dip at 64 (pool/lock contention) |
 | Mongo      | 228 | 496 | 512 | scales then plateaus |
-| SurrealDB  | 136 | ~420 | 444 | stable from c≥8 (\*) |
 | rqlite     | 69  | 158 | 147 | slowest — Raft consensus + HTTP + fsync per write (distributed-durability cost) |
 
-(\*) One run produced an anomalous 13 ev/s at Surreal c=16 (a one-off connection/warmup
-stall, 30s); the re-run gave the real curve (~420 stable). Recorded for honesty.
+Backend versions (Docker): redis:7-alpine, postgres:16-alpine, rqlite/rqlite:8.43.4, mongo:7.
 
-Backend versions (Docker): redis:7-alpine, postgres:16-alpine, rqlite/rqlite:8.43.4,
-mongo:7, surrealdb/surrealdb:v2.1.4.
+> **SurrealDB was retired** as a backend: its transport `claim` / store `commit` (optimistic
+> server-side `BEGIN…COMMIT`) raise *"Transaction read conflict"* on ~40–60% of concurrent
+> writes (both the `memory` and `rocksdb` engines), which crashes the worker and defeats the
+> concurrency distribution needs. It single-threaded around ~440 ev/s but could not be run
+> multi-worker. The other backends cover the same use cases.
 
 ### Reading
 - **Every backend scales with concurrency** (2–3× from c=1 to c≥16): neither the claim
   nor the commit serializes anymore (validates the ZSET-claim and Postgres-pool fixes,
-  and the Mongo/Surreal O(N)-claim fix).
-- Ranking: Redis ≳ Postgres > Mongo > SurrealDB ≫ rqlite — consistent with each backend's
-  durability model.
+  and the Mongo O(N)-claim fix).
+- Ranking: Redis ≳ Postgres > Mongo ≫ rqlite — consistent with each backend's durability model.
 - The ~800 ev/s ceiling here is bounded by the **per-event round-trip latency against a
   single local server** (each event = load + commit-with-outbox + claim/ack), not by the
   engine (in-memory the engine does ~47k ev/s). See the worker-scaling results for whether
@@ -135,9 +135,8 @@ so cutting a round-trip per event is a direct win.
 round-trip (the worker prefers it, falling back to `load` + `is_processed` for any store that
 lacks it). Implemented across all networked async stores: Postgres (`SELECT data, EXISTS(...)`),
 Redis (pipelined `GET` + `SISMEMBER`), Rqlite (one HTTP `SELECT` + `EXISTS` subquery), SQLite,
-SurrealDB (a `processed` subquery in the `SELECT`), Mongo (an aggregation with a server-side
-`$in` so the growing `processed` array is never shipped), DynamoDB (`BatchGetItem` across the
-two tables).
+Mongo (an aggregation with a server-side `$in` so the growing `processed` array is never
+shipped), DynamoDB (`BatchGetItem` across the two tables).
 
 Controlled A/B on **real Postgres** (store+transport both PG, fresh container, 2 runs each,
 no-op action), aggregate events/s:
@@ -166,10 +165,8 @@ The gain scales with **how expensive a round-trip is** on the backend: large for
 moderate for postgres/mongo, negligible for redis (already sub-ms ops). It's free everywhere
 (one combined query) and never a regression beyond noise.
 
-> **SurrealDB** could not be measured under concurrency: its transport `claim` (an optimistic
-> server-side `BEGIN…COMMIT`) raises *"Transaction read conflict"* once several workers claim at
-> once, which aborts the run. That is a transport-claim concurrency limit, orthogonal to this
-> store change — a separate item to investigate.
+(SurrealDB was dropped from the comparison: it conflict-thrashed under concurrency and has since
+been retired — see the note at the top.)
 
 ## Methodology notes
 - Setup (create executions + publish the backlog) is **not** measured; only the drain is.

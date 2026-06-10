@@ -18,17 +18,15 @@ running. Backends:
 | `PostgresTransport` | per-group row claimed with `SELECT … FOR UPDATE SKIP LOCKED` — concurrent workers lease *different* groups in parallel (no global lock) |
 | `RqliteTransport` | queue table on Raft-replicated SQLite |
 | `MongoTransport` | per-group ready-index/lock document (`available_at` + token; `find_one_and_update` lease) |
-| `SurrealTransport` | per-group ready-index/lock record (`available_at` + token; atomic `BEGIN…COMMIT` + THROW lease) |
 | `SqsTransport` | SQS FIFO `MessageGroupId` (runs on LocalStack) |
 
-Backends without a cheap global serialization primitive (Redis, Mongo, SurrealDB) build
-per-group exclusivity by hand with a per-group lock record indexed by when it next becomes
-claimable, so `claim` reads only the few due groups rather than scanning the whole queue;
-SQLite and Postgres lean on the database instead (SQLite's write-lock; Postgres's row lock via
-`SKIP LOCKED`).
+Backends without a cheap global serialization primitive (Redis, Mongo) build per-group
+exclusivity by hand with a per-group lock record indexed by when it next becomes claimable, so
+`claim` reads only the few due groups rather than scanning the whole queue; SQLite and Postgres
+lean on the database instead (SQLite's write-lock; Postgres's row lock via `SKIP LOCKED`).
 
 Store and transport are **independent** — mix freely, or unify on one backend (all-Postgres,
-all-rqlite, all-Mongo, all-SurrealDB: no Redis needed).
+all-rqlite, all-Mongo: no Redis needed).
 
 ## Running with workers
 

@@ -40,9 +40,6 @@ rqlite = ["requests>=2,<3", "httpx>=0.27"]
 # the MongoStore / MongoTransport backend; the client is injected, so this is only
 # needed to talk to a real MongoDB (tests use mongomock from the dev group)
 mongo = ["pymongo>=4,<5", "motor>=3,<4"]
-# the SurrealStore / SurrealTransport backend; the package bundles an in-process
-# `mem://` engine, which the unit tests run against (no server needed)
-surrealdb = ["surrealdb>=2,<3"]
 # the SqsTransport backend (AWS SQS FIFO; works against LocalStack with no AWS account).
 # boto3 drives the sync transport; aioboto3 (aiobotocore) drives the native async one.
 sqs = ["boto3>=1.26", "aioboto3>=12"]
@@ -81,7 +78,6 @@ dev = [
     # supplies the client, so the unit tests need pymongo present even without a server
     "pymongo>=4,<5",
     "pygls>=1.3,<2",
-    "surrealdb>=2.0.0",
     "moto>=5.2.1",
     "textual>=0.60",
     "pytest-asyncio>=0.24",

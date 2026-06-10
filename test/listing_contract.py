@@ -4,7 +4,7 @@ stack-marked, SHARED tables).
 
 The contract: a page of lightweight `ExecutionSummary` filtered by status (OR) /
 definition_id / roots_only, paginated by an opaque cursor until `next_cursor is None`.
-Ordering is stable on Dict/SQL/Mongo/Surreal but best-effort/unordered on Redis (SCAN)
+Ordering is stable on Dict/SQL/Mongo but best-effort/unordered on Redis (SCAN)
 and DynamoDB (Scan) — so the assertions compare the reassembled **set** of ids, never
 per-page order, which holds for every backend.
 
