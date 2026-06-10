@@ -79,10 +79,15 @@ def _redis_pool(concurrency: int) -> int:
     return concurrency * 2 + 16
 
 
+_STORE_TABLES = ("executions", "outbox", "processed_events", "timers", "spawns")
+_SURREAL_STORE_TABLES = ("executions", "outbox", "processed", "timers", "spawns", "counter")
+_SURREAL_TX_TABLES = ("messages", "locks", "counter")
+
+
 async def _flush(store: Any, transport: Any) -> None:
     """Empty the backend so each level starts clean — without this, executions and drained
-    group rows accumulate across levels/runs and pollute the measurement. Covers the backends
-    we worker-bench (redis, postgres); a no-op elsewhere."""
+    group rows accumulate across levels/runs and pollute the measurement. Covers every backend
+    we worker-bench (redis, postgres, rqlite, mongo, surrealdb)."""
     sb = os.environ.get("STM_STORE_BACKEND", "redis")
     tb = os.environ.get("STM_TRANSPORT_BACKEND", sb)
     if sb == "redis":
@@ -90,8 +95,17 @@ async def _flush(store: Any, transport: Any) -> None:
     elif sb == "postgres":
         async with store._pool.connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("TRUNCATE executions, outbox, processed_events, timers, spawns")
+                await cur.execute(f"TRUNCATE {', '.join(_STORE_TABLES)}")
             await conn.commit()
+    elif sb == "rqlite":
+        for t in _STORE_TABLES:
+            await store._query(f"DELETE FROM {t}", ())
+    elif sb == "mongo":
+        await store._db.client.drop_database(store._db.name)  # one DB holds store + transport
+    elif sb == "surrealdb":
+        for t in _SURREAL_STORE_TABLES:
+            await store._db.query(f"DELETE {t}")
+
     if tb == "postgres":
         async with transport._pool.connection() as conn:
             async with conn.cursor() as cur:
@@ -99,6 +113,12 @@ async def _flush(store: Any, transport: Any) -> None:
             await conn.commit()
     elif tb == "redis" and transport is not store:
         await transport._r.flushdb()
+    elif tb == "rqlite":
+        await transport._query("DELETE FROM messages", ())
+    elif tb == "surrealdb":
+        for t in _SURREAL_TX_TABLES:
+            await transport._db.query(f"DELETE {t}")
+    # mongo transport shares the dropped database (handled above)
 
 
 async def _setup(n: int, concurrency: int) -> None:
