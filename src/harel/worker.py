@@ -38,12 +38,12 @@ containers) coordinating by events, which is the whole point of the model.
 from __future__ import annotations
 
 import asyncio
-import os
 import signal
 import socket
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
+from harel.config import Config, require
 from harel.definition.model import Definition
 from harel.definition.validate import ValidationError
 from harel.dsl import definition_from_dsl_file, parse
@@ -87,153 +87,130 @@ def load_definitions(definitions_dir: str) -> dict[str, Definition]:
     return registry
 
 
-def build_store() -> ExecutionStore:
+def build_store(cfg: Optional[Config] = None) -> ExecutionStore:
     """Build the durable store from STM_STORE_BACKEND (sqlite | redis | postgres |
-    rqlite | mongo | libsql | dynamodb)."""
-    backend = os.environ.get("STM_STORE_BACKEND", "sqlite")
+    rqlite | mongo | libsql | dynamodb). Reads the env unless a `Config` is passed in."""
+    cfg = cfg or Config.from_env()
+    backend = cfg.store_backend
     if backend == "sqlite":
-        return SqliteStore(os.environ["STM_STORE_DB"])
+        return SqliteStore(require(cfg.store_db, "STM_STORE_DB"))
     if backend == "redis":
-        return RedisStore.from_url(os.environ.get("STM_STORE_REDIS_URL") or os.environ["STM_REDIS_URL"])
+        return RedisStore.from_url(require(cfg.store_redis_url or cfg.redis_url, "STM_REDIS_URL"))
     if backend == "postgres":
-        return PostgresStore.from_dsn(os.environ["STM_POSTGRES_DSN"])
+        return PostgresStore.from_dsn(require(cfg.postgres_dsn, "STM_POSTGRES_DSN"))
     if backend == "rqlite":
-        return RqliteStore.from_url(os.environ["STM_RQLITE_URL"])
+        return RqliteStore.from_url(require(cfg.rqlite_url, "STM_RQLITE_URL"))
     if backend == "mongo":
-        return MongoStore.from_url(os.environ["STM_MONGO_URL"], os.environ.get("STM_MONGO_DB", "harel"))
+        return MongoStore.from_url(require(cfg.mongo_url, "STM_MONGO_URL"), cfg.mongo_db)
     if backend == "libsql":
-        return LibsqlStore(os.environ["STM_LIBSQL_DB"], **_libsql_kwargs())
+        return LibsqlStore(require(cfg.libsql_db, "STM_LIBSQL_DB"), **cfg.libsql_kwargs())
     if backend == "dynamodb":
-        return DynamoDBStore.create(
-            os.environ.get("STM_DYNAMODB_ENDPOINT"), os.environ.get("STM_AWS_REGION", "us-east-1")
-        )
+        return DynamoDBStore.create(cfg.dynamodb_endpoint, cfg.aws_region)
     raise ValueError(f"unknown STM_STORE_BACKEND: {backend}")
 
 
-def _libsql_kwargs() -> dict[str, Any]:
-    """libSQL connection args from the env. STM_LIBSQL_DB is the local database file (used by
-    store + transport). For an embedded replica against a Turso/`sqld` primary, set
-    STM_LIBSQL_SYNC_URL (+ STM_LIBSQL_AUTH_TOKEN); otherwise it is a plain local libSQL file."""
-    kwargs: dict[str, Any] = {}
-    sync_url = os.environ.get("STM_LIBSQL_SYNC_URL")
-    if sync_url:
-        kwargs["sync_url"] = sync_url
-        kwargs["auth_token"] = os.environ.get("STM_LIBSQL_AUTH_TOKEN", "")
-    return kwargs
-
-
-def build_transport() -> Transport:
+def build_transport(cfg: Optional[Config] = None) -> Transport:
     """Build the event transport from STM_TRANSPORT_BACKEND (redis | postgres |
     rqlite | sqlite | mongo | libsql | sqs). Default redis; postgres/rqlite/mongo/libsql
     give a no-Redis stack (one backend serves store + transport)."""
-    backend = os.environ.get("STM_TRANSPORT_BACKEND", "redis")
+    cfg = cfg or Config.from_env()
+    backend = cfg.transport_backend
     if backend == "redis":
-        return RedisTransport.from_url(os.environ["STM_REDIS_URL"])
+        return RedisTransport.from_url(require(cfg.redis_url, "STM_REDIS_URL"))
     if backend == "postgres":
-        return PostgresTransport.from_dsn(os.environ["STM_POSTGRES_DSN"])
+        return PostgresTransport.from_dsn(require(cfg.postgres_dsn, "STM_POSTGRES_DSN"))
     if backend == "rqlite":
-        return RqliteTransport.from_url(os.environ["STM_RQLITE_URL"])
+        return RqliteTransport.from_url(require(cfg.rqlite_url, "STM_RQLITE_URL"))
     if backend == "sqlite":
-        return SqliteTransport(os.environ["STM_TRANSPORT_DB"])
+        return SqliteTransport(require(cfg.transport_db, "STM_TRANSPORT_DB"))
     if backend == "mongo":
-        return MongoTransport.from_url(os.environ["STM_MONGO_URL"], os.environ.get("STM_MONGO_DB", "harel"))
+        return MongoTransport.from_url(require(cfg.mongo_url, "STM_MONGO_URL"), cfg.mongo_db)
     if backend == "libsql":
-        return LibsqlTransport(os.environ["STM_LIBSQL_DB"], **_libsql_kwargs())
+        return LibsqlTransport(require(cfg.libsql_db, "STM_LIBSQL_DB"), **cfg.libsql_kwargs())
     if backend == "sqs":
-        return SqsTransport.create(
-            os.environ["STM_SQS_ENDPOINT"], os.environ.get("STM_SQS_QUEUE", "stm.fifo")
-        )
+        return SqsTransport.create(require(cfg.sqs_endpoint, "STM_SQS_ENDPOINT"), cfg.sqs_queue)
     raise ValueError(f"unknown STM_TRANSPORT_BACKEND: {backend}")
 
 
-async def build_store_async() -> Any:
+async def build_store_async(cfg: Optional[Config] = None) -> Any:
     """The async store for STM_STORE_BACKEND: all backends have a native async port."""
-    backend = os.environ.get("STM_STORE_BACKEND", "sqlite")
+    cfg = cfg or Config.from_env()
+    backend = cfg.store_backend
     if backend == "sqlite":
         from harel.engine.aio_store import AsyncSqliteStore
 
-        return await AsyncSqliteStore.create(os.environ["STM_STORE_DB"])
+        return await AsyncSqliteStore.create(require(cfg.store_db, "STM_STORE_DB"))
     if backend == "redis":
         from harel.engine.aio_store import AsyncRedisStore
 
-        return AsyncRedisStore.from_url(os.environ.get("STM_STORE_REDIS_URL") or os.environ["STM_REDIS_URL"])
+        return AsyncRedisStore.from_url(require(cfg.store_redis_url or cfg.redis_url, "STM_REDIS_URL"))
     if backend == "postgres":
         from harel.engine.aio_store import AsyncPostgresStore
 
-        return await AsyncPostgresStore.from_dsn(os.environ["STM_POSTGRES_DSN"])
+        return await AsyncPostgresStore.from_dsn(require(cfg.postgres_dsn, "STM_POSTGRES_DSN"))
     if backend == "mongo":
         from harel.engine.aio_store import AsyncMongoStore
 
-        return await AsyncMongoStore.from_url(
-            os.environ["STM_MONGO_URL"], os.environ.get("STM_MONGO_DB", "harel")
-        )
+        return await AsyncMongoStore.from_url(require(cfg.mongo_url, "STM_MONGO_URL"), cfg.mongo_db)
     if backend == "rqlite":
         from harel.engine.aio_store import AsyncRqliteStore
 
-        return await AsyncRqliteStore.from_url(os.environ["STM_RQLITE_URL"])
+        return await AsyncRqliteStore.from_url(require(cfg.rqlite_url, "STM_RQLITE_URL"))
     if backend == "libsql":
         from harel.engine.aio_store import AsyncLibsqlStore
 
-        return await AsyncLibsqlStore.create(os.environ["STM_LIBSQL_DB"], **_libsql_kwargs())
+        return await AsyncLibsqlStore.create(require(cfg.libsql_db, "STM_LIBSQL_DB"), **cfg.libsql_kwargs())
     if backend == "dynamodb":
         from harel.engine.aio_store import AsyncDynamoDBStore
 
-        return await AsyncDynamoDBStore.create(
-            endpoint_url=os.environ.get("STM_DYNAMODB_ENDPOINT"),
-            region=os.environ.get("STM_AWS_REGION", "us-east-1"),
-        )
+        return await AsyncDynamoDBStore.create(endpoint_url=cfg.dynamodb_endpoint, region=cfg.aws_region)
     raise ValueError(f"unknown STM_STORE_BACKEND: {backend}")
 
 
-async def build_transport_async() -> Any:
+async def build_transport_async(cfg: Optional[Config] = None) -> Any:
     """The async transport for STM_TRANSPORT_BACKEND: all backends have a native async port."""
-    backend = os.environ.get("STM_TRANSPORT_BACKEND", "redis")
+    cfg = cfg or Config.from_env()
+    backend = cfg.transport_backend
     if backend == "redis":
         from harel.engine.aio_transport import AsyncRedisTransport
 
-        return AsyncRedisTransport.from_url(os.environ["STM_REDIS_URL"])
+        return AsyncRedisTransport.from_url(require(cfg.redis_url, "STM_REDIS_URL"))
     if backend == "sqlite":
         from harel.engine.aio_transport import AsyncSqliteTransport
 
-        return await AsyncSqliteTransport.create(os.environ["STM_TRANSPORT_DB"])
+        return await AsyncSqliteTransport.create(require(cfg.transport_db, "STM_TRANSPORT_DB"))
     if backend == "postgres":
         from harel.engine.aio_transport import AsyncPostgresTransport
 
-        return await AsyncPostgresTransport.from_dsn(os.environ["STM_POSTGRES_DSN"])
+        return await AsyncPostgresTransport.from_dsn(require(cfg.postgres_dsn, "STM_POSTGRES_DSN"))
     if backend == "mongo":
         from harel.engine.aio_transport import AsyncMongoTransport
 
-        return await AsyncMongoTransport.from_url(
-            os.environ["STM_MONGO_URL"], os.environ.get("STM_MONGO_DB", "harel")
-        )
+        return await AsyncMongoTransport.from_url(require(cfg.mongo_url, "STM_MONGO_URL"), cfg.mongo_db)
     if backend == "rqlite":
         from harel.engine.aio_transport import AsyncRqliteTransport
 
-        return await AsyncRqliteTransport.from_url(os.environ["STM_RQLITE_URL"])
+        return await AsyncRqliteTransport.from_url(require(cfg.rqlite_url, "STM_RQLITE_URL"))
     if backend == "libsql":
         from harel.engine.aio_transport import AsyncLibsqlTransport
 
-        return await AsyncLibsqlTransport.create(os.environ["STM_LIBSQL_DB"], **_libsql_kwargs())
+        return await AsyncLibsqlTransport.create(
+            require(cfg.libsql_db, "STM_LIBSQL_DB"), **cfg.libsql_kwargs()
+        )
     if backend == "sqs":
         from harel.engine.aio_transport import AsyncSqsTransport
 
         return await AsyncSqsTransport.create(
-            endpoint_url=os.environ.get("STM_SQS_ENDPOINT"),
-            queue_name=os.environ.get("STM_SQS_QUEUE", "stm.fifo"),
-            region=os.environ.get("STM_AWS_REGION", "us-east-1"),
+            endpoint_url=cfg.sqs_endpoint, queue_name=cfg.sqs_queue, region=cfg.aws_region
         )
     raise ValueError(f"unknown STM_TRANSPORT_BACKEND: {backend}")
 
 
 async def amain() -> None:
-    definitions_dir = os.environ["STM_DEFINITIONS_DIR"]
-    worker_id = os.environ.get("STM_WORKER_ID", socket.gethostname())
-    visibility = float(os.environ.get("STM_VISIBILITY", "30"))
-    concurrency = int(os.environ.get("STM_CONCURRENCY", "256"))
-
-    store = await build_store_async()
-    transport = await build_transport_async()
-    definitions = load_definitions(definitions_dir)  # sync startup IO, one-time
+    cfg = Config.from_env()  # read once, thread it through
+    store = await build_store_async(cfg)
+    transport = await build_transport_async(cfg)
+    definitions = load_definitions(require(cfg.definitions_dir, "STM_DEFINITIONS_DIR"))  # one-time
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -241,7 +218,12 @@ async def amain() -> None:
         loop.add_signal_handler(sig, stop.set)
 
     worker = AsyncWorker(
-        store, transport, definitions, worker_id=worker_id, visibility=visibility, concurrency=concurrency
+        store,
+        transport,
+        definitions,
+        worker_id=cfg.worker_id or socket.gethostname(),
+        visibility=cfg.visibility,
+        concurrency=cfg.concurrency,
     )
     try:
         await worker.run(stop)
