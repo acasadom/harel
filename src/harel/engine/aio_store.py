@@ -342,6 +342,25 @@ class AsyncPostgresStore:
             await conn.commit()
         return Execution.model_validate_json(row[0]) if row is not None else None
 
+    async def load_for_event(
+        self, execution_id: str, event_id: str
+    ) -> tuple[Optional[Execution], bool]:
+        """Load the Execution and whether `event_id` is already processed in **one** round-trip
+        (the worker's per-event dedupe check, folded into the load instead of a second query)."""
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT e.data, EXISTS(SELECT 1 FROM processed_events p "
+                    "WHERE p.execution_id = %s AND p.event_id = %s) "
+                    "FROM executions e WHERE e.id = %s",
+                    (execution_id, event_id, execution_id),
+                )
+                row = await cur.fetchone()
+            await conn.commit()
+        if row is None:
+            return None, False
+        return Execution.model_validate_json(row[0]), bool(row[1])
+
     async def save(self, exe: Execution) -> None:
         await self.commit(exe, [])
 

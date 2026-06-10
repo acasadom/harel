@@ -116,9 +116,19 @@ class AsyncWorker:
             resolve_machine=lambda fqn: _resolve_machine(self.definitions, self.resolver, fqn),
         )
 
+    async def _load_for_event(self, execution_id: str, event_id: str) -> tuple[Any, bool]:
+        """Load the Execution and its dedupe flag. One round-trip if the store offers
+        `load_for_event`; otherwise fall back to `load` + `is_processed` (two round-trips)."""
+        combined = getattr(self.store, "load_for_event", None)
+        if combined is not None:
+            return await combined(execution_id, event_id)
+        exe = await self.store.load(execution_id)
+        processed = exe is not None and await self.store.is_processed(execution_id, event_id)
+        return exe, processed
+
     async def _handle(self, lease) -> bool:
-        exe = await self.store.load(lease.group_id)
-        if exe is None or await self.store.is_processed(exe.id, lease.event.id):
+        exe, processed = await self._load_for_event(lease.group_id, lease.event.id)
+        if exe is None or processed:
             await self.transport.ack(lease)
             return True
         if exe.status is Status.CANCELLED:
