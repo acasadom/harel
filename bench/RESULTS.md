@@ -148,9 +148,28 @@ no-op action), aggregate events/s:
 | 4 | ~842 | ~903 | **+7%** |
 | 8 | ~852 | ~957 | **+12%** |
 
-A consistent ~7–12% from removing one of ~5 round-trips. Modest but real, and free for every
-networked backend. The dominant remaining per-event cost is the `commit` (the full-Execution
-snapshot write + outbox + transport ack), which is the next thing to attack.
+A consistent ~7–12% from removing one of ~5 round-trips. The dominant remaining per-event cost
+is the `commit` (the full-Execution snapshot write + outbox + transport ack), the next thing to
+attack.
+
+**Across backends** (all-`<backend>` store+transport, single runs so ±noise, n=2500, no-op
+action), baseline → `load_for_event`, events/s at 1/4/8 workers:
+
+| backend | 1w | 4w | 8w | effect |
+|---|---|---|---|---|
+| **rqlite** | 149→158 | 256→**343** | 406→**495** | **biggest win (+20–34%)** — every round-trip is an HTTP request, so dropping one matters most |
+| **postgres** | 578→640 | 842→903 | 852→957 | **+7–12%** (the controlled A/B above) |
+| **mongo** | 460→488 | 699→**784** | 706→694 | **small win (~+6–12%)**, 8w within noise |
+| **redis** | 816→847 | 1386→1167 | 1381→1425 | **~neutral** — `GET`+`SISMEMBER` are sub-ms, so pipelining them saves almost nothing (the 4w dip is run-to-run noise) |
+
+The gain scales with **how expensive a round-trip is** on the backend: large for rqlite (HTTP),
+moderate for postgres/mongo, negligible for redis (already sub-ms ops). It's free everywhere
+(one combined query) and never a regression beyond noise.
+
+> **SurrealDB** could not be measured under concurrency: its transport `claim` (an optimistic
+> server-side `BEGIN…COMMIT`) raises *"Transaction read conflict"* once several workers claim at
+> once, which aborts the run. That is a transport-claim concurrency limit, orthogonal to this
+> store change — a separate item to investigate.
 
 ## Methodology notes
 - Setup (create executions + publish the backlog) is **not** measured; only the drain is.
