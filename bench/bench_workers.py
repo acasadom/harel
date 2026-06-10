@@ -98,8 +98,7 @@ async def _flush(store: Any, transport: Any) -> None:
                 await cur.execute(f"TRUNCATE {', '.join(_STORE_TABLES)}")
             await conn.commit()
     elif sb == "rqlite":
-        for t in _STORE_TABLES:
-            await store._query(f"DELETE FROM {t}", ())
+        await store._execute([[f"DELETE FROM {t}"] for t in _STORE_TABLES])
     elif sb == "mongo":
         await store._db.client.drop_database(store._db.name)  # one DB holds store + transport
     elif sb == "surrealdb":
@@ -114,7 +113,7 @@ async def _flush(store: Any, transport: Any) -> None:
     elif tb == "redis" and transport is not store:
         await transport._r.flushdb()
     elif tb == "rqlite":
-        await transport._query("DELETE FROM messages", ())
+        await transport._execute([["DELETE FROM messages"]])
     elif tb == "surrealdb":
         for t in _SURREAL_TX_TABLES:
             await transport._db.query(f"DELETE {t}")
