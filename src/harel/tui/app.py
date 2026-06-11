@@ -6,13 +6,13 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import os
 import time
 from typing import Callable, Optional
 
 from textual.app import App
 from textual.binding import Binding
 
+from harel.config import Config
 from harel.tui.model import MonitorModel
 from harel.tui.resolve import DefinitionSource
 from harel.tui.screens import ListScreen
@@ -86,12 +86,13 @@ def _build_model(args: argparse.Namespace) -> MonitorModel:
     from harel.worker import build_store
 
     store = build_store()
-    defs_dir = args.definitions_dir or os.environ.get("STM_DEFINITIONS_DIR")
+    defs_dir = args.definitions_dir or Config.from_env().definitions_dir
     source = DefinitionSource.from_dir(defs_dir) if defs_dir else DefinitionSource.empty()
     return MonitorModel(store, source)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    cfg = Config.from_env()
     parser = argparse.ArgumentParser(
         prog="harel monitor", description="Monitor statechart executions in a TUI."
     )
@@ -103,12 +104,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "--interval",
         type=float,
-        default=float(os.environ.get("STM_TUI_INTERVAL_MS", "1000")) / 1000.0,
+        default=cfg.tui_interval_ms / 1000.0,
         help="auto-refresh interval in seconds (default 1.0; $STM_TUI_INTERVAL_MS).",
     )
     parser.add_argument(
         "--theme",
-        default=os.environ.get("STM_TUI_THEME", "nord"),
+        default=cfg.tui_theme,
         help="a built-in Textual theme: nord, gruvbox, tokyo-night, dracula, monokai, "
         "textual-dark, textual-light, … (default nord; $STM_TUI_THEME). Press `ctrl+p` "
         "in the app to preview them live.",
