@@ -95,14 +95,31 @@ class _AsyncStoreAdapter:
     def __init__(self, store: Any) -> None:
         self._s = store
 
+    @property
+    def trace_max(self) -> int:
+        return getattr(self._s, "trace_max", 0)
+
+    @trace_max.setter
+    def trace_max(self, value: int) -> None:
+        if hasattr(self._s, "trace_max"):
+            self._s.trace_max = value
+
     async def load(self, execution_id):
         return self._s.load(execution_id)
 
     async def save(self, exe):
         return self._s.save(exe)
 
-    async def commit(self, exe, emits, processed_event_id=None, timers=(), spawns=()):
-        return self._s.commit(exe, emits, processed_event_id=processed_event_id, timers=timers, spawns=spawns)
+    async def commit(self, exe, emits, processed_event_id=None, timers=(), spawns=(), trace=None):
+        return self._s.commit(
+            exe, emits, processed_event_id=processed_event_id, timers=timers, spawns=spawns, trace=trace
+        )
+
+    async def read_trace(self, execution_id):
+        return self._s.read_trace(execution_id)
+
+    async def append_trace(self, execution_id, entry):
+        return self._s.append_trace(execution_id, entry)
 
     async def is_processed(self, execution_id, event_id):
         return self._s.is_processed(execution_id, event_id)

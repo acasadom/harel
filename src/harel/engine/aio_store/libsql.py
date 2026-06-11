@@ -24,6 +24,14 @@ class AsyncLibsqlStore:
         self._s = sync_store
         self._lock = asyncio.Lock()
 
+    @property
+    def trace_max(self) -> int:
+        return self._s.trace_max
+
+    @trace_max.setter
+    def trace_max(self, value: int) -> None:
+        self._s.trace_max = value
+
     @classmethod
     async def create(
         cls,
@@ -59,6 +67,7 @@ class AsyncLibsqlStore:
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
+        trace: Optional[dict] = None,
     ) -> None:
         async with self._lock:
             await asyncio.to_thread(
@@ -68,7 +77,16 @@ class AsyncLibsqlStore:
                 processed_event_id=processed_event_id,
                 timers=timers,
                 spawns=spawns,
+                trace=trace,
             )
+
+    async def append_trace(self, execution_id: str, entry: dict) -> None:
+        async with self._lock:
+            await asyncio.to_thread(self._s.append_trace, execution_id, entry)
+
+    async def read_trace(self, execution_id: str) -> list[dict]:
+        async with self._lock:
+            return await asyncio.to_thread(self._s.read_trace, execution_id)
 
     async def is_processed(self, execution_id: str, event_id: str) -> bool:
         async with self._lock:

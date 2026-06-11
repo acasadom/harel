@@ -53,6 +53,9 @@ class Config:
     # --- monitoring TUI ---
     tui_interval_ms: int = 1000  # STM_TUI_INTERVAL_MS (auto-refresh)
     tui_theme: str = "nord"  # STM_TUI_THEME
+    # --- execution trace (opt-in timeline) ---
+    trace: bool = False  # STM_TRACE (record a per-event timeline step in commit)
+    trace_max: int = 200  # STM_TRACE_MAX (ring: keep only the last N steps per execution)
 
     @classmethod
     def from_env(cls, env: Optional[Mapping[str, str]] = None) -> "Config":
@@ -82,6 +85,8 @@ class Config:
             concurrency=int(e.get("STM_CONCURRENCY", "256")),
             tui_interval_ms=int(e.get("STM_TUI_INTERVAL_MS", "1000")),
             tui_theme=e.get("STM_TUI_THEME", "nord"),
+            trace=e.get("STM_TRACE", "").lower() in ("1", "true", "yes", "on"),
+            trace_max=int(e.get("STM_TRACE_MAX", "200")),
         )
 
     def libsql_kwargs(self) -> dict:

@@ -6,6 +6,7 @@ from typing import Any, Optional
 
 from harel.engine.execution import Execution
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
+from harel.engine.store._base import DEFAULT_TRACE_MAX
 from harel.spec.states import Event
 
 
@@ -27,6 +28,7 @@ class AsyncMongoStore:
         self._counters = self._db["counters"]
         self._after = ReturnDocument.AFTER
         self._DuplicateKeyError = DuplicateKeyError
+        self.trace_max = DEFAULT_TRACE_MAX
 
     @classmethod
     async def from_url(
@@ -93,6 +95,7 @@ class AsyncMongoStore:
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
+        trace: Optional[dict] = None,
     ) -> None:
         outbox_entries: list[dict] = []
         if emits:
@@ -108,6 +111,9 @@ class AsyncMongoStore:
                 {"seq": base + i, "parent_id": exe.id, "child_id": cid, "root_path": rp, "context": dict(ctx)}
                 for i, (cid, rp, ctx) in enumerate(spawns)
             ]
+        trace_step: Optional[dict] = None
+        if trace is not None:
+            trace_step = {**trace, "index": await self._next_seq("trace:" + exe.id, 1) - 1}
 
         old = exe.version
         exe.version = old + 1
@@ -127,6 +133,8 @@ class AsyncMongoStore:
             push["outbox"] = {"$each": outbox_entries}
         if spawn_entries:
             push["spawns"] = {"$each": spawn_entries}
+        if trace_step is not None:
+            push["trace"] = {"$each": [trace_step], **({"$slice": -self.trace_max} if self.trace_max else {})}
         if push:
             update["$push"] = push
         if processed_event_id is not None:
@@ -147,6 +155,7 @@ class AsyncMongoStore:
                 "data": data,
                 "outbox": outbox_entries,
                 "spawns": spawn_entries,
+                "trace": [trace_step] if trace_step is not None else [],
                 "processed": [processed_event_id] if processed_event_id is not None else [],
                 "timers": {self._enc(op.path): op.fire_at for op in timers if op.action == "schedule"},
             }
@@ -162,6 +171,16 @@ class AsyncMongoStore:
         return (
             await self._exes.find_one({"_id": execution_id, "processed": event_id}, {"_id": 1})
         ) is not None
+
+    async def append_trace(self, execution_id: str, entry: dict) -> None:
+        idx = entry.get("index", await self._next_seq("trace:" + execution_id, 1) - 1)
+        step = {**entry, "index": idx}
+        push = {"$each": [step], **({"$slice": -self.trace_max} if self.trace_max else {})}
+        await self._exes.update_one({"_id": execution_id}, {"$push": {"trace": push}}, upsert=True)
+
+    async def read_trace(self, execution_id: str) -> list[dict]:
+        doc = await self._exes.find_one({"_id": execution_id}, {"trace": 1})
+        return list(doc.get("trace", [])) if doc is not None else []
 
     async def pending_outbox(self) -> list[OutboxEntry]:
         entries: list[OutboxEntry] = []

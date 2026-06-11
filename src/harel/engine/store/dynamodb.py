@@ -9,6 +9,7 @@ from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.store._base import (
+    DEFAULT_TRACE_MAX,
     OutboxEntry,
     SpawnEntry,
     StoreConflict,
@@ -35,7 +36,12 @@ class DynamoDBStore:
 
     Tables (created idempotently, prefixed by `prefix`): ``executions`` (id),
     ``outbox``/``spawns`` (seq), ``timers`` (execution_id, path), ``processed``
-    (execution_id, event_id), ``counters`` (the monotonic seq allocator).
+    (execution_id, event_id), ``counters`` (the monotonic seq allocator), and
+    ``trace`` (execution_id, idx) for the opt-in timeline. The trace ring caps in
+    the same atomic txn (Put idx=K + Delete idx=K-N), which keeps exactly the last
+    N **as long as `trace_max` is fixed from the first traced commit** (the
+    production case — set once at startup); changing it mid-stream over-retains
+    (harmless) until old items age out, rather than trimming immediately.
 
     Trade-offs of the document model, deliberately accepted: the relay/sweep reads
     (`pending_outbox`/`pending_spawns`/`due_timers`) use `Scan` + a client-side
@@ -52,6 +58,7 @@ class DynamoDBStore:
         self._ser = TypeSerializer()
         self._deser = TypeDeserializer()
         self._ClientError = ClientError
+        self.trace_max = DEFAULT_TRACE_MAX
         self._ensure_tables()
 
     @classmethod
@@ -97,6 +104,7 @@ class DynamoDBStore:
             ("timers", [("execution_id", "S"), ("path", "S")]),
             ("processed", [("execution_id", "S"), ("event_id", "S")]),
             ("counters", [("id", "S")]),
+            ("trace", [("execution_id", "S"), ("idx", "N")]),
         ]
         roles = ["HASH", "RANGE"]
         for name, keys in specs:
@@ -143,6 +151,21 @@ class DynamoDBStore:
             ReturnValues="UPDATED_NEW",
         )
         return int(resp["Attributes"]["n"]["N"]) - count + 1
+
+    def _max_trace_idx(self, execution_id: str) -> int:
+        """The highest trace `idx` for an execution, or -1 if none. A Query on the partition
+        key, newest first — single-writer-per-execution, so the read→write is race-free and the
+        index stays contiguous (no counter, so a cancelled commit leaves no gap)."""
+        resp = self._db.query(
+            TableName=self._t("trace"),
+            KeyConditionExpression="execution_id = :e",
+            ExpressionAttributeValues={":e": {"S": execution_id}},
+            ProjectionExpression="idx",
+            ScanIndexForward=False,
+            Limit=1,
+        )
+        items = resp.get("Items")
+        return int(self._item(items[0])["idx"]) if items else -1
 
     def load(self, execution_id: str) -> Optional[Execution]:
         resp = self._db.get_item(
@@ -201,6 +224,7 @@ class DynamoDBStore:
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
+        trace: Optional[dict] = None,  # execution-trace deferred for this backend (accepted, ignored)
     ) -> None:
         # allocate monotonic seqs up front (a seq wasted by a cancelled txn is harmless)
         outbox: list[dict] = []
@@ -278,6 +302,28 @@ class DynamoDBStore:
                     }
                 )
 
+        if trace is not None:
+            idx = self._max_trace_idx(exe.id) + 1  # contiguous per execution (read max, +1)
+            txn.append(
+                {
+                    "Put": {
+                        "TableName": self._t("trace"),
+                        "Item": self._raw({"execution_id": exe.id, "idx": idx, "entry": json.dumps(trace)}),
+                    }
+                }
+            )
+            # ring: drop the item that falls out of the last-N window (Delete of an absent key
+            # is a no-op), all in the same atomic TransactWriteItems
+            if self.trace_max and idx - self.trace_max >= 0:
+                txn.append(
+                    {
+                        "Delete": {
+                            "TableName": self._t("trace"),
+                            "Key": self._raw({"execution_id": exe.id, "idx": idx - self.trace_max}),
+                        }
+                    }
+                )
+
         try:
             self._db.transact_write_items(TransactItems=txn)
         except self._ClientError as exc:
@@ -299,6 +345,31 @@ class DynamoDBStore:
             Key=self._raw({"execution_id": execution_id, "event_id": event_id}),
         )
         return "Item" in resp
+
+    def append_trace(self, execution_id: str, entry: dict) -> None:
+        idx = entry.get("index", self._max_trace_idx(execution_id) + 1)
+        self._db.put_item(
+            TableName=self._t("trace"),
+            Item=self._raw({"execution_id": execution_id, "idx": idx, "entry": json.dumps(entry)}),
+        )
+        if self.trace_max and idx - self.trace_max >= 0:
+            self._db.delete_item(
+                TableName=self._t("trace"),
+                Key=self._raw({"execution_id": execution_id, "idx": idx - self.trace_max}),
+            )
+
+    def read_trace(self, execution_id: str) -> list[dict]:
+        resp = self._db.query(
+            TableName=self._t("trace"),
+            KeyConditionExpression="execution_id = :e",
+            ExpressionAttributeValues={":e": {"S": execution_id}},
+            ScanIndexForward=True,  # oldest → newest
+        )
+        out = []
+        for raw in resp.get("Items", []):
+            it = self._item(raw)
+            out.append({**json.loads(it["entry"]), "index": int(it["idx"])})
+        return out
 
     def pending_outbox(self) -> list[OutboxEntry]:
         rows = self._scan("outbox")

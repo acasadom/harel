@@ -42,8 +42,11 @@ class AsyncTransportDriver(_AsyncRuntimeDriver):
         clock: Callable[[], float] = time.time,
         definitions: Optional[dict[str, Definition]] = None,
         resolve_machine: Optional[Callable[[str], Definition]] = None,
+        trace: bool = False,
     ) -> None:
-        super().__init__(defn, store, clock, definitions=definitions, resolve_machine=resolve_machine)
+        super().__init__(
+            defn, store, clock, definitions=definitions, resolve_machine=resolve_machine, trace=trace
+        )
         self.transport = transport
 
     async def _deliver_timeout(self, execution_id: str, event: Event) -> None:
@@ -94,6 +97,7 @@ class AsyncWorker:
         clock: Callable[[], float] = time.time,
         resolver: Optional[MachineResolver] = None,
         concurrency: int = 256,
+        trace: bool = False,
     ) -> None:
         self.store = store
         self.transport = transport
@@ -105,6 +109,7 @@ class AsyncWorker:
         self.suspend_recheck = suspend_recheck
         self._clock = clock
         self.concurrency = concurrency
+        self._trace = trace  # opt-in execution timeline, threaded to each per-execution driver
 
     def _driver(self, exe: Execution) -> AsyncTransportDriver:
         return AsyncTransportDriver(
@@ -114,6 +119,7 @@ class AsyncWorker:
             self._clock,
             definitions=self.definitions,
             resolve_machine=lambda fqn: _resolve_machine(self.definitions, self.resolver, fqn),
+            trace=self._trace,
         )
 
     async def _load_for_event(self, execution_id: str, event_id: str) -> tuple[Any, bool]:
@@ -211,6 +217,7 @@ class AsyncDistributedRunner:
         definitions: dict[str, Definition],
         clock: Callable[[], float] = time.time,
         resolver: Optional[MachineResolver] = None,
+        trace: bool = False,
     ) -> None:
         self.store = store
         self.transport = transport
@@ -218,6 +225,7 @@ class AsyncDistributedRunner:
         _register_submachines(self.definitions)
         self.resolver = resolver
         self._clock = clock
+        self._trace = trace
 
     def _transport_driver(self, defn: Definition) -> AsyncTransportDriver:
         return AsyncTransportDriver(
@@ -227,6 +235,7 @@ class AsyncDistributedRunner:
             self._clock,
             definitions=self.definitions,
             resolve_machine=lambda fqn: _resolve_machine(self.definitions, self.resolver, fqn),
+            trace=self._trace,
         )
 
     async def create(self, definition_id: str, context: Optional[dict] = None) -> Execution:
@@ -257,6 +266,7 @@ class AsyncDistributedRunner:
             clock or self._clock,
             resolver=self.resolver,
             concurrency=concurrency,
+            trace=self._trace,
         )
 
     # --- control plane ------------------------------------------------------

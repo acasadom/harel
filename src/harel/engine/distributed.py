@@ -146,16 +146,17 @@ class DistributedRunner:
         definitions: dict[str, Definition],
         clock: Callable[[], float] = time.time,
         resolver: Optional[MachineResolver] = None,
+        trace: bool = False,
     ) -> None:
         self.store = store
         self.transport = transport
         self.definitions = definitions
         self.resolver = resolver
         self._clock = clock
-        self._async = self._portal_build(store, transport, definitions, clock, resolver)
+        self._async = self._portal_build(store, transport, definitions, clock, resolver, trace)
 
     @staticmethod
-    def _portal_build(store, transport, definitions, clock, resolver):
+    def _portal_build(store, transport, definitions, clock, resolver, trace=False):
         from harel.engine.aio import facade
 
         async def build():
@@ -167,6 +168,7 @@ class DistributedRunner:
                 definitions,
                 clock,
                 resolver,
+                trace=trace,
             )
 
         return facade.run(build)

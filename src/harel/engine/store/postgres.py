@@ -7,6 +7,7 @@ from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.store._base import (
+    DEFAULT_TRACE_MAX,
     OutboxEntry,
     SpawnEntry,
     StoreConflict,
@@ -53,7 +54,41 @@ class PostgresStore:
                 "(seq BIGSERIAL PRIMARY KEY, parent_id TEXT NOT NULL, child_id TEXT NOT NULL, "
                 "root_path TEXT NOT NULL, context TEXT NOT NULL)"
             )
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS trace "
+                "(execution_id TEXT NOT NULL, idx INT NOT NULL, entry TEXT NOT NULL, "
+                "PRIMARY KEY (execution_id, idx))"
+            )
+        self.trace_max = DEFAULT_TRACE_MAX
         conn.commit()
+
+    def _write_trace(self, cur: Any, execution_id: str, entry: dict) -> None:
+        """Append one trace step on the given cursor (inside commit's txn). Two statements:
+        `idx` computed inline (MAX+1, monotonic) so no pre-read, then the ring cap. `read_trace`
+        takes `index` from the `idx` column."""
+        cur.execute(
+            "INSERT INTO trace (execution_id, idx, entry) "
+            "SELECT %s, COALESCE((SELECT MAX(idx) FROM trace WHERE execution_id = %s), -1) + 1, %s",
+            (execution_id, execution_id, json.dumps(entry)),
+        )
+        if self.trace_max:
+            cur.execute(
+                "DELETE FROM trace WHERE execution_id = %s AND idx <= "
+                "(SELECT MAX(idx) FROM trace WHERE execution_id = %s) - %s",
+                (execution_id, execution_id, self.trace_max),
+            )
+
+    def append_trace(self, execution_id: str, entry: dict) -> None:
+        with self._conn.cursor() as cur:
+            self._write_trace(cur, execution_id, entry)
+        self._conn.commit()
+
+    def read_trace(self, execution_id: str) -> list[dict]:
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT idx, entry FROM trace WHERE execution_id = %s ORDER BY idx", (execution_id,))
+            rows = cur.fetchall()
+        self._conn.commit()
+        return [{**json.loads(entry), "index": idx} for idx, entry in rows]
 
     @classmethod
     def from_dsn(cls, dsn: str, connect_retries: int = 15, retry_delay: float = 1.0) -> "PostgresStore":
@@ -136,6 +171,7 @@ class PostgresStore:
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
+        trace: Optional[dict] = None,
     ) -> None:
         old = exe.version
         exe.version = old + 1
@@ -186,6 +222,8 @@ class PostgresStore:
                         cur.execute(
                             "DELETE FROM timers WHERE execution_id = %s AND path = %s", (exe.id, op.path)
                         )
+                if trace is not None:
+                    self._write_trace(cur, exe.id, trace)
             self._conn.commit()
         except StoreConflict:
             raise

@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 from harel.engine.execution import Execution
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
+from harel.engine.store._base import DEFAULT_TRACE_MAX
 from harel.spec.states import Event
 
 
@@ -20,6 +21,10 @@ class AsyncDynamoDBStore:
     makes the whole `commit` atomic — a stale write cancels the txn (`TransactionCanceledException`)
     and never leaks its outbox. The `boto3` `TypeSerializer`/`TypeDeserializer` are pure (no IO),
     so they are reused as-is.
+
+    The opt-in ``trace`` table (execution_id, idx) caps in the same atomic txn (Put idx=K +
+    Delete idx=K-N), keeping exactly the last N **as long as `trace_max` is fixed from the first
+    traced commit** (set once at startup); changing it mid-stream over-retains (harmless).
 
     Build with `await AsyncDynamoDBStore.create(...)` (owns its client; `close()` releases it) or
     inject an already-entered aiobotocore client via the constructor (the caller then owns its
@@ -37,6 +42,7 @@ class AsyncDynamoDBStore:
         self._deser = TypeDeserializer()
         self._ClientError = ClientError
         self._stack: Any = None  # set by create() when this store owns the client
+        self.trace_max = DEFAULT_TRACE_MAX
 
     @classmethod
     async def create(
@@ -85,6 +91,7 @@ class AsyncDynamoDBStore:
             ("timers", [("execution_id", "S"), ("path", "S")]),
             ("processed", [("execution_id", "S"), ("event_id", "S")]),
             ("counters", [("id", "S")]),
+            ("trace", [("execution_id", "S"), ("idx", "N")]),
         ]
         roles = ["HASH", "RANGE"]
         for name, keys in specs:
@@ -130,6 +137,20 @@ class AsyncDynamoDBStore:
         )
         return int(resp["Attributes"]["n"]["N"]) - count + 1
 
+    async def _max_trace_idx(self, execution_id: str) -> int:
+        """The highest trace `idx` for an execution, or -1 if none (a Query, newest first).
+        Single-writer-per-execution → the read→write is race-free and idx stays contiguous."""
+        resp = await self._db.query(
+            TableName=self._t("trace"),
+            KeyConditionExpression="execution_id = :e",
+            ExpressionAttributeValues={":e": {"S": execution_id}},
+            ProjectionExpression="idx",
+            ScanIndexForward=False,
+            Limit=1,
+        )
+        items = resp.get("Items")
+        return int(self._item(items[0])["idx"]) if items else -1
+
     async def load(self, execution_id: str) -> Optional[Execution]:
         resp = await self._db.get_item(
             TableName=self._t("executions"),
@@ -172,6 +193,7 @@ class AsyncDynamoDBStore:
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
+        trace: Optional[dict] = None,  # execution-trace deferred for this backend (accepted, ignored)
     ) -> None:
         from decimal import Decimal
 
@@ -250,6 +272,26 @@ class AsyncDynamoDBStore:
                     }
                 )
 
+        if trace is not None:
+            idx = await self._max_trace_idx(exe.id) + 1  # contiguous per execution (read max, +1)
+            txn.append(
+                {
+                    "Put": {
+                        "TableName": self._t("trace"),
+                        "Item": self._raw({"execution_id": exe.id, "idx": idx, "entry": json.dumps(trace)}),
+                    }
+                }
+            )
+            if self.trace_max and idx - self.trace_max >= 0:  # ring: drop the item leaving the window
+                txn.append(
+                    {
+                        "Delete": {
+                            "TableName": self._t("trace"),
+                            "Key": self._raw({"execution_id": exe.id, "idx": idx - self.trace_max}),
+                        }
+                    }
+                )
+
         try:
             await self._db.transact_write_items(TransactItems=txn)
         except self._ClientError as exc:
@@ -271,6 +313,31 @@ class AsyncDynamoDBStore:
             Key=self._raw({"execution_id": execution_id, "event_id": event_id}),
         )
         return "Item" in resp
+
+    async def append_trace(self, execution_id: str, entry: dict) -> None:
+        idx = entry.get("index", await self._max_trace_idx(execution_id) + 1)
+        await self._db.put_item(
+            TableName=self._t("trace"),
+            Item=self._raw({"execution_id": execution_id, "idx": idx, "entry": json.dumps(entry)}),
+        )
+        if self.trace_max and idx - self.trace_max >= 0:
+            await self._db.delete_item(
+                TableName=self._t("trace"),
+                Key=self._raw({"execution_id": execution_id, "idx": idx - self.trace_max}),
+            )
+
+    async def read_trace(self, execution_id: str) -> list[dict]:
+        resp = await self._db.query(
+            TableName=self._t("trace"),
+            KeyConditionExpression="execution_id = :e",
+            ExpressionAttributeValues={":e": {"S": execution_id}},
+            ScanIndexForward=True,  # oldest → newest
+        )
+        out = []
+        for raw in resp.get("Items", []):
+            it = self._item(raw)
+            out.append({**json.loads(it["entry"]), "index": int(it["idx"])})
+        return out
 
     async def pending_outbox(self) -> list[OutboxEntry]:
         rows = await self._scan("outbox")

@@ -226,3 +226,16 @@ def test_pipeline_orthogonal_over_dynamodb():
         assert final.context["trace"] == ["Done"]
         regions = [store.load(cid) for cid in child_ids]
         assert sorted(r.context["trace"] for r in regions) == [["A1", "A2"], ["B1", "B2"]]
+
+
+def test_trace_recorded_and_ring_capped(store):
+    # DynamoDB caps with Put(K)+Delete(K-N) in the txn (one drop per write), so the ring needs
+    # a FIXED trace_max from the first traced commit (the production case — set once at startup).
+    store.trace_max = 2
+    e = Execution(definition_id="d")
+    store.save(e)
+    for i in range(4):
+        store.commit(e, [], processed_event_id=f"t{i}", trace={"event_kind": "Go", "to_path": f"S{i}"})
+    trace = store.read_trace(e.id)
+    assert [s["index"] for s in trace] == [2, 3]  # only the last 2, indices monotonic
+    assert [s["to_path"] for s in trace] == ["S2", "S3"]

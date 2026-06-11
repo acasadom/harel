@@ -24,7 +24,7 @@ from harel import engine
 from harel.definition.model import Definition
 from harel.engine.execution import Execution, Status
 from harel.engine.resolve import ResolveError
-from harel.engine.runtime import _CONTROL, _Proxy, _resolve
+from harel.engine.runtime import _CONTROL, _action_name, _Proxy, _resolve, _trace_step
 from harel.engine.store import TimerOp
 from harel.spec.states import Event
 
@@ -43,12 +43,14 @@ class AsyncDriver:
         clock: Callable[[], float] = time.time,
         definitions: Optional[dict[str, Definition]] = None,
         resolve_machine: Optional[Callable[[str], Definition]] = None,
+        trace: bool = False,
     ) -> None:
         self.defn = defn
         self.store = store
         self._clock = clock
         self._definitions = definitions
         self.resolve_machine = resolve_machine
+        self._trace_enabled = trace  # opt-in execution timeline (off => no per-event step)
 
     # --- hooks (mirror Driver) --------------------------------------------
     def _definition_for(self, exe: Execution) -> Definition:
@@ -66,10 +68,19 @@ class AsyncDriver:
         raise exc
 
     # --- core --------------------------------------------------------------
-    async def _run(self, exe: Execution, gen, event_id: Optional[str] = None) -> None:
-        emits, timer_ops, spawns = await self._drive(exe, gen)
+    async def _run(
+        self, exe: Execution, gen, event_id: Optional[str] = None, event: Optional[Event] = None
+    ) -> None:
+        from_path = exe.active_path
+        emits, timer_ops, spawns, actions = await self._drive(exe, gen)
+        step = _trace_step(event, from_path, exe, actions, self._clock()) if self._trace_enabled else None
         await self.store.commit(
-            exe, emits, processed_event_id=event_id, timers=tuple(timer_ops), spawns=tuple(spawns)
+            exe,
+            emits,
+            processed_event_id=event_id,
+            timers=tuple(timer_ops),
+            spawns=tuple(spawns),
+            trace=step,
         )
 
     async def _call_action(self, fn, proxy, event, inputs: dict):
@@ -82,10 +93,11 @@ class AsyncDriver:
 
     async def _drive(
         self, exe: Execution, gen
-    ) -> tuple[list[tuple[Optional[str], Event]], list[TimerOp], list[tuple[str, str, dict]]]:
+    ) -> tuple[list[tuple[Optional[str], Event]], list[TimerOp], list[tuple[str, str, dict]], list[str]]:
         emits: list[tuple[Optional[str], Event]] = []
         timer_ops: list[TimerOp] = []
         spawns: list[tuple[str, str, dict]] = []
+        actions: list[str] = []
         proxy = self._proxy(exe)
         action_index = 0  # per-event counter -> a deterministic, replay-stable idempotency key
         try:
@@ -98,6 +110,7 @@ class AsyncDriver:
                     )
                     proxy.idempotency_key = f"{exe.id}:{exe.version}:{action_index}"
                     action_index += 1
+                    actions.append(_action_name(action))
                     try:
                         ret = await self._call_action(
                             _resolve(action), proxy, effect.event, dict(action.inputs)
@@ -105,7 +118,7 @@ class AsyncDriver:
                     except Exception as exc:
                         self._on_action_error(exe, exc)  # base: re-raises; runtime: fails the exe
                         gen.close()
-                        return [], [], []
+                        return [], [], [], []
                     effect = gen.send(engine.ActionResult(value=ret))
                 elif isinstance(effect, engine.SpawnChildren):
                     spawns.extend((s.child_id, s.root_path, dict(s.context)) for s in effect.specs)
@@ -128,7 +141,7 @@ class AsyncDriver:
                     effect = gen.send(None)
         except StopIteration:
             pass
-        return emits, timer_ops, spawns
+        return emits, timer_ops, spawns, actions
 
     async def _create_spawn(self, entry) -> None:
         if await self.store.load(entry.child_id) is not None:
@@ -166,6 +179,7 @@ class AsyncDriver:
                         target,
                         engine.process(self._definition_for(target), target, entry.event),
                         event_id=entry.event.id,
+                        event=entry.event,
                     )
                 await self.store.ack_outbox(entry.seq)
                 progressed = True
@@ -178,7 +192,10 @@ class AsyncDriver:
         target = await self.store.load(execution_id)
         if target is not None and not await self.store.is_processed(target.id, event.id):
             await self._run(
-                target, engine.process(self._definition_for(target), target, event), event_id=event.id
+                target,
+                engine.process(self._definition_for(target), target, event),
+                event_id=event.id,
+                event=event,
             )
             await self._flush()
 
@@ -211,7 +228,10 @@ class AsyncDriver:
             if await self.store.is_processed(target.id, event.id):
                 continue
             await self._run(
-                target, engine.process(self._definition_for(target), target, event), event_id=event.id
+                target,
+                engine.process(self._definition_for(target), target, event),
+                event_id=event.id,
+                event=event,
             )
         await self._flush()
 

@@ -58,11 +58,16 @@ The destructive actions (`c`/`t`) ask for confirmation. All of these go through 
 [control plane](control-plane.md), which CASes the record so the change lands at the next event
 boundary.
 
-> **The timeline is a preview.** The engine keeps a state snapshot, not a step-by-step event log, so
-> step-by-step recording is a future engine feature. The monitor reads a trace if the store carries
-> one (a preview `read_trace` seam on the Sqlite/Dict stores, which the `examples/monitor_demo` seed
-> populates); without one, the timeline shows a placeholder. The tree, source, status, control plane
-> and pending-work panels all work regardless.
+> **The timeline is opt-in.** Recording it is **off by default** (the engine keeps a state snapshot,
+> not an event log, so the hot path pays nothing). Enable it with **`STM_TRACE=1`** (or
+> `DurableRunner(..., trace=True)` / `DistributedRunner(..., trace=True)`): the Driver then records one
+> step per event — event in, transition from→to, the actions run, and the resulting context — **in the
+> same `commit` transaction** as the state advance (no extra round-trip, and `load` is unaffected). Kept
+> as a ring of the last `STM_TRACE_MAX` steps (default 200). Recorded by **every store backend** in its
+> commit transaction / atomic write (SQL via an in-txn insert, Redis via a ring list in the MULTI, Mongo
+> via a `$push/$slice` array, DynamoDB via a Put+Delete in the `TransactWriteItems`). Without a trace the
+> timeline shows a placeholder; the tree, source, status, control plane and pending-work panels all work
+> regardless.
 
 ## Theming
 

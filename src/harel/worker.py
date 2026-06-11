@@ -21,6 +21,9 @@ service scaled to N replicas (each replica is one `Worker` loop):
     STM_WORKER_ID        worker id (defaults to the hostname)
     STM_VISIBILITY       lease seconds while a message is in flight (default 30)
     STM_CONCURRENCY      max events in flight on the loop at once (default 256)
+    STM_TRACE            "1"/"true"/"on" to record a per-event execution timeline (opt-in; off by
+                         default). Recorded by every store backend in its commit txn / atomic write.
+    STM_TRACE_MAX        ring size: keep only the last N trace steps per execution (default 200)
 
 Pure-sqlite (single machine / shared volume), pure-redis (all-network), postgres
 (distributed SQL) and mongo (document store) are all supported by swapping
@@ -210,6 +213,8 @@ async def amain() -> None:
     cfg = Config.from_env()  # read once, thread it through
     store = await build_store_async(cfg)
     transport = await build_transport_async(cfg)
+    if cfg.trace and hasattr(store, "trace_max"):
+        store.trace_max = cfg.trace_max  # ring size for the opt-in execution timeline
     definitions = load_definitions(require(cfg.definitions_dir, "STM_DEFINITIONS_DIR"))  # one-time
 
     stop = asyncio.Event()
@@ -224,6 +229,7 @@ async def amain() -> None:
         worker_id=cfg.worker_id or socket.gethostname(),
         visibility=cfg.visibility,
         concurrency=cfg.concurrency,
+        trace=cfg.trace,
     )
     try:
         await worker.run(stop)

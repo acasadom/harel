@@ -15,6 +15,8 @@ from typing import Iterable, Optional, Protocol, runtime_checkable
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.spec.states import Event
 
+DEFAULT_TRACE_MAX = 200  # ring size: the store keeps only the last N trace steps per execution
+
 
 def _encode_offset(offset: int) -> str:
     """An opaque pagination cursor over an integer offset (the SQL/Mongo/Dict backends)."""
@@ -129,12 +131,20 @@ class ExecutionStore(Protocol):
         processed_event_id: Optional[str] = None,
         timers: "tuple[TimerOp, ...]" = (),
         spawns: "tuple[tuple[str, str, dict], ...]" = (),
+        trace: "Optional[dict]" = None,
     ) -> None:
         """Atomically `save` the Execution, enqueue its emitted events into the
         outbox, record `processed_event_id` as handled (if given), apply the
         `timers` mutations, and enqueue the `spawns` (orthogonal child creations,
         each `(child_id, root_path, context)`). Either all happen or none — so a
-        fork's children + the parent's join expectations commit atomically."""
+        fork's children + the parent's join expectations commit atomically.
+
+        `trace` (opt-in execution-trace, off by default): one step to append to the
+        execution's timeline (event/transition/actions/context_out + a stamped `index`),
+        written in the SAME transaction as the advance — no extra round-trip or fsync,
+        and `load` is unaffected (it still reads the snapshot, not a replay). The store
+        keeps only the last `trace_max` steps (a ring). Recorded by the SQL-family and
+        Dict backends; the others accept and ignore it for now."""
         ...
 
     def is_processed(self, execution_id: str, event_id: str) -> bool:

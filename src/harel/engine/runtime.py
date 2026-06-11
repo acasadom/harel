@@ -36,6 +36,29 @@ def _resolve(action: ActionRef):
     return getattr(import_module(module_name, action.package), name)
 
 
+def _action_name(action: ActionRef) -> str:
+    """A display label for the trace: the dotted path (literal) or the callable's name."""
+    fn = action.function
+    return fn if isinstance(fn, str) else getattr(fn, "__name__", repr(fn))
+
+
+def _trace_step(
+    event: Optional[Event], from_path: Optional[str], exe: Execution, actions: list[str], ts: float
+) -> dict:
+    """Build one execution-trace step: what drove the event, the transition, the actions that
+    ran, and the resulting context (`context_out` only — the monitor derives `context_in` from
+    the prior step). `event=None` is the initial start (`Start`)."""
+    return {
+        "event_kind": event.kind if event is not None else "Start",
+        "event_data": dict(event.data) if (event is not None and event.data) else {},
+        "from_path": from_path,
+        "to_path": exe.active_path,
+        "actions": actions,
+        "context_out": dict(exe.context),
+        "timestamp": ts,
+    }
+
+
 class _Proxy:
     """Stand-in passed to an Execution's actions: exposes its `execution_ctx` and
     a stable `idempotency_key` for the current action (set by the driver before
@@ -64,10 +87,12 @@ class _SyncDriver:
         clock: Callable[[], float] = time.time,
         definitions: Optional[dict[str, Definition]] = None,
         resolve_machine: Optional[Callable[[str], Definition]] = None,
+        trace: bool = False,
     ) -> None:
         self.defn = defn
         self.store: ExecutionStore = store if store is not None else DictStore()
         self._clock = clock  # injectable so timer fire-times are deterministic in tests
+        self._trace_enabled = trace  # opt-in execution timeline (off => no per-event step)
         # multi-Definition support (submachine `invoke`): a registry to process each
         # target with its OWN Definition, and a resolver to spawn a submachine child.
         self._definitions = definitions  # definition_id -> Definition (None => single-defn)
@@ -102,22 +127,34 @@ class _SyncDriver:
     def get(self, execution_id: str) -> Optional[Execution]:
         return self.store.load(execution_id)
 
-    def _run(self, exe: Execution, gen, event_id: Optional[str] = None) -> None:
+    def _run(
+        self, exe: Execution, gen, event_id: Optional[str] = None, event: Optional[Event] = None
+    ) -> None:
         """Drive `exe` to quiescence for one event, then atomically checkpoint it,
         enqueue its emitted events to the outbox, and record `event_id` as handled
         (`commit`). The emits are delivered afterwards by `_flush`, i.e. only once
-        the Execution that produced them is committed (no dual-write window)."""
-        emits, timer_ops, spawns = self._drive(exe, gen)
+        the Execution that produced them is committed (no dual-write window). When
+        tracing is enabled, one timeline step (transition + actions + context_out) is
+        recorded in the same `commit` (`event=None` is the initial start)."""
+        from_path = exe.active_path
+        emits, timer_ops, spawns, actions = self._drive(exe, gen)
+        step = _trace_step(event, from_path, exe, actions, self._clock()) if self._trace_enabled else None
         self.store.commit(
-            exe, emits, processed_event_id=event_id, timers=tuple(timer_ops), spawns=tuple(spawns)
+            exe,
+            emits,
+            processed_event_id=event_id,
+            timers=tuple(timer_ops),
+            spawns=tuple(spawns),
+            trace=step,
         )
 
     def _drive(
         self, exe: Execution, gen
-    ) -> tuple[list[tuple[Optional[str], Event]], list[TimerOp], list[tuple[str, str, dict]]]:
+    ) -> tuple[list[tuple[Optional[str], Event]], list[TimerOp], list[tuple[str, str, dict]], list[str]]:
         emits: list[tuple[Optional[str], Event]] = []
         timer_ops: list[TimerOp] = []
         spawns: list[tuple[str, str, dict]] = []
+        actions: list[str] = []
         proxy = self._proxy(exe)
         action_index = 0  # per-event counter -> a deterministic, replay-stable idempotency key
         try:
@@ -132,13 +169,14 @@ class _SyncDriver:
                     # so the key is identical across an at-least-once redelivery
                     proxy.idempotency_key = f"{exe.id}:{exe.version}:{action_index}"
                     action_index += 1
+                    actions.append(_action_name(action))
                     try:
                         ret = _resolve(action)(proxy, effect.event, **dict(action.inputs))
                     except Exception as exc:
                         self._on_action_error(exe, exc)  # base: re-raises; runtime: fails the exe
                         gen.close()
                         # drop this event's partial effects; the (possibly FAILED) exe still commits
-                        return [], [], []
+                        return [], [], [], []
                     effect = gen.send(engine.ActionResult(value=ret))
                 elif isinstance(effect, engine.SpawnChildren):
                     # the fork's children are enqueued (committed atomically with the
@@ -165,7 +203,7 @@ class _SyncDriver:
                     effect = gen.send(None)
         except StopIteration:
             pass
-        return emits, timer_ops, spawns
+        return emits, timer_ops, spawns, actions
 
     def _create_spawn(self, entry) -> None:
         """Create + start one pending child Execution, idempotently: if the child
@@ -215,6 +253,7 @@ class _SyncDriver:
                         target,
                         engine.process(self._definition_for(target), target, entry.event),
                         event_id=entry.event.id,
+                        event=entry.event,
                     )
                 self.store.ack_outbox(entry.seq)
                 progressed = True
@@ -226,7 +265,12 @@ class _SyncDriver:
         outbox relay). The distributed driver overrides this to publish instead."""
         target = self.store.load(execution_id)
         if target is not None and not self.store.is_processed(target.id, event.id):
-            self._run(target, engine.process(self._definition_for(target), target, event), event_id=event.id)
+            self._run(
+                target,
+                engine.process(self._definition_for(target), target, event),
+                event_id=event.id,
+                event=event,
+            )
             self._flush()
 
     def fire_due_timers(self) -> int:
@@ -267,7 +311,12 @@ class _SyncDriver:
         for target in targets:
             if self.store.is_processed(target.id, event.id):
                 continue  # dedupe: at-least-once delivery may re-deliver an event
-            self._run(target, engine.process(self._definition_for(target), target, event), event_id=event.id)
+            self._run(
+                target,
+                engine.process(self._definition_for(target), target, event),
+                event_id=event.id,
+                event=event,
+            )
         self._flush()
 
 
@@ -291,16 +340,17 @@ class Driver:
         clock: Callable[[], float] = time.time,
         definitions: Optional[dict[str, Definition]] = None,
         resolve_machine: Optional[Callable[[str], Definition]] = None,
+        trace: bool = False,
     ) -> None:
         self.defn = defn
         self.store = store
         self._clock = clock
         self._definitions = definitions
         self.resolve_machine = resolve_machine
-        self._async = self._portal_build(store, defn, clock, definitions, resolve_machine)
+        self._async = self._portal_build(store, defn, clock, definitions, resolve_machine, trace)
 
     @staticmethod
-    def _portal_build(store, defn, clock, definitions, resolve_machine):
+    def _portal_build(store, defn, clock, definitions, resolve_machine, trace=False):
         from harel.engine.aio import facade
 
         async def build():
@@ -308,7 +358,7 @@ class Driver:
             from harel.engine.aio_store import AsyncDictStore
 
             astore = facade.as_async_store(store) if store is not None else AsyncDictStore()
-            return AsyncDriver(defn, astore, clock, definitions, resolve_machine)
+            return AsyncDriver(defn, astore, clock, definitions, resolve_machine, trace=trace)
 
         return facade.run(build)
 

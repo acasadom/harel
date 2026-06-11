@@ -26,6 +26,7 @@ class AsyncDurableRunner:
         definitions: dict[str, Definition],
         clock: Callable[[], float] = time.time,
         resolver: Optional[MachineResolver] = None,
+        trace: bool = False,
     ) -> None:
         self.store = store
         self.definitions = definitions
@@ -33,6 +34,7 @@ class AsyncDurableRunner:
             self.definitions.update({s.id: s for s in defn.submachines.values()})
         self._clock = clock
         self.resolver = resolver
+        self._trace = trace
 
     def _resolve_machine(self, fqn: str) -> Definition:
         if fqn in self.definitions:
@@ -50,6 +52,7 @@ class AsyncDurableRunner:
             clock=self._clock,
             definitions=self.definitions,
             resolve_machine=self._resolve_machine,
+            trace=self._trace,
         )
 
     async def create(self, definition_id: str, context: Optional[dict] = None) -> Execution:

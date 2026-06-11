@@ -6,6 +6,7 @@ from typing import Optional
 
 from harel.engine.execution import Execution
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
+from harel.engine.store._base import DEFAULT_TRACE_MAX
 from harel.spec.states import Event
 
 
@@ -22,8 +23,25 @@ class AsyncDictStore:
         self._processed: set[tuple[str, str]] = set()
         self._timers: dict[tuple[str, str], float] = {}
         self._spawns: list[SpawnEntry] = []
+        self._trace: dict[str, list[dict]] = {}
+        self._trace_idx: dict[str, int] = {}
+        self.trace_max = DEFAULT_TRACE_MAX
         self._seq = 0
         self._spawn_seq = 0
+
+    def _record_trace(self, execution_id: str, entry: dict) -> None:
+        idx = self._trace_idx.get(execution_id, 0)
+        self._trace_idx[execution_id] = idx + 1
+        steps = self._trace.setdefault(execution_id, [])
+        steps.append({**entry, "index": entry.get("index", idx)})
+        if self.trace_max and len(steps) > self.trace_max:
+            del steps[: len(steps) - self.trace_max]
+
+    async def append_trace(self, execution_id: str, entry: dict) -> None:
+        self._record_trace(execution_id, entry)
+
+    async def read_trace(self, execution_id: str) -> list[dict]:
+        return list(self._trace.get(execution_id, []))
 
     async def load(self, execution_id: str) -> Optional[Execution]:
         return self._by_id.get(execution_id)
@@ -42,6 +60,7 @@ class AsyncDictStore:
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
+        trace: Optional[dict] = None,
     ) -> None:
         await self.save(exe)  # CAS first: raises before any emit is enqueued
         for target_id, event in emits:
@@ -57,6 +76,8 @@ class AsyncDictStore:
         for child_id, root_path, context in spawns:
             self._spawn_seq += 1
             self._spawns.append(SpawnEntry(self._spawn_seq, exe.id, child_id, root_path, dict(context)))
+        if trace is not None:
+            self._record_trace(exe.id, trace)
 
     async def is_processed(self, execution_id: str, event_id: str) -> bool:
         return (execution_id, event_id) in self._processed
