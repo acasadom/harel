@@ -154,7 +154,7 @@ def _run(self, exe, gen, event_id=None):
                       timers=tuple(timer_ops), spawns=tuple(spawns))   # ONE atomic commit
 ```
 
-`store.commit` ([store.py](../../src/harel/engine/store.py)) persists, in a single transaction:
+`store.commit` ([store/_base.py](../../src/harel/engine/store/_base.py)) persists, in a single transaction:
 
 1. **the Execution** — a CAS write: `UPDATE … SET version=old+1 WHERE id=? AND version=old`
    (or an `INSERT` if brand-new). If the row moved on, it raises `StoreConflict` — the
@@ -163,6 +163,8 @@ def _run(self, exe, gen, event_id=None):
 3. **the dedupe record** — `processed_event_id`, so an at-least-once redelivery is a no-op.
 4. **the timers** — schedule/cancel, so a scheduled timer can never be lost (no dual-write).
 5. **the spawns** — the orthogonal child-creation intents.
+6. **the trace step** *(opt-in)* — one timeline entry when tracing is on (`STM_TRACE`), so the
+   monitor timeline is recorded in the same atomic write; off by default (see [stores](stores)).
 
 Either all of it commits or none does. This is the property that makes a crash safe: the state
 advance, the `Finished` it must emit, the timer it armed, and the children it must spawn are one
@@ -343,7 +345,7 @@ Timers in the distributed host: `Worker.fire_due_timers` runs on the idle path o
 | When | Call | What is written |
 |---|---|---|
 | create | `start()` → `commit` | Execution v1, initial region spawns, entry-hook timers |
-| each event | `_run` → `commit` | Execution v+1 (CAS), outbox emits, dedupe id, timer ops, spawns |
+| each event | `_run` → `commit` | Execution v+1 (CAS), outbox emits, dedupe id, timer ops, spawns, trace step (if `STM_TRACE`) |
 | relay | `_create_spawn` → `commit` | each child Execution v1 (idempotent) |
 | control plane | `control.*` → `commit` | status change (+ a cooperative `Cancel` emit), via CAS |
 | timer fire | sweep → `process` → `commit` | the `Timeout` processed like any event; timer row deleted |

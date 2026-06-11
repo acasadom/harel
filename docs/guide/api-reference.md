@@ -44,7 +44,7 @@ See [static validation](../tutorial/14-validation).
 ## Running (single process)
 
 ```text
-DurableRunner(store, definitions, clock=time.time, resolver=None)
+DurableRunner(store, definitions, clock=time.time, resolver=None, trace=False)
     .create(definition_id, context=None) -> Execution
     .process(execution_id, event) -> Execution
     .fire_due_timers() -> int
@@ -56,14 +56,16 @@ DurableRunner(store, definitions, clock=time.time, resolver=None)
   automatically.
 - `clock` is injectable so [durable timers](../tutorial/07-timers) fire deterministically.
 - `resolver` resolves submachine `invoke` FQNs not already in `definitions`.
+- `trace=True` records the opt-in execution timeline in each commit (env `STM_TRACE`); off by
+  default. See [stores](stores) and the [monitor](monitor).
 
 ## Running (distributed)
 
 ```text
 from harel.engine.distributed import DistributedRunner
-from harel.engine.transport import InMemoryTransport   # + Sqlite/Redis/Postgres/Rqlite/Sqs
+from harel.engine.transport import InMemoryTransport   # + Sqlite/Libsql/Redis/Postgres/Rqlite/Mongo/Sqs
 
-DistributedRunner(store, transport, definitions, clock=time.time, resolver=None)
+DistributedRunner(store, transport, definitions, clock=time.time, resolver=None, trace=False)
     .create(definition_id, context=None) -> Execution
     .send(execution_id, event) -> None
     .worker(...) -> Worker        # .step() one message; .run(stop_event) loops

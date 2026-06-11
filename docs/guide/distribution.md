@@ -24,7 +24,9 @@ running. Backends:
 Backends without a cheap global serialization primitive (Redis, Mongo) build per-group
 exclusivity by hand with a per-group lock record indexed by when it next becomes claimable, so
 `claim` reads only the few due groups rather than scanning the whole queue; SQLite and Postgres
-lean on the database instead (SQLite's write-lock; Postgres's row lock via `SKIP LOCKED`).
+lean on the database instead (SQLite's write-lock; Postgres's row lock via `SKIP LOCKED`). For
+**how each transport enforces the per-group invariant and lays its queue out** — the lease,
+claim, FIFO and parking mechanics — see the [transports reference](transports).
 
 Store and transport are **independent** — mix freely, or unify on one backend (all-Postgres,
 all-rqlite, all-Mongo, all-libSQL: no Redis needed).
