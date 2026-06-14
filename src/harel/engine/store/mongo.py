@@ -7,6 +7,7 @@ from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.store._base import (
+    DEFAULT_TRACE_MAX,
     OutboxEntry,
     SpawnEntry,
     StoreConflict,
@@ -52,6 +53,7 @@ class MongoStore:
         self._counters = self._db["counters"]
         self._after = ReturnDocument.AFTER
         self._DuplicateKeyError = DuplicateKeyError
+        self.trace_max = DEFAULT_TRACE_MAX
 
     @classmethod
     def from_url(
@@ -139,6 +141,7 @@ class MongoStore:
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
+        trace: Optional[dict] = None,  # execution-trace deferred for this backend (accepted, ignored)
     ) -> None:
         # allocate monotonic seqs up front (one find_one_and_update each; a seq
         # wasted by a lost CAS is harmless), then build the embedded entries
@@ -156,6 +159,10 @@ class MongoStore:
                 {"seq": base + i, "parent_id": exe.id, "child_id": cid, "root_path": rp, "context": dict(ctx)}
                 for i, (cid, rp, ctx) in enumerate(spawns)
             ]
+        # per-execution 0-based trace index; the array is ring-trimmed with $push/$slice
+        trace_step: Optional[dict] = None
+        if trace is not None:
+            trace_step = {**trace, "index": self._next_seq("trace:" + exe.id, 1) - 1}
 
         old = exe.version
         exe.version = old + 1
@@ -177,6 +184,8 @@ class MongoStore:
             push["outbox"] = {"$each": outbox_entries}
         if spawn_entries:
             push["spawns"] = {"$each": spawn_entries}
+        if trace_step is not None:
+            push["trace"] = {"$each": [trace_step], **({"$slice": -self.trace_max} if self.trace_max else {})}
         if push:
             update["$push"] = push
         if processed_event_id is not None:
@@ -198,6 +207,7 @@ class MongoStore:
                 "data": data,
                 "outbox": outbox_entries,
                 "spawns": spawn_entries,
+                "trace": [trace_step] if trace_step is not None else [],
                 "processed": [processed_event_id] if processed_event_id is not None else [],
                 "timers": {self._enc(op.path): op.fire_at for op in timers if op.action == "schedule"},
             }
@@ -211,6 +221,16 @@ class MongoStore:
 
     def is_processed(self, execution_id: str, event_id: str) -> bool:
         return self._exes.find_one({"_id": execution_id, "processed": event_id}, {"_id": 1}) is not None
+
+    def append_trace(self, execution_id: str, entry: dict) -> None:
+        idx = entry.get("index", self._next_seq("trace:" + execution_id, 1) - 1)
+        step = {**entry, "index": idx}
+        push = {"$each": [step], **({"$slice": -self.trace_max} if self.trace_max else {})}
+        self._exes.update_one({"_id": execution_id}, {"$push": {"trace": push}}, upsert=True)
+
+    def read_trace(self, execution_id: str) -> list[dict]:
+        doc = self._exes.find_one({"_id": execution_id}, {"trace": 1})
+        return list(doc.get("trace", [])) if doc is not None else []
 
     def pending_outbox(self) -> list[OutboxEntry]:
         entries: list[OutboxEntry] = []

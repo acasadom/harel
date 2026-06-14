@@ -7,6 +7,7 @@ from typing import Any, Optional
 
 from harel.engine.execution import Execution
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
+from harel.engine.store._base import DEFAULT_TRACE_MAX
 from harel.spec.states import Event
 
 
@@ -19,6 +20,7 @@ class AsyncSqliteStore:
 
     def __init__(self, conn: Any) -> None:
         self._conn = conn
+        self.trace_max = DEFAULT_TRACE_MAX
 
     @classmethod
     async def create(cls, path: str = ":memory:") -> "AsyncSqliteStore":
@@ -49,8 +51,39 @@ class AsyncSqliteStore:
             "(seq INTEGER PRIMARY KEY AUTOINCREMENT, parent_id TEXT NOT NULL, child_id TEXT NOT NULL, "
             "root_path TEXT NOT NULL, context TEXT NOT NULL)"
         )
+        await conn.execute(
+            "CREATE TABLE IF NOT EXISTS trace "
+            "(execution_id TEXT NOT NULL, idx INTEGER NOT NULL, entry TEXT NOT NULL, "
+            "PRIMARY KEY (execution_id, idx))"
+        )
         await conn.commit()
         return cls(conn)
+
+    async def _write_trace(self, execution_id: str, entry: dict) -> None:
+        """Append one trace step WITHOUT committing (batches into commit's txn). Two statements:
+        `idx` computed inline (MAX+1, monotonic) so no pre-read, then the ring cap. `read_trace`
+        takes `index` from the `idx` column."""
+        await self._conn.execute(
+            "INSERT INTO trace (execution_id, idx, entry) "
+            "SELECT ?, COALESCE((SELECT MAX(idx) FROM trace WHERE execution_id = ?), -1) + 1, ?",
+            (execution_id, execution_id, json.dumps(entry)),
+        )
+        if self.trace_max:
+            await self._conn.execute(
+                "DELETE FROM trace WHERE execution_id = ? AND idx <= "
+                "(SELECT MAX(idx) FROM trace WHERE execution_id = ?) - ?",
+                (execution_id, execution_id, self.trace_max),
+            )
+
+    async def append_trace(self, execution_id: str, entry: dict) -> None:
+        await self._write_trace(execution_id, entry)
+        await self._conn.commit()
+
+    async def read_trace(self, execution_id: str) -> list[dict]:
+        cur = await self._conn.execute(
+            "SELECT idx, entry FROM trace WHERE execution_id = ? ORDER BY idx", (execution_id,)
+        )
+        return [{**json.loads(entry), "index": idx} for idx, entry in await cur.fetchall()]
 
     async def load(self, execution_id: str) -> Optional[Execution]:
         cur = await self._conn.execute("SELECT data FROM executions WHERE id = ?", (execution_id,))
@@ -105,6 +138,7 @@ class AsyncSqliteStore:
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
+        trace: Optional[dict] = None,
     ) -> None:
         try:
             await self._write(exe)
@@ -134,6 +168,8 @@ class AsyncSqliteStore:
                     await self._conn.execute(
                         "DELETE FROM timers WHERE execution_id = ? AND path = ?", (exe.id, op.path)
                     )
+            if trace is not None:
+                await self._write_trace(exe.id, trace)
             await self._conn.commit()
         except StoreConflict:
             await self._conn.rollback()

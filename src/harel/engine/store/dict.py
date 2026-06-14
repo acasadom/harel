@@ -6,6 +6,7 @@ from typing import Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.store._base import (
+    DEFAULT_TRACE_MAX,
     OutboxEntry,
     SpawnEntry,
     StoreConflict,
@@ -28,17 +29,26 @@ class DictStore:
         self._processed: set[tuple[str, str]] = set()
         self._timers: dict[tuple[str, str], float] = {}  # (execution_id, path) -> fire_at
         self._spawns: list[SpawnEntry] = []
-        self._trace: dict[str, list[dict]] = {}  # execution_id -> ordered trace steps (preview)
+        self._trace: dict[str, list[dict]] = {}  # execution_id -> ordered trace steps (capped ring)
+        self._trace_idx: dict[str, int] = {}  # execution_id -> next monotonic step index
+        self.trace_max = DEFAULT_TRACE_MAX
         self._seq = 0
         self._spawn_seq = 0
 
-    # --- execution trace (PREVIEW seam, NOT on the Protocol yet) ---------------------
-    # The engine does not record a step-by-step trace today; this read/append pair lets
-    # the monitor's timeline render (seeded) data while that engine feature is designed.
+    # --- execution trace -------------------------------------------------------------
+    # The opt-in execution timeline: the Driver passes one step per event to `commit`,
+    # which records it here (see `_record_trace`). `append_trace` is the demo/test seam.
+
+    def _record_trace(self, execution_id: str, entry: dict) -> None:
+        idx = self._trace_idx.get(execution_id, 0)
+        self._trace_idx[execution_id] = idx + 1
+        steps = self._trace.setdefault(execution_id, [])
+        steps.append({**entry, "index": entry.get("index", idx)})
+        if self.trace_max and len(steps) > self.trace_max:  # ring: keep only the last N
+            del steps[: len(steps) - self.trace_max]
 
     def append_trace(self, execution_id: str, entry: dict) -> None:
-        steps = self._trace.setdefault(execution_id, [])
-        steps.append({**entry, "index": entry.get("index", len(steps))})
+        self._record_trace(execution_id, entry)
 
     def read_trace(self, execution_id: str) -> list[dict]:
         return list(self._trace.get(execution_id, []))
@@ -80,6 +90,7 @@ class DictStore:
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
+        trace: Optional[dict] = None,
     ) -> None:
         self.save(exe)  # CAS first: raises before any emit is enqueued
         for target_id, event in emits:
@@ -95,6 +106,8 @@ class DictStore:
         for child_id, root_path, context in spawns:
             self._spawn_seq += 1
             self._spawns.append(SpawnEntry(self._spawn_seq, exe.id, child_id, root_path, dict(context)))
+        if trace is not None:
+            self._record_trace(exe.id, trace)
 
     def is_processed(self, execution_id: str, event_id: str) -> bool:
         return (execution_id, event_id) in self._processed

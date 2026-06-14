@@ -7,6 +7,7 @@ from typing import Any, Optional
 
 from harel.engine.execution import Execution
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
+from harel.engine.store._base import DEFAULT_TRACE_MAX
 from harel.spec.states import Event
 
 
@@ -20,6 +21,7 @@ class AsyncRqliteStore:
         self._client = client
         self._base = base_url.rstrip("/")
         self._timeout = timeout
+        self.trace_max = DEFAULT_TRACE_MAX
 
     @classmethod
     async def from_url(
@@ -52,6 +54,8 @@ class AsyncRqliteStore:
                         "CREATE TABLE IF NOT EXISTS spawns (seq INTEGER PRIMARY KEY AUTOINCREMENT, "
                         "parent_id TEXT NOT NULL, child_id TEXT NOT NULL, "
                         "root_path TEXT NOT NULL, context TEXT NOT NULL)",
+                        "CREATE TABLE IF NOT EXISTS trace (execution_id TEXT NOT NULL, idx INTEGER NOT NULL, "
+                        "entry TEXT NOT NULL, PRIMARY KEY (execution_id, idx))",
                     ]
                 )
                 return store
@@ -111,6 +115,7 @@ class AsyncRqliteStore:
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
+        trace: Optional[dict] = None,
     ) -> None:
         old = exe.version
         exe.version = old + 1
@@ -186,6 +191,32 @@ class AsyncRqliteStore:
                     data,
                 ]
             )
+        if trace is not None:
+            statements.append(
+                [
+                    "INSERT INTO trace (execution_id, idx, entry) "
+                    "SELECT ?, COALESCE((SELECT MAX(idx) FROM trace WHERE execution_id = ?), -1) + 1, ? "
+                    "WHERE EXISTS (SELECT 1 FROM executions WHERE id = ? AND data = ?)",
+                    exe.id,
+                    exe.id,
+                    json.dumps(trace),
+                    exe.id,
+                    data,
+                ]
+            )
+            if self.trace_max:
+                statements.append(
+                    [
+                        "DELETE FROM trace WHERE execution_id = ? AND idx <= "
+                        "(SELECT MAX(idx) FROM trace WHERE execution_id = ?) - ? "
+                        "AND EXISTS (SELECT 1 FROM executions WHERE id = ? AND data = ?)",
+                        exe.id,
+                        exe.id,
+                        self.trace_max,
+                        exe.id,
+                        data,
+                    ]
+                )
         results = await self._execute(statements, transaction=True)
         if results[0].get("rows_affected", 0) == 0:
             exe.version = old
@@ -198,6 +229,37 @@ class AsyncRqliteStore:
             (execution_id, event_id),
         )
         return bool(rows)
+
+    async def append_trace(self, execution_id: str, entry: dict) -> None:
+        await self._execute(
+            [
+                [
+                    "INSERT INTO trace (execution_id, idx, entry) "
+                    "SELECT ?, COALESCE((SELECT MAX(idx) FROM trace WHERE execution_id = ?), -1) + 1, ?",
+                    execution_id,
+                    execution_id,
+                    json.dumps(entry),
+                ]
+            ]
+        )
+        if self.trace_max:
+            await self._execute(
+                [
+                    [
+                        "DELETE FROM trace WHERE execution_id = ? AND idx <= "
+                        "(SELECT MAX(idx) FROM trace WHERE execution_id = ?) - ?",
+                        execution_id,
+                        execution_id,
+                        self.trace_max,
+                    ]
+                ]
+            )
+
+    async def read_trace(self, execution_id: str) -> list[dict]:
+        rows = await self._query(
+            "SELECT idx, entry FROM trace WHERE execution_id = ? ORDER BY idx", (execution_id,)
+        )
+        return [{**json.loads(entry), "index": idx} for idx, entry in rows]
 
     async def pending_outbox(self) -> list[OutboxEntry]:
         rows = await self._query("SELECT seq, target_id, event FROM outbox ORDER BY seq", ())

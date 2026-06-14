@@ -7,6 +7,7 @@ from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.store._base import (
+    DEFAULT_TRACE_MAX,
     OutboxEntry,
     SpawnEntry,
     StoreConflict,
@@ -35,6 +36,7 @@ class RedisStore:
         self._r = client
         self._prefix = prefix
         self._WatchError = WatchError
+        self.trace_max = DEFAULT_TRACE_MAX
 
     @classmethod
     def from_url(cls, url: str, prefix: str = "stm") -> "RedisStore":
@@ -86,11 +88,17 @@ class RedisStore:
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
+        trace: Optional[dict] = None,
     ) -> None:
         # allocate monotonic outbox seqs up front (INCR can't return its value
         # inside MULTI; a seq wasted by an aborted txn is harmless)
         queued = [(int(self._r.incr(self._k("outbox:seq"))), t, e.model_dump_json()) for t, e in emits]
         queued_spawns = [(int(self._r.incr(self._k("spawns:seq"))), cid, rp, ctx) for cid, rp, ctx in spawns]
+        # per-execution 0-based trace index (a list per id, ring-trimmed with LTRIM)
+        trace_step = None
+        if trace is not None:
+            idx = int(self._r.incr(self._k(f"trace:seq:{exe.id}"))) - 1
+            trace_step = json.dumps({**trace, "index": idx})
         key = self._k(f"exe:{exe.id}")
         old = exe.version
         with self._r.pipeline() as pipe:
@@ -120,6 +128,11 @@ class RedisStore:
                         pipe.zadd(self._k("timers"), {member: op.fire_at})
                     else:
                         pipe.zrem(self._k("timers"), member)
+                if trace_step is not None:
+                    tkey = self._k(f"trace:{exe.id}")
+                    pipe.rpush(tkey, trace_step)
+                    if self.trace_max:
+                        pipe.ltrim(tkey, -self.trace_max, -1)  # ring: keep the last N
                 pipe.execute()
             except self._WatchError:
                 exe.version = old  # a concurrent writer won between WATCH and EXEC
@@ -127,6 +140,16 @@ class RedisStore:
 
     def is_processed(self, execution_id: str, event_id: str) -> bool:
         return bool(self._r.sismember(self._k(f"processed:{execution_id}"), event_id))
+
+    def append_trace(self, execution_id: str, entry: dict) -> None:
+        idx = int(self._r.incr(self._k(f"trace:seq:{execution_id}"))) - 1
+        tkey = self._k(f"trace:{execution_id}")
+        self._r.rpush(tkey, json.dumps({**entry, "index": entry.get("index", idx)}))
+        if self.trace_max:
+            self._r.ltrim(tkey, -self.trace_max, -1)
+
+    def read_trace(self, execution_id: str) -> list[dict]:
+        return [json.loads(x) for x in self._r.lrange(self._k(f"trace:{execution_id}"), 0, -1)]
 
     def pending_spawns(self) -> list[SpawnEntry]:
         entries = []

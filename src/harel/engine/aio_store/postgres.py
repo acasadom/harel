@@ -7,6 +7,7 @@ from typing import Any, Optional
 
 from harel.engine.execution import Execution
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
+from harel.engine.store._base import DEFAULT_TRACE_MAX
 from harel.spec.states import Event
 
 
@@ -19,6 +20,7 @@ class AsyncPostgresStore:
 
     def __init__(self, pool: Any) -> None:
         self._pool = pool
+        self.trace_max = DEFAULT_TRACE_MAX
 
     @classmethod
     async def from_dsn(cls, dsn: str, pool_size: int = 10) -> "AsyncPostgresStore":
@@ -50,8 +52,45 @@ class AsyncPostgresStore:
                     "(seq BIGSERIAL PRIMARY KEY, parent_id TEXT NOT NULL, child_id TEXT NOT NULL, "
                     "root_path TEXT NOT NULL, context TEXT NOT NULL)"
                 )
+                await cur.execute(
+                    "CREATE TABLE IF NOT EXISTS trace "
+                    "(execution_id TEXT NOT NULL, idx INT NOT NULL, entry TEXT NOT NULL, "
+                    "PRIMARY KEY (execution_id, idx))"
+                )
             await conn.commit()
         return cls(pool)
+
+    async def _write_trace(self, cur: Any, execution_id: str, entry: dict) -> None:
+        """Append one trace step on the given cursor (inside commit's txn). Two statements:
+        `idx` computed inline (MAX+1, monotonic) so no pre-read, then the ring cap. `read_trace`
+        takes `index` from the `idx` column."""
+        await cur.execute(
+            "INSERT INTO trace (execution_id, idx, entry) "
+            "SELECT %s, COALESCE((SELECT MAX(idx) FROM trace WHERE execution_id = %s), -1) + 1, %s",
+            (execution_id, execution_id, json.dumps(entry)),
+        )
+        if self.trace_max:
+            await cur.execute(
+                "DELETE FROM trace WHERE execution_id = %s AND idx <= "
+                "(SELECT MAX(idx) FROM trace WHERE execution_id = %s) - %s",
+                (execution_id, execution_id, self.trace_max),
+            )
+
+    async def append_trace(self, execution_id: str, entry: dict) -> None:
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await self._write_trace(cur, execution_id, entry)
+            await conn.commit()
+
+    async def read_trace(self, execution_id: str) -> list[dict]:
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT idx, entry FROM trace WHERE execution_id = %s ORDER BY idx", (execution_id,)
+                )
+                rows = await cur.fetchall()
+            await conn.commit()
+        return [{**json.loads(entry), "index": idx} for idx, entry in rows]
 
     async def load(self, execution_id: str) -> Optional[Execution]:
         async with self._pool.connection() as conn:
@@ -88,6 +127,7 @@ class AsyncPostgresStore:
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
+        trace: Optional[dict] = None,
     ) -> None:
         old = exe.version
         exe.version = old + 1
@@ -142,6 +182,8 @@ class AsyncPostgresStore:
                                     "DELETE FROM timers WHERE execution_id = %s AND path = %s",
                                     (exe.id, op.path),
                                 )
+                        if trace is not None:
+                            await self._write_trace(cur, exe.id, trace)
                     await conn.commit()
                 except StoreConflict:
                     raise

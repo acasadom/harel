@@ -92,3 +92,16 @@ def test_conflict_leaves_outbox_untouched(store):
         store.commit(e, [("p", Event(kind="X"))], processed_event_id="ev")
     assert len(store.pending_outbox()) == before  # no emit leaked
     assert not store.is_processed(e.id, "ev")
+
+
+def test_trace_recorded_in_commit_and_ring_capped(store):
+    e = Execution(definition_id="d")
+    store.save(e)
+    for i in range(3):
+        store.commit(e, [], processed_event_id=f"t{i}", trace={"event_kind": "Go", "to_path": f"S{i}"})
+    trace = store.read_trace(e.id)
+    assert [s["index"] for s in trace] == [0, 1, 2]
+    assert [s["to_path"] for s in trace] == ["S0", "S1", "S2"]
+    store.trace_max = 2  # ring keeps the last 2 (idx <= MAX-N deleted), indices stay monotonic
+    store.commit(e, [], trace={"event_kind": "Go", "to_path": "S3"})
+    assert [s["index"] for s in store.read_trace(e.id)] == [2, 3]

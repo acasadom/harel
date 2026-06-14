@@ -27,6 +27,7 @@ class AsyncExecutionStore(Protocol):
         processed_event_id: Optional[str] = None,
         timers: "tuple[TimerOp, ...]" = (),
         spawns: "tuple[tuple[str, str, dict], ...]" = (),
+        trace: "Optional[dict]" = None,
     ) -> None: ...
 
     async def is_processed(self, execution_id: str, event_id: str) -> bool: ...

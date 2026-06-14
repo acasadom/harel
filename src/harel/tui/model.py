@@ -72,7 +72,14 @@ class MonitorModel:
         # PREVIEW: the execution timeline, if the store carries a trace (Sqlite/Dict). A
         # store without the seam simply yields no timeline (the panel shows a placeholder).
         reader = getattr(self._store, "read_trace", None)
-        trace = [TraceStep.from_dict(r) for r in reader(execution_id)] if reader else []
+        # the store records `context_out` per step; derive each step's `context_in` from the
+        # previous step's `context_out` (the first step starts from the empty context).
+        trace = []
+        prev_ctx: dict = {}
+        for raw in reader(execution_id) if reader else []:
+            step = TraceStep.from_dict({**raw, "context_in": raw.get("context_in") or prev_ctx})
+            trace.append(step)
+            prev_ctx = step.context_out
         source = self._source.source(exe.definition_id)
         return ExecutionDetail(
             execution=exe,

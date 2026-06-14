@@ -34,6 +34,7 @@ class DurableRunner:
         definitions: dict[str, Definition],
         clock: Callable[[], float] = time.time,
         resolver: Optional[MachineResolver] = None,
+        trace: bool = False,
     ) -> None:
         self.store = store  # kept so callers can introspect the same store object
         self.definitions = definitions
@@ -41,11 +42,11 @@ class DurableRunner:
         self._clock = clock
         # build the async runner ON the shared portal loop (so async backends, later, bind
         # their connection pools to that loop); a sync store is adapted to the async interface.
-        self._async: AsyncDurableRunner = facade.run(self._build, store, definitions, clock, resolver)
+        self._async: AsyncDurableRunner = facade.run(self._build, store, definitions, clock, resolver, trace)
 
     @staticmethod
-    async def _build(store, definitions, clock, resolver) -> AsyncDurableRunner:
-        return AsyncDurableRunner(facade.as_async_store(store), definitions, clock, resolver)
+    async def _build(store, definitions, clock, resolver, trace=False) -> AsyncDurableRunner:
+        return AsyncDurableRunner(facade.as_async_store(store), definitions, clock, resolver, trace=trace)
 
     def create(self, definition_id: str, context: Optional[dict] = None) -> Execution:
         """Create, start and persist a new Execution; return its committed state."""

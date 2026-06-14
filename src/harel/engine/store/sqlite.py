@@ -9,6 +9,7 @@ from typing import Iterable, Optional, Union
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.store._base import (
+    DEFAULT_TRACE_MAX,
     OutboxEntry,
     SpawnEntry,
     StoreConflict,
@@ -53,31 +54,42 @@ class SqliteStore:
             "(seq INTEGER PRIMARY KEY AUTOINCREMENT, parent_id TEXT NOT NULL, child_id TEXT NOT NULL, "
             "root_path TEXT NOT NULL, context TEXT NOT NULL)"
         )
-        # PREVIEW: execution trace for the monitor timeline (not yet engine-written)
+        # execution trace for the monitor timeline (opt-in; written by commit)
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS trace "
             "(execution_id TEXT NOT NULL, idx INTEGER NOT NULL, entry TEXT NOT NULL, "
             "PRIMARY KEY (execution_id, idx))"
         )
+        self.trace_max = DEFAULT_TRACE_MAX
         self._conn.commit()
 
-    def append_trace(self, execution_id: str, entry: dict) -> None:
-        """PREVIEW seam (see DictStore): append a trace step for the monitor timeline."""
-        (count,) = self._conn.execute(
-            "SELECT COUNT(*) FROM trace WHERE execution_id = ?", (execution_id,)
-        ).fetchone()
-        idx = entry.get("index", count)
+    def _write_trace(self, execution_id: str, entry: dict) -> None:
+        """Append one trace step WITHOUT committing (so it batches into commit's txn). Two
+        statements: `idx` computed inline (MAX+1, monotonic — survives the ring delete) so no
+        pre-read, then the ring keeps only the last `trace_max` steps. `read_trace` takes `index`
+        from the `idx` column, so the stored JSON needn't carry it."""
         self._conn.execute(
-            "INSERT OR REPLACE INTO trace (execution_id, idx, entry) VALUES (?, ?, ?)",
-            (execution_id, idx, json.dumps({**entry, "index": idx})),
+            "INSERT INTO trace (execution_id, idx, entry) "
+            "SELECT ?, COALESCE((SELECT MAX(idx) FROM trace WHERE execution_id = ?), -1) + 1, ?",
+            (execution_id, execution_id, json.dumps(entry)),
         )
+        if self.trace_max:
+            self._conn.execute(
+                "DELETE FROM trace WHERE execution_id = ? AND idx <= "
+                "(SELECT MAX(idx) FROM trace WHERE execution_id = ?) - ?",
+                (execution_id, execution_id, self.trace_max),
+            )
+
+    def append_trace(self, execution_id: str, entry: dict) -> None:
+        """The demo/test seam: append a trace step and commit it on its own."""
+        self._write_trace(execution_id, entry)
         self._conn.commit()
 
     def read_trace(self, execution_id: str) -> list[dict]:
         rows = self._conn.execute(
-            "SELECT entry FROM trace WHERE execution_id = ? ORDER BY idx", (execution_id,)
+            "SELECT idx, entry FROM trace WHERE execution_id = ? ORDER BY idx", (execution_id,)
         ).fetchall()
-        return [json.loads(r[0]) for r in rows]
+        return [{**json.loads(entry), "index": idx} for idx, entry in rows]
 
     def load(self, execution_id: str) -> Optional[Execution]:
         row = self._conn.execute("SELECT data FROM executions WHERE id = ?", (execution_id,)).fetchone()
@@ -165,6 +177,7 @@ class SqliteStore:
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
+        trace: Optional[dict] = None,
     ) -> None:
         try:
             self._write(exe)
@@ -194,6 +207,8 @@ class SqliteStore:
                     self._conn.execute(
                         "DELETE FROM timers WHERE execution_id = ? AND path = ?", (exe.id, op.path)
                     )
+            if trace is not None:
+                self._write_trace(exe.id, trace)
             self._conn.commit()
         except StoreConflict:
             self._conn.rollback()

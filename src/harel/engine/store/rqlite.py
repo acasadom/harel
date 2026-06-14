@@ -7,6 +7,7 @@ from typing import Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.store._base import (
+    DEFAULT_TRACE_MAX,
     OutboxEntry,
     SpawnEntry,
     StoreConflict,
@@ -46,8 +47,11 @@ class RqliteStore:
                 "fire_at REAL NOT NULL, PRIMARY KEY (execution_id, path))",
                 "CREATE TABLE IF NOT EXISTS spawns (seq INTEGER PRIMARY KEY AUTOINCREMENT, "
                 "parent_id TEXT NOT NULL, child_id TEXT NOT NULL, root_path TEXT NOT NULL, context TEXT NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS trace (execution_id TEXT NOT NULL, idx INTEGER NOT NULL, "
+                "entry TEXT NOT NULL, PRIMARY KEY (execution_id, idx))",
             ]
         )
+        self.trace_max = DEFAULT_TRACE_MAX
 
     @classmethod
     def from_url(cls, url: str, connect_retries: int = 30, retry_delay: float = 1.0) -> "RqliteStore":
@@ -145,6 +149,7 @@ class RqliteStore:
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
+        trace: Optional[dict] = None,
     ) -> None:
         old = exe.version
         exe.version = old + 1  # bump BEFORE dumping so the stored JSON carries the new version
@@ -229,6 +234,34 @@ class RqliteStore:
                     data,
                 ]
             )
+        # trace step, guarded on our CAS win. idx computed inline (MAX+1) so no pre-read;
+        # the cap delete runs after, in the same transactional request (sees the new row).
+        if trace is not None:
+            statements.append(
+                [
+                    "INSERT INTO trace (execution_id, idx, entry) "
+                    "SELECT ?, COALESCE((SELECT MAX(idx) FROM trace WHERE execution_id = ?), -1) + 1, ? "
+                    "WHERE EXISTS (SELECT 1 FROM executions WHERE id = ? AND data = ?)",
+                    exe.id,
+                    exe.id,
+                    json.dumps(trace),
+                    exe.id,
+                    data,
+                ]
+            )
+            if self.trace_max:
+                statements.append(
+                    [
+                        "DELETE FROM trace WHERE execution_id = ? AND idx <= "
+                        "(SELECT MAX(idx) FROM trace WHERE execution_id = ?) - ? "
+                        "AND EXISTS (SELECT 1 FROM executions WHERE id = ? AND data = ?)",
+                        exe.id,
+                        exe.id,
+                        self.trace_max,
+                        exe.id,
+                        data,
+                    ]
+                )
         results = self._execute(statements, transaction=True)
         if results[0].get("rows_affected", 0) == 0:
             exe.version = old  # CAS missed: undo the in-memory bump (nothing was written)
@@ -242,6 +275,38 @@ class RqliteStore:
             (execution_id, event_id),
         )
         return bool(rows)
+
+    def append_trace(self, execution_id: str, entry: dict) -> None:
+        """The demo/test seam (unguarded): append a step with idx = MAX+1, then cap."""
+        self._execute(
+            [
+                [
+                    "INSERT INTO trace (execution_id, idx, entry) "
+                    "SELECT ?, COALESCE((SELECT MAX(idx) FROM trace WHERE execution_id = ?), -1) + 1, ?",
+                    execution_id,
+                    execution_id,
+                    json.dumps(entry),
+                ]
+            ]
+        )
+        if self.trace_max:
+            self._execute(
+                [
+                    [
+                        "DELETE FROM trace WHERE execution_id = ? AND idx <= "
+                        "(SELECT MAX(idx) FROM trace WHERE execution_id = ?) - ?",
+                        execution_id,
+                        execution_id,
+                        self.trace_max,
+                    ]
+                ]
+            )
+
+    def read_trace(self, execution_id: str) -> list[dict]:
+        rows = self._query(
+            "SELECT idx, entry FROM trace WHERE execution_id = ? ORDER BY idx", (execution_id,)
+        )
+        return [{**json.loads(entry), "index": idx} for idx, entry in rows]
 
     def pending_outbox(self) -> list[OutboxEntry]:
         rows = self._query("SELECT seq, target_id, event FROM outbox ORDER BY seq", ())
