@@ -51,7 +51,9 @@ How these machines run for real — and the reference material.
 guide/cli
 guide/visualization
 guide/durability
+guide/stores
 guide/distribution
+guide/transports
 guide/control-plane
 guide/faas
 guide/monitor

@@ -11,6 +11,7 @@ harel list     FILE                         # machines / fragments / events in a
 harel run      FILE [NAME] [-e KIND[:JSON]] # drive a machine with events (in-memory)
 harel fmt      FILES... [--check|--diff]    # format .stm files
 harel lsp                                   # start the DSL language server (stdio)
+harel monitor  [--definitions-dir DIR]      # the monitoring TUI (needs the `tui` extra) — see Monitor
 harel --version
 ```
 

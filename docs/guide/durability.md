@@ -22,7 +22,8 @@ store and the same machine survives crashes and restarts.
 
 The networked ones are optional extras (`harel[redis]`, `[postgres]`, `[rqlite]`, `[mongo]`, `[libsql]`, `[dynamodb]`) and take an
 injected client. Selecting one is the *only* change — the machine and the driving loop are
-identical.
+identical. For **how each backend lays its data out** — tables/keys/collections, the CAS, the
+outbox/dedupe/timer/trace storage — see the [stores reference](stores).
 
 ## Surviving a restart
 
@@ -76,6 +77,10 @@ The store is hardened beyond just persisting state:
   idempotently, so a crash mid-fork neither double-spawns nor loses a region's result.
 - **Durable timers** — a `timeout` is persisted on enter and cancelled on exit in the *same*
   commit as the transition, so a scheduled timer can't be lost (see [step 7](../tutorial/07-timers)).
+- **Execution trace (opt-in)** — with `STM_TRACE=1` (or `DurableRunner(..., trace=True)`) the
+  commit also appends one timeline step (event, transition, actions, `context_out`) in the same
+  transaction, so the [monitor](monitor) timeline is real. Off by default (zero hot-path cost);
+  ring-capped to the last `STM_TRACE_MAX` steps. Per-backend storage in the [stores reference](stores).
 
 ## At-least-once actions & idempotency
 
