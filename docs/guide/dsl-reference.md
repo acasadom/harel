@@ -92,6 +92,11 @@ Signature: `def fn(stm, event, **inputs)`, reading/writing `stm.execution_ctx`.
 fragment F(work: action, ok: guard, target: state, budget: value, ev: event) { … }
 use F(work=charge, ok=(status=="ok"), budget=30) as Local   # splice as a child composite
 
+fragment Outer(work: action, budget: value) {     # a fragment may `use` another fragment
+  initial X  state X {}
+  use F(work=work, ok=(status=="ok"), budget=budget) as Inner   # …and forward its own params
+}
+
 invoke pkg.machine                   # run another machine as a black box (a leaf)
   with { child_key: parent_key }     # project input in
 invoke pkg.machine for item in coll  # fan-out: one child per entry of coll
@@ -100,6 +105,10 @@ invoke { … machine body … }          # inline target (QML-style)
 ```
 
 A single `invoke` leaves only via `on Returned where …`; a fan-out leaves via a `join`.
+Fragments **nest**: a fragment body may `use` another fragment and **forward its own
+parameters** (action, guard, value, state and event) as the nested use's args — resolved
+against the enclosing fragment's scope. Forwarding a name the enclosing fragment doesn't declare
+is a `DslError`.
 
 See: [fragments](../tutorial/09-fragments), [imports](../tutorial/10-imports),
 [invoke](../tutorial/11-invoke), [fan-out](../tutorial/12-fanout).

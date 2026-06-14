@@ -4,7 +4,7 @@
 open-source fork of SQLite — reached through the `libsql` Python package. The `libsql` driver is
 **DB-API compatible** (a `sqlite3`-style driver), so for this backend the SQL, the version-CAS
 write and the one-transaction `commit` are **byte-for-byte identical to
-[`SqliteStore`](../stores#sqlitestore-one-machine-zero-infrastructure)**. The same six tables,
+[`SqliteStore`](sqlite)**. The same six tables,
 the same CAS, the same trace ring. What `LibsqlStore` adds over plain SQLite is purely *where the
 database lives*: it can be a local file (an embed, like SQLite) **or** an embedded replica of a
 remote Turso/`sqld` primary — selected entirely by constructor arguments. One backend is
@@ -502,6 +502,6 @@ redis.asyncio, psycopg async pool, motor, aioboto3, httpx for rqlite) issues rea
   backend.
 
 See the [stores hub](../stores) for the full backend comparison and the
-[`ExecutionStore`](../stores#the-contract-every-backend-implements) contract, and
+[`ExecutionStore`](../stores) contract, and
 [durability](../durability) for why the one-transaction `commit`, the outbox, the dedupe ledger
 and the version-CAS together make a crash safe.
