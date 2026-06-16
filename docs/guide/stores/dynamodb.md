@@ -1,7 +1,7 @@
 # DynamoDBStore — AWS serverless
 
 `DynamoDBStore` is a durable `ExecutionStore`
-([`store/dynamodb.py`](../../../src/harel/engine/store/dynamodb.py)) that keeps every Execution,
+([`store/dynamodb.py`](https://github.com/acasadom/harel/blob/main/src/harel/engine/store/dynamodb.py)) that keeps every Execution,
 its transactional outbox, its orthogonal-fork spawn intents, its dedupe marks, its durable timers
 and its opt-in execution trace **in AWS DynamoDB**. It is the **serverless** sibling of the SQL
 backends — no instance to provision, no file, no shared volume — and the natural store-side partner
@@ -442,7 +442,7 @@ deliberately accepted cost of the document model here.
 
 ## Async twin
 
-[`aio_store/dynamodb.py`](../../../src/harel/engine/aio_store/dynamodb.py) is `AsyncDynamoDBStore` —
+[`aio_store/dynamodb.py`](https://github.com/acasadom/harel/blob/main/src/harel/engine/aio_store/dynamodb.py) is `AsyncDynamoDBStore` —
 a **native-async** mirror over **aioboto3 / aiobotocore**, not a thread-pool wrapper. Every call is
 awaited on **one long-lived aiohttp-backed client**, so concurrent workers (`STM_CONCURRENCY`) issue
 **real parallel DynamoDB requests** through the aiohttp connection pool rather than being bounded by a

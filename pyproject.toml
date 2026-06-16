@@ -29,6 +29,12 @@ dependencies = [
     "aiosqlite>=0.20",
 ]
 
+[project.urls]
+Homepage = "https://github.com/acasadom/harel"
+Repository = "https://github.com/acasadom/harel"
+Documentation = "https://acasadom.github.io/harel/"
+Issues = "https://github.com/acasadom/harel/issues"
+
 [project.optional-dependencies]
 # the RedisTransport / RedisStore backend; the client is injected, so this is only
 # needed to talk to a real Redis (tests use fakeredis from the dev group)
@@ -76,6 +82,7 @@ dev = [
     "sphinx",
     "myst-parser",
     "sphinxcontrib-mermaid",
+    "furo",
     "fakeredis>=2.36.0",
     "mongomock>=4.1",
     # MongoStore/MongoTransport import `pymongo` (e.g. ReturnDocument); mongomock only

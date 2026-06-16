@@ -38,6 +38,8 @@ from pathlib import Path
 from harel import definition_from_dsl, DurableRunner, SqliteStore, Event
 
 SOURCE = """
+event Finish {}
+
 machine order {
   initial Cart
   state Cart {}

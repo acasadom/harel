@@ -1,0 +1,6 @@
+# Docs build dependencies (Read the Docs + `make docs`). The site is Sphinx + MyST (Markdown)
+# with mermaid diagrams; no autodoc, so `harel` itself is not installed for the build.
+sphinx
+myst-parser
+sphinxcontrib-mermaid
+furo

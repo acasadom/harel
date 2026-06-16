@@ -67,10 +67,15 @@ harel new approval.stm
 harel run approval.stm -e Submit -e Approve   # (start) -> Draft -> Review -> Approved
 ```
 
-Or author one yourself — transitions live **inside** the state they leave, events are named,
-terminals declare their verdict:
+Or author one yourself — events are declared up front, transitions live **inside** the state
+they leave, and terminals declare their verdict:
 
 ```
+event PlaceOrder {}
+event PaymentAuthorized {}
+event CancelOrder {}
+event Delivered {}
+
 machine order {
   initial Cart
   state Cart {}
@@ -92,6 +97,11 @@ Run it through the headless durable runner (here over an in-memory store):
 from harel import definition_from_dsl, DurableRunner, DictStore, Event
 
 SOURCE = """
+event PlaceOrder {}
+event PaymentAuthorized {}
+event CancelOrder {}
+event Delivered {}
+
 machine order {
   initial Cart
   state Cart {}
@@ -131,10 +141,11 @@ A complete, runnable example (nested states, a selector-driven retry, actions) l
 
 ## Documentation
 
-A step-by-step **tutorial** — 14 stages that grow one example from a turnstile to durable,
-distributed submachines — plus operations and reference guides live under [`docs/`](docs/).
-Build the HTML locally with `make docs`. Every code example in the docs is executed in CI, so
-it stays in sync with the engine.
+Read the docs online at **[acasadom.github.io/harel](https://acasadom.github.io/harel/)** — a
+step-by-step **tutorial** (14 stages that grow one example from a turnstile to durable,
+distributed submachines) plus operations and reference guides. The source lives under
+[`docs/`](docs/); build the HTML locally with `make docs`. Every code example in the docs is
+executed in CI, so it stays in sync with the engine.
 
 - **[Tutorial](docs/tutorial/01-getting-started.md)** — start here; the model, one step at a time.
 - **[Architecture](docs/guide/architecture.md)** — how harel works inside: the pure engine, the
@@ -192,12 +203,13 @@ the engine guessing. Policy stays in the model; the engine stays small.
 
 ## Status
 
-Beta. The core engine, DSL, durability/distribution layers and tooling are in place and
-covered by an extensive test suite (run `uv run pytest`).
+Beta. The core engine, DSL, durability/distribution layers, the monitor TUI, remote action
+execution on FaaS (AWS Lambda / HTTP functions), and editor tooling are all in place and covered
+by an extensive test suite (run `uv run pytest`); every code example in the docs is executed in CI.
 
-**Roadmap:** remote action execution — running a state's actions on FaaS (AWS Lambda, Spin,
-…). The architecture already has the seam for it: actions are *effects* the runner resolves,
-so a remote executor is a new runner/resolver, not an engine change.
+**Roadmap:** validating the libSQL/Turso path against a real account (today experimental);
+fault-injection testing of the distributed path under crash/lease-expiry; opt-in bounded retry for
+transient action errors.
 
 ## Development
 

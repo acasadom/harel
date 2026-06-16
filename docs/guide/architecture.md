@@ -61,7 +61,7 @@ The IO — your action functions, the store, the queue — lives entirely in the
 
 ### 1. Definition — the immutable program (`harel/definition/`)
 
-A `Definition` ([model.py](../../src/harel/definition/model.py)) is the compiled machine: a tree
+A `Definition` ([model.py](https://github.com/acasadom/harel/blob/main/src/harel/definition/model.py)) is the compiled machine: a tree
 of `Node`s with **real `parent`/`children` references** and an `index: dict[full_path, Node]`.
 `full_path` is only a *stable address* (for serialization), **not** the runtime navigation
 mechanism — the engine walks references (`chain`, `lca`, `ancestors`). It's built once from the
@@ -124,14 +124,14 @@ sequenceDiagram
   E--xR: StopIteration (quiescent)
 ```
 
-Your action functions run **only here**, inside `Driver._drive` ([runtime.py](../../src/harel/engine/runtime.py)) — never inside `core.py`. The proxy passed as `stm`
+Your action functions run **only here**, inside `Driver._drive` ([runtime.py](https://github.com/acasadom/harel/blob/main/src/harel/engine/runtime.py)) — never inside `core.py`. The proxy passed as `stm`
 exposes `execution_ctx` (the Execution's `context`) and a stable `idempotency_key`
 (`{id}:{version}:{action_index}`) so a side effect can be made effect-once across an
 at-least-once redelivery (see [durability](durability)).
 
 ### What `process` does inside (the pure part)
 
-For one event, `process` ([core.py](../../src/harel/engine/core.py)) resolves a transition by
+For one event, `process` ([core.py](https://github.com/acasadom/harel/blob/main/src/harel/engine/core.py)) resolves a transition by
 **scope** (innermost composite wins; outer scopes are a fallback for *event* transitions only —
 automatic lookups don't bubble), evaluating the `EventFilter` (kind with `A|B` alternation +
 flat `field__op` predicates AND-ed with a composable `all`/`any`/`not` tree). Then `_take`
@@ -154,7 +154,7 @@ def _run(self, exe, gen, event_id=None):
                       timers=tuple(timer_ops), spawns=tuple(spawns))   # ONE atomic commit
 ```
 
-`store.commit` ([store/_base.py](../../src/harel/engine/store/_base.py)) persists, in a single transaction:
+`store.commit` ([store/_base.py](https://github.com/acasadom/harel/blob/main/src/harel/engine/store/_base.py)) persists, in a single transaction:
 
 1. **the Execution** — a CAS write: `UPDATE … SET version=old+1 WHERE id=? AND version=old`
    (or an `INSERT` if brand-new). If the row moved on, it raises `StoreConflict` — the
@@ -177,7 +177,7 @@ it idempotently.
 
 ## Walkthrough — creating and running a machine (in-memory)
 
-`DurableRunner` ([durable.py](../../src/harel/engine/durable.py)) is the headless host over a
+`DurableRunner` ([durable.py](https://github.com/acasadom/harel/blob/main/src/harel/engine/durable.py)) is the headless host over a
 store (a synchronous façade over the async core — see *Async core, sync façade* below).
 **Create** starts the engine and checkpoints; **process** loads, runs the
 engine, checkpoints, and flushes.
@@ -270,7 +270,7 @@ The same engine and the same `commit` run in two hosts:
 
 - **In-memory** (`Driver` / `DurableRunner`): the relay delivers emitted events *inline* (it
   calls `process` on the target itself). One process. Used for embedding and tests.
-- **Distributed** (`TransportDriver` + `Worker` + `Transport`, [distributed.py](../../src/harel/engine/distributed.py)): the relay **publishes** emitted events to a
+- **Distributed** (`TransportDriver` + `Worker` + `Transport`, [distributed.py](https://github.com/acasadom/harel/blob/main/src/harel/engine/distributed.py)): the relay **publishes** emitted events to a
   `Transport` (a queue) instead of delivering inline; workers claim and process them. Same code,
   many processes.
 
@@ -333,7 +333,7 @@ sequenceDiagram
 The worker honours the lifecycle status after load: `CANCELLED` → ack-drain; `SUSPENDED` →
 `nack(delay)` (park so a paused group doesn't spin a worker); `CANCELLING` + non-`Cancel` →
 ack-drain until the cooperative `Cancel` arrives. This is the **control plane**: lifecycle
-commands ([control.py](../../src/harel/engine/control.py)) CAS the Execution record directly, so
+commands ([control.py](https://github.com/acasadom/harel/blob/main/src/harel/engine/control.py)) CAS the Execution record directly, so
 they land at the next event boundary instead of behind the FIFO backlog — portably, with no
 transport priority/purge.
 

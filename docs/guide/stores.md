@@ -9,7 +9,7 @@ select a store at the worker see [`STM_STORE_BACKEND`](distribution).
 
 ## The contract every backend implements
 
-`ExecutionStore` is a small `Protocol` ([`store/_base.py`](../../src/harel/engine/store/_base.py)) —
+`ExecutionStore` is a small `Protocol` ([`store/_base.py`](https://github.com/acasadom/harel/blob/main/src/harel/engine/store/_base.py)) —
 each backend is a sibling module under `harel/engine/store/`, re-exported from the package, with
 a twin under `harel/engine/aio_store/` (same data model, awaited IO):
 
