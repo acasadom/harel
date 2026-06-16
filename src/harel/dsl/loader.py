@@ -16,7 +16,10 @@ cross-fragment / binding knowledge):
   Local` fills it. action args bind handlers, state args substitute transition
   targets (resolved in the consumer's scope), guard args supply predicates, value
   args substitute `__param__` references in `timeout`s and action inputs — all
-  scoped to that instance.
+  scoped to that instance. Fragments **nest**: a fragment body may `use` another
+  fragment and **forward its own params** (action/guard/value/state/event) as the
+  nested use's args — a bare-name arg is resolved against the enclosing fragment's
+  scope (the `_Ctx` maps), so it chains to any depth.
 
 Every reference is resolved into the concrete form `build_definition` consumes; an
 unbound handler / guard / value param is a hard `DslError`.
@@ -44,16 +47,39 @@ class _Ctx:
     bindings: dict[str, Impl]
     guards: dict[str, dict]
     values: dict[str, Any]
+    # state/event param substitutions of THIS fragment, kept so a nested `use` can forward
+    # one of its enclosing fragment's state/event params by name (bindings/guards/values
+    # already serve that role for action/guard/value params).
+    states: dict[str, str] = field(default_factory=dict)  # state-param name -> resolved target
+    events: dict[str, str] = field(default_factory=dict)  # event-param name -> resolved kind
     unbound: set[str] = field(default_factory=set)  # action handlers
     unbound_g: set[str] = field(default_factory=set)  # guards
     unbound_v: set[str] = field(default_factory=set)  # value params
     source: Optional[str] = None  # the DSL text of the file this scope's nodes live in (for error carets)
 
-    def instance(self, bindings: dict, guards: dict, values: dict, source: Optional[str] = None) -> "_Ctx":
-        """A child scope for a use: fresh maps, shared unbound sets. `source` is the
-        fragment's own file text when it came from an import (else the parent's)."""
+    def instance(
+        self,
+        bindings: dict,
+        guards: dict,
+        values: dict,
+        source: Optional[str] = None,
+        *,
+        states: Optional[dict] = None,
+        events: Optional[dict] = None,
+    ) -> "_Ctx":
+        """A child scope for a use: fresh resolution maps, shared unbound sets. `source` is the
+        fragment's own file text when it came from an import (else the parent's). `states`/`events`
+        carry this use's state/event substitutions so a nested `use` can forward them by name."""
         return _Ctx(
-            bindings, guards, values, self.unbound, self.unbound_g, self.unbound_v, source or self.source
+            bindings,
+            guards,
+            values,
+            states or {},
+            events or {},
+            self.unbound,
+            self.unbound_g,
+            self.unbound_v,
+            source or self.source,
         )
 
 
@@ -196,12 +222,14 @@ def _instantiate(inc: dict, fragments: dict[str, dict], ctx: _Ctx) -> tuple[str,
                 raise _located(f"use {name!r}: arg {pname!r} must be an action handler or path", inc, ctx)
         elif kind == "state":
             if tag in ("name", "dotted"):
-                subst[pname] = payload
+                # forward an enclosing fragment's state param, else a literal target name
+                subst[pname] = ctx.states.get(payload, payload)
             else:
                 raise _located(f"use {name!r}: arg {pname!r} must be a state name", inc, ctx)
         elif kind == "event":
             if tag in ("name", "dotted"):
-                event_subst[pname] = payload
+                # forward an enclosing fragment's event param, else a literal event kind
+                event_subst[pname] = ctx.events.get(payload, payload)
             else:
                 raise _located(f"use {name!r}: arg {pname!r} must be an event name", inc, ctx)
         elif kind == "guard":
@@ -214,14 +242,20 @@ def _instantiate(inc: dict, fragments: dict[str, dict], ctx: _Ctx) -> tuple[str,
             else:
                 raise _located(f"use {name!r}: arg {pname!r} must be a guard predicate or name", inc, ctx)
         else:  # value
-            if tag in ("lit", "name"):
+            if tag == "lit":
                 values[pname] = payload
+            elif tag == "name":  # forward an enclosing fragment's value param (a bare name)
+                if payload in ctx.values:
+                    values[pname] = ctx.values[payload]
+                else:
+                    ctx.unbound_v.add(payload)
             else:
                 raise _located(f"use {name!r}: arg {pname!r} must be a literal value", inc, ctx)
 
     local = inc["alias"] or name.split(".")[-1]
     clone = _substitute_events(_substitute_targets(copy.deepcopy(frag), subst), event_subst)
-    return local, _expand(clone, fragments, ctx.instance(bindings, guards, values, frag_src))
+    child = ctx.instance(bindings, guards, values, frag_src, states=subst, events=event_subst)
+    return local, _expand(clone, fragments, child)
 
 
 def _expand(cfg: dict, fragments: dict[str, dict], ctx: _Ctx) -> dict:

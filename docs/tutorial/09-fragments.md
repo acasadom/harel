@@ -106,5 +106,83 @@ card, calling a carrier, reserving stock — by using it again with different `w
 arguments. The repository's `retry.stm` is the full version of this pattern, adding a `value`
 parameter for the backoff policy and a budget on the consumer.
 
+## Fragments compose: a fragment that uses a fragment
+
+A fragment body may itself `use` another fragment — and **forward its own parameters** as the
+nested use's arguments. All five kinds forward (action, guard, value, state, event), resolved
+against the enclosing fragment's scope, so you can build a higher-level fragment on top of a
+lower-level one and thread the blanks straight through.
+
+Here `RetryStep` wraps `AttemptWithRetry`, forwarding its `task`/`verdict` actions and its
+`attempts` **value** down into the inner fragment (where `attempts` lands as the `budget` input
+of `work`). The machine fills `RetryStep` once; the value travels two levels deep:
+
+```python
+from harel import definition_from_dsl, DurableRunner, DictStore, Event
+
+SOURCE = """
+fragment AttemptWithRetry(work: action, check: action, budget: value) {
+  initial Attempt
+  state Attempt { on enter work(budget: budget) }   # the forwarded value reaches the action's inputs
+  state Waiting {}
+  state Done {}
+  from Attempt select check on Result {
+    "ok"   to Done
+    "fail" to Waiting
+  }
+  from Waiting to Attempt
+}
+
+fragment RetryStep(task: action, verdict: action, attempts: value) {
+  initial Begin
+  state Begin {}
+  use AttemptWithRetry(work = task, check = verdict, budget = attempts) as Try   # forward all three
+  from Begin to Try
+}
+
+machine order {
+  initial Charging
+  use RetryStep(task = charge, verdict = charge_result, attempts = 3) as Charging
+  final Paid success {}
+  from Charging to Paid
+}
+"""
+
+seen = {}
+
+
+def charge(stm, event, **inputs):
+    seen["budget"] = inputs.get("budget")          # the value forwarded two levels down
+    stm.execution_ctx["tries"] = stm.execution_ctx.get("tries", 0) + 1
+
+
+def charge_result(stm, event, **inputs):
+    return "ok" if stm.execution_ctx["tries"] >= seen["budget"] else "fail"
+
+
+defn = definition_from_dsl(SOURCE, "order", actions={"charge": charge, "charge_result": charge_result})
+runner = DurableRunner(DictStore(), {defn.id: defn})
+
+exe = runner.create(defn.id)
+print("start ->", exe.active_path, "| budget seen by charge:", seen["budget"])
+for i in (1, 2, 3):
+    exe = runner.process(exe.id, Event(kind="Result"))
+    print(f"Result #{i} ->", exe.active_path)
+print("final:", exe.active_path, "/", exe.outcome)
+```
+
+```text
+start -> Charging.Try.Attempt | budget seen by charge: 3
+Result #1 -> Charging.Try.Attempt
+Result #2 -> Charging.Try.Attempt
+Result #3 -> Paid
+final: Paid / success
+```
+
+The inner fragment is spliced two composites deep (`Charging.Try.Attempt`), and `attempts = 3`
+forwarded through `RetryStep` into `AttemptWithRetry`'s `budget` — so `charge` is called with
+`budget=3` and the loop succeeds on the third try. A name forwarded that the enclosing fragment
+doesn't declare is a `DslError`, so a typo'd forward fails loudly rather than leaking the name.
+
 So far everything has lived in one file. Real projects split machines across files —
 [imports](10-imports) are next.
