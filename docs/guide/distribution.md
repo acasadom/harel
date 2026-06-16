@@ -44,6 +44,9 @@ from harel.engine.distributed import DistributedRunner
 from harel.engine.transport import InMemoryTransport
 
 SOURCE = """
+event PlaceOrder {}
+event Deliver {}
+
 machine order {
   initial Cart
   state Cart {}

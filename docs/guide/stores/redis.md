@@ -1,6 +1,6 @@
 # RedisStore — all-network, no shared filesystem
 
-`RedisStore` is a durable `ExecutionStore` ([`store/redis.py`](../../../src/harel/engine/store/redis.py))
+`RedisStore` is a durable `ExecutionStore` ([`store/redis.py`](https://github.com/acasadom/harel/blob/main/src/harel/engine/store/redis.py))
 that keeps every Execution, its transactional outbox, its dedupe marks, its durable timers and its
 optional execution trace **in Redis** — over the network, with no shared filesystem. That is its
 defining property versus `SqliteStore`: there is no local file and no shared volume, so the same
@@ -311,7 +311,7 @@ def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None:
 
 ## Async twin
 
-`AsyncRedisStore` ([`aio_store/redis.py`](../../../src/harel/engine/aio_store/redis.py)) is the
+`AsyncRedisStore` ([`aio_store/redis.py`](https://github.com/acasadom/harel/blob/main/src/harel/engine/aio_store/redis.py)) is the
 native-async mirror over `redis.asyncio`: the same key space, the same `WATCH`/`MULTI`/`EXEC`
 version-CAS (still no Lua, so `fakeredis.aioredis` runs it), the same outbox-hash / dedupe-set /
 timers-ZSET / trace-ring. Every Redis call is `await`ed and the pipeline is an `async with`:

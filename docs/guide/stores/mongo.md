@@ -1,6 +1,6 @@
 # MongoStore — document store
 
-`MongoStore` is a durable `ExecutionStore` ([`store/mongo.py`](../../../src/harel/engine/store/mongo.py))
+`MongoStore` is a durable `ExecutionStore` ([`store/mongo.py`](https://github.com/acasadom/harel/blob/main/src/harel/engine/store/mongo.py))
 that keeps every Execution, its transactional outbox, its pending orthogonal-fork spawns, its dedupe
 marks, its durable timers and its optional execution trace **in MongoDB** — over the network, with no
 shared filesystem. Like `RedisStore` it is **all-network**: there is no local file and no shared
@@ -434,7 +434,7 @@ def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None:
 
 ## Async twin
 
-`AsyncMongoStore` ([`aio_store/mongo.py`](../../../src/harel/engine/aio_store/mongo.py)) is the
+`AsyncMongoStore` ([`aio_store/mongo.py`](https://github.com/acasadom/harel/blob/main/src/harel/engine/aio_store/mongo.py)) is the
 native-async mirror over `motor.motor_asyncio.AsyncIOMotorClient`: the same document model, the same
 `counters`/`_next_seq` allocator, the same `_enc`/`_dec` path encoding, and the **same
 single-document CAS** — `update_one({"_id": id, "version": old}, update)`, atomic without a replica

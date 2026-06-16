@@ -13,6 +13,8 @@ from harel import definition_from_dsl, render          # render = PlantUML
 from harel.viz import mermaid                            # the browser-friendly sibling
 
 SOURCE = """
+event Finish {}
+
 machine order {
   initial Cart
   state Cart {}

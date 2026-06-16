@@ -17,6 +17,8 @@ and the model's cleanup transition runs. If there is no `Cancel` handler, `cance
 from harel import definition_from_dsl, DurableRunner, DictStore, Event
 
 SOURCE = """
+event Finish {}
+
 machine job {
   initial Working
   state Working {}

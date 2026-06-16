@@ -22,7 +22,7 @@ different workers in parallel, which is where the throughput comes from.
 
 ## The contract every backend implements
 
-`Transport` is a small `Protocol` ([`transport/_base.py`](../../src/harel/engine/transport/_base.py)) —
+`Transport` is a small `Protocol` ([`transport/_base.py`](https://github.com/acasadom/harel/blob/main/src/harel/engine/transport/_base.py)) —
 each backend is a sibling module under `harel/engine/transport/`, with a twin under
 `harel/engine/aio_transport/`:
 
