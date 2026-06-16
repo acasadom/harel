@@ -1,0 +1,5 @@
+# runtime artifacts created on first run
+wizard.db
+wizard.db-shm
+wizard.db-wal
+.nicegui/

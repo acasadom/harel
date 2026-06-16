@@ -1,0 +1,36 @@
+# A multi-step onboarding wizard, modelled as a statechart.
+#
+#   Account --Next[email]--> Profile --Next[full_name]--> Verify --Verified--> Done
+#   Profile --Back--> Account               Verify --Back--> Profile
+#
+# The point of the example: this Execution is checkpointed to a DURABLE store
+# (SqliteStore), so the wizard survives a browser reload AND a server restart —
+# it resumes on the exact step the user had reached, with the data they typed.
+# A statechart on the server is something an in-browser XState cannot do.
+#
+# The step guards (`account_ok`/`profile_ok`) read the field carried on the `Next`
+# event, so the machine itself refuses to advance with an empty field — illegal
+# states are unreachable, not defended by scattered `if`s.
+guard account_ok = email != ""
+guard profile_ok = full_name != ""
+
+event Next { email: string  full_name: string }
+event Back {}
+event Verified {}
+
+machine wizard {
+  initial Account
+
+  # `on exit save` persists whatever the user typed (carried on the event) into the
+  # context, so it survives Back/Next and — being durable — a server restart.
+  state Account { on exit examples.nicegui_wizard.actions.save }
+  state Profile { on exit examples.nicegui_wizard.actions.save }
+  state Verify  { on enter examples.nicegui_wizard.actions.send_code }
+  final Done success
+
+  from Account to Profile on Next where account_ok
+  from Profile to Account on Back
+  from Profile to Verify  on Next where profile_ok
+  from Verify  to Profile on Back
+  from Verify  to Done    on Verified
+}
