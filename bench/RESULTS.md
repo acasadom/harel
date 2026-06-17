@@ -4,9 +4,25 @@ Measured with `bench/bench_async.py` (the minimal-overhead variant: pre-load the
 backlog as setup, then time only the worker draining it, detecting the end by counting
 real `ack`s — no polling probe, no sleeps in the measured path).
 
-Machine: local dev (single host). Each backend run as **store + transport unified**.
-`--no-sleep` (the action is a no-op) so the number reflects the **backend/engine
-event-processing rate**, not a fixed per-action delay.
+> ## ⚠️ Read the numbers as RELATIVE, not as a ceiling
+> **Every number here was measured on one developer laptop (Apple-Silicon, ~11 cores) with the
+> backends in Docker Desktop.** Two consequences shape *all* the absolute figures below:
+> 1. **Docker Desktop runs the containers in a Linux VM with a network/filesystem proxy**, so every
+>    backend round-trip crosses the host↔VM boundary — that adds latency and CPU per op and caps
+>    absolute throughput regardless of how fast the backend itself is.
+> 2. **Workers, the backend, and the bench all share the same ~11 cores**, so once a few CPU-bound
+>    worker processes are running they oversubscribe the host — the multi-worker "plateau" you see is
+>    the *laptop*, not the backend (which sits at single-digit % CPU even at the top rates).
+>
+> So treat these as **A/B comparisons** (the *relative* gain of a change, same host, same run) — the
+> ratios are real. The **absolute** ev/s are not the backends' capacity: a backend on native
+> hardware / a managed cloud instance, with workers on a box with more cores, scales **far** higher
+> on a *single* instance before sharding is needed (e.g. DBOS sustains ~40k steps/s on one Postgres;
+> our laptop tops out in the low thousands purely because of the two limits above). To measure a real
+> ceiling, run `bench/bench_workers.py` against a native/cloud backend from a multi-core host.
+
+Each backend run as **store + transport unified**. `--no-sleep` (the action is a no-op) so the
+number reflects the **backend/engine event-processing rate**, not a fixed per-action delay.
 
 ## Single worker, sweep over `concurrency` (one AsyncWorker, one event loop)
 

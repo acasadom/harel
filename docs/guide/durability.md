@@ -13,7 +13,7 @@ store and the same machine survives crashes and restarts.
 | ----- | --- |
 | `DictStore` | tests, examples (in-memory, not durable) |
 | `SqliteStore` | a single machine — durable, zero infrastructure |
-| `RedisStore` | distributed (WATCH/MULTI CAS) |
+| `RedisStore` | distributed (atomic Lua CAS on the state-only fast path; WATCH/MULTI for complex commits) |
 | `PostgresStore` | distributed (UPDATE-WHERE-version CAS) |
 | `RqliteStore` | distributed SQLite over Raft (HTTP) |
 | `MongoStore` | distributed document store (single-document atomic `update_one` CAS) |

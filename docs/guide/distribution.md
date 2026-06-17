@@ -114,20 +114,29 @@ Two independent dials:
   the two binds depends on the backend's per-op latency on your host (a slow-I/O backend is
   round-trip-bound; a fast one is loop-CPU-bound). Too high a value *degrades* throughput: more
   in-flight coroutines cost more to schedule than they save.
-- **More workers / shards**: the **aggregate** on a single backend instance plateaus
-  sublinearly as you add worker processes — that ceiling is the shared instance (a single
-  worker, by contrast, is bound by its own event-loop CPU + per-event latency, the dial above).
-  Throughput scales
-  **horizontally by sharding**: because executions are independent (single-consumer per group,
-  no cross-execution coordination), you partition them across independent `(store, transport)`
-  instances — each shard shares nothing with the others. This is the same model Temporal (hash
-  the id to a shard, add shards) and DBOS (partition, "your ceiling is your Postgres") use.
+- **More workers / shards**: adding worker processes lifts the aggregate sublinearly until
+  something shared saturates. That ceiling is **either the host** (CPU-bound worker processes
+  oversubscribing the cores) **or the single backend instance** — which one binds depends on your
+  hardware. On a busy single instance you scale **horizontally by sharding**: because executions
+  are independent (single-consumer per group, no cross-execution coordination), you partition them
+  across independent `(store, transport)` instances — each shard shares nothing with the others.
+  This is the same model Temporal (hash the id to a shard, add shards) and DBOS (partition, "your
+  ceiling is your Postgres") use.
 
-The Postgres transport's `SKIP LOCKED` claim lets workers on one Postgres lease different groups
-concurrently rather than serializing on a global lock. Measured numbers, the worker-vs-backend
-and sharding experiments, and the methodology live in
-[`bench/RESULTS.md`](https://github.com/acasadom/harel/blob/main/bench/RESULTS.md) (run them
-yourself with `bench/bench_async.py`, `bench_workers.py`, `bench_shards.py`).
+Each backend's claim/commit is folded into the fewest round-trips it can be — an atomic Lua script
+on Redis, one sorted `find_one_and_update` on Mongo, a `plpgsql` function (`FOR UPDATE SKIP LOCKED`
+inside) on Postgres — because the per-worker limit is usually round-trips, not the server (a single
+Postgres/Redis sat at single-digit % CPU even at the top rates we measured).
+
+```{warning}
+The numbers in [`bench/RESULTS.md`](https://github.com/acasadom/harel/blob/main/bench/RESULTS.md)
+are **A/B comparisons on one laptop with the backends in Docker Desktop** — its VM/network proxy and
+the shared cores cap the *absolute* throughput, so the multi-worker plateau there is the **laptop**,
+not the backend. Read them as relative gains; a backend on native hardware / managed cloud, with
+workers on a multi-core host, scales far higher on a *single* instance before sharding is needed.
+Run `bench/bench_async.py`, `bench_workers.py`, `bench_shards.py` against your own backend for real
+numbers.
+```
 
 ## Orthogonal & fan-out, distributed
 

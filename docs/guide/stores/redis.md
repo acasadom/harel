@@ -9,9 +9,9 @@ natural partner of `RedisTransport` for a **pure-Redis stack** (one backend for 
 seam and the queue seam — see [distribution](../distribution)).
 
 The Redis client is **injected** (duck-typed), so `redis` stays an optional extra: the engine never
-imports it at module load, the constructor only grabs `WatchError` lazily, and the test suite passes
-a `fakeredis` client instead of a real server. A convenience `from_url` classmethod does the lazy
-`import redis` for you:
+imports it at module load, the constructor only grabs `WatchError` / `ResponseError` lazily, and the
+test suite passes a `fakeredis` client instead of a real server. A convenience `from_url` classmethod
+does the lazy `import redis` for you:
 
 ```text
 RedisStore(client, prefix="stm")          # inject any redis-py-compatible client (incl. fakeredis)
@@ -48,8 +48,9 @@ trace:seq:{id}      string   per-execution INCR counter → the 0-based trace in
 Why each type:
 
 - **`exe:{id}` is a plain string** holding the whole Execution JSON. A load is a single `GET`; a
-  commit is a single `SET`. The version lives *inside* the JSON (`"version"`), which is the reason
-  list/filter queries below have to read and parse the value client-side.
+  commit is a single `SET` (under the version-CAS — the fast path does the compare and the `SET` in
+  one atomic Lua call, see below). The version lives *inside* the JSON (`"version"`), which is the
+  reason list/filter queries below have to read and parse the value client-side.
 - **`outbox` is a hash, not a list.** Each deferred event is a field keyed by its monotonic `seq`.
   A hash gives O(1) `HDEL` to ack a single delivered entry by seq without scanning a list, while
   `HGETALL` still returns the whole backlog to sort. `outbox:seq` is a separate string counter that
@@ -72,13 +73,35 @@ Why each type:
   steps. `trace:seq:{id}` is a per-execution `INCR` counter that stamps each step with a stable
   0-based `index` (so the position survives the ring dropping older entries).
 
-## The CAS commit (WATCH/MULTI/EXEC)
+## The CAS commit (a fast path + WATCH/MULTI/EXEC)
 
 `commit` is the one atomic write per event: it persists the Execution, enqueues its emitted events
 into the outbox, records the processed event id, applies the timer ops, enqueues spawn intents, and
 appends the optional trace step — **all or nothing**, with an optimistic-concurrency check on the
-Execution's `version`. Redis gives this without Lua via `WATCH`/`MULTI`/`EXEC`, which is what lets
-`fakeredis` run the same code.
+Execution's `version`.
+
+There are two paths, picked by what the commit carries:
+
+- **The fast path — a state-only commit** (no emits, spawns, timers or trace, the common case)
+  takes one atomic Lua script, `_COMMIT_CAS_LUA`: it reads the stored version, compares it to the
+  expected one, and does the `SET` plus an optional dedupe `SADD` — **all in ONE atomic Lua
+  round-trip**. The script's atomicity *replaces* the optimistic lock: there is no `WATCH` and no
+  retry, it either commits or returns a conflict. A version mismatch comes back as an error reply
+  (`STM_CONFLICT:<current_version>`), surfaced by redis-py as a `ResponseError` and mapped to
+  `StoreConflict` (see [`_commit_cas`](#redis-fast-path-commit-cas) below). The Lua needs `lupa`
+  installed for the `fakeredis`-backed tests; a real Redis runs Lua natively.
+- **The complex path — anything to enqueue** (emits / spawns / timers / trace) keeps the
+  battle-tested `WATCH`/`MULTI`/`EXEC` dance described next, which `fakeredis` runs without Lua.
+
+```text
+def commit(self, exe, emits, processed_event_id=None, timers=(), spawns=(), trace=None):
+    if not emits and not spawns and not timers and trace is None:
+        self._commit_cas(exe, processed_event_id)   # fast path: one atomic Lua round-trip
+        return
+    # ... otherwise the WATCH/MULTI/EXEC path below
+```
+
+The rest of this section walks the **complex path**.
 
 **Step 1 — allocate the seqs up front, OUTSIDE the transaction.** The outbox/spawn seqs and the
 trace index come from `INCR`, and `INCR` cannot return its value from inside a `MULTI` block (queued
@@ -164,8 +187,39 @@ Lua script: the version check happens under `WATCH` (so the read is consistent w
 the writes run in a `MULTI` block that aborts if the watched key changed. A concurrent writer that
 touches `exe:{id}` between the `WATCH` and the `EXEC` makes `EXEC` fail; redis-py surfaces that as
 `WatchError`, which the store catches, rolls `exe.version` back to `old`, and re-raises as
-`StoreConflict`. Avoiding Lua is deliberate — `fakeredis` supports `WATCH`/`MULTI`/`EXEC`, so the
-exact production code path runs under test.
+`StoreConflict`. Avoiding Lua **on this path** is deliberate — `fakeredis` supports
+`WATCH`/`MULTI`/`EXEC`, so the exact production code path runs under test.
+
+(redis-fast-path-commit-cas)=
+## The fast-path commit (`_commit_cas`)
+
+A state-only event — one that only advances the Execution (no emits, spawns, timers or trace) — is
+the common case, and it skips the whole `WATCH`/`MULTI`/`EXEC` dance for **one atomic Lua
+round-trip**. `commit` pre-bumps the version and calls `_commit_cas`, which runs `_COMMIT_CAS_LUA`:
+
+```text
+def _commit_cas(self, exe, processed_event_id):
+    key = self._k(f"exe:{exe.id}")
+    old = exe.version
+    exe.version = old + 1                       # pre-bump; the serialized JSON carries old+1
+    try:
+        self._commit_cas_script(
+            keys=[key, self._k(f"processed:{exe.id}")],
+            args=[exe.model_dump_json(), old, processed_event_id or ""])
+    except self._ResponseError as exc:          # STM_CONFLICT:<current_version>
+        exe.version = old
+        # ... parse the current version out of the message, raise StoreConflict
+        raise StoreConflict(exe.id, expected=old, found=found) from None
+```
+
+The script itself does the version-CAS and the write atomically: read the stored version, compare
+it to `old` (allowing the fresh-insert case where there is no row and `old == 0`), and on match
+`SET` the Execution (+ a dedupe `SADD` if a processed event id was given). On a mismatch it returns
+`redis.error_reply('STM_CONFLICT:' .. current_version)`, which redis-py raises as a `ResponseError`;
+`_commit_cas` rolls `exe.version` back to `old`, parses the current version out of the message, and
+re-raises as `StoreConflict`. Atomicity is what lets this drop the `WATCH` and the retry: the script
+is the compare-and-swap. (This is the one path that does need Lua, hence the `lupa` requirement for
+`fakeredis`.)
 
 ## The trace ring
 
@@ -312,9 +366,10 @@ def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None:
 ## Async twin
 
 `AsyncRedisStore` ([`aio_store/redis.py`](https://github.com/acasadom/harel/blob/main/src/harel/engine/aio_store/redis.py)) is the
-native-async mirror over `redis.asyncio`: the same key space, the same `WATCH`/`MULTI`/`EXEC`
-version-CAS (still no Lua, so `fakeredis.aioredis` runs it), the same outbox-hash / dedupe-set /
-timers-ZSET / trace-ring. Every Redis call is `await`ed and the pipeline is an `async with`:
+native-async mirror over `redis.asyncio`: the same key space, the same two commit paths — the
+`_COMMIT_CAS_LUA` fast path for a state-only commit and the `WATCH`/`MULTI`/`EXEC` complex path —
+the same outbox-hash / dedupe-set / timers-ZSET / trace-ring. Every Redis call is `await`ed and the
+pipeline is an `async with`:
 
 ```text
 async with self._r.pipeline() as pipe:
