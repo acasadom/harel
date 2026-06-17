@@ -88,7 +88,7 @@ def test_nested_composite_block() -> None:
 
 def test_event_predicate_label() -> None:
     lines = _lines(FLAT_NESTED, "M")
-    assert "Processing_Sim --> Processing_Val : Notification<br/>{status__eq=Success}" in lines
+    assert "Processing_Sim --> Processing_Val : Notification<br/>[status == 'Success']" in lines
 
 
 def test_sink_to_final_pseudostate() -> None:
