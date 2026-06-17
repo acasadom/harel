@@ -5,7 +5,7 @@ re-exported here, so `from harel.engine.transport import RedisTransport` (etc.) 
 `from harel.engine.transport import _PARKED, Lease` keep working unchanged.
 """
 
-from harel.engine.transport._base import _PARKED, Lease, Transport
+from harel.engine.transport._base import _CLAIM_LUA, _PARKED, Lease, Transport
 from harel.engine.transport.inmemory import InMemoryTransport
 from harel.engine.transport.libsql import LibsqlTransport
 from harel.engine.transport.mongo import MongoTransport
@@ -19,6 +19,7 @@ __all__ = [
     "Transport",
     "Lease",
     "_PARKED",
+    "_CLAIM_LUA",
     "InMemoryTransport",
     "SqliteTransport",
     "LibsqlTransport",

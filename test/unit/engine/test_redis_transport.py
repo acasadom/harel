@@ -260,16 +260,46 @@ def test_claim_does_not_scan_all_groups(transport):
 
     with (
         mock.patch.object(transport._r, "smembers", wraps=transport._r.smembers) as smembers,
-        mock.patch.object(transport._r, "zrangebyscore", wraps=transport._r.zrangebyscore) as zrange,
+        mock.patch.object(transport, "_claim_script", wraps=transport._claim_script) as claim_script,
     ):
         lease = transport.claim("w", visibility=30)
 
     assert lease is not None  # leased one of the 1000 groups
     # the old O(N) path materialised every group via SMEMBERS — it must be gone
     assert smembers.call_count == 0
-    # claim reads only a bounded candidate window, independent of the 1000 pending groups
-    assert zrange.call_count == 1
-    assert zrange.call_args.kwargs.get("num") == RedisTransport._CANDIDATES
+    # the bounded candidate window is applied inside the atomic Lua claim — a single call,
+    # independent of the 1000 pending groups, with the limit threaded through as the last arg
+    assert claim_script.call_count == 1
+    assert claim_script.call_args.kwargs["args"][-1] == RedisTransport._CANDIDATES
     # exactly one group was leased (its score bumped into the future); the rest stay at 0
     now_ms = int(time.time() * 1000)
     assert transport._r.zcount(transport._k_ready(), now_ms + 1, "+inf") == 1
+
+
+def test_concurrent_claims_get_distinct_groups(server):
+    """The atomic Lua claim hands each concurrent claimer a DISTINCT group — no two
+    workers ever lease the same one. This is the lost-`SET NX`-race the script removes:
+    the old client-side claim let workers fish the same candidate head and collide."""
+    n = 20
+    pub = RedisTransport(fakeredis.FakeStrictRedis(server=server))
+    for i in range(n):
+        pub.publish(f"G{i}", _event(f"e{i}"))
+
+    leased: list[str] = []
+    lock = threading.Lock()
+
+    def claim_one(wid: str) -> None:
+        t = RedisTransport(fakeredis.FakeStrictRedis(server=server))  # own client, shared server
+        lease = t.claim(wid, visibility=30)
+        if lease is not None:
+            with lock:
+                leased.append(lease.group_id)
+
+    threads = [threading.Thread(target=claim_one, args=(f"w{i}",)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(leased) == n  # every worker claimed a group
+    assert len(set(leased)) == n  # and all distinct — no group double-leased
