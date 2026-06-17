@@ -86,6 +86,69 @@ off the moment you add workers.
 - **Takeaway**: to go past a single worker's throughput you scale the **backend**
   (shard/partition executions across instances), not the worker count.
 
+## Loop-CPU vs backend I/O — where the single-worker limit actually sits
+
+> Measured 2026-06-17 on Docker Desktop / Apple Silicon (I/O-heavier than a bare-metal
+> Postgres, so the I/O-wait fraction below is host-specific). These **refine** the
+> "the limit is the backend, not the worker" framing above: it holds for the **aggregate on
+> one instance**, but for a **single worker** the limit is a *mix* of event-loop CPU and
+> backend I/O, and which dominates depends on the backend's per-op latency on the host.
+
+**A full worker (not the bare engine) tops ~4.2k ev/s on an in-memory store+transport** —
+one process, one loop, `AsyncDictStore` + `AsyncInMemoryTransport`, no network, no fsync:
+
+| concurrency | 1 | 16 | 64 | 256 | 1024 |
+|---|---:|---:|---:|---:|---:|
+| events/s | 3899 | 4259 | 4242 | 3966 | 3215 |
+
+So the worker/driver/asyncio loop itself caps a single worker at ~4.2k — ~11× below the
+**bare engine's ~47k** (`core.process` with no store/transport/driver). Throughput also
+*degrades* past the sweet spot (c=1024 < c=16): too many in-flight coroutines cost more to
+schedule than they save. The "~47k in-memory ceiling" cited elsewhere is the engine alone,
+**not** what a worker can drive.
+
+**The Execution snapshot serialization is negligible** — `model_dump_json` +
+`model_validate_json` round-trip on a mid-flight Execution measures **~0.003 ms/event**
+(292-byte JSON). So "rewrite the whole snapshot per event" is **not** a meaningful CPU cost;
+a delta/append checkpoint would only help the *write I/O* of *large* executions, not the
+baseline per-event cost.
+
+**A single Postgres worker is ~43% CPU, ~57% I/O-wait** (this host) — driving one worker
+against real Postgres, CPU time vs wall time during the measured drain:
+
+| concurrency | events/s | CPU/wall |
+|---|---:|---:|
+| 16 | 345 | 0.43 |
+| 64 | 332 | 0.43 |
+| 128 | 343 | 0.43 |
+
+CPU/wall ≈ 0.43 (not ≈ 1.0) means the worker is **not** purely loop-bound here — it spends
+most of its time awaiting Postgres. But the CPU half is ~1.25 ms/event of **driver** work
+(psycopg building/sending/parsing the ~5 queries per event — load, commit-with-outbox, claim,
+ack — *not* snapshot serialization), which sets a hard **~800 ev/s per-worker CPU ceiling**
+independent of backend speed. On a faster-I/O host the I/O-wait shrinks and the worker
+approaches that ceiling → there it *is* loop-bound. (Throughput is flat across concurrency
+because, for one worker, the per-event round-trips don't overlap enough to hide the latency.)
+
+**Adding worker processes lifts the Postgres aggregate** (`bench_workers.py`, 1→4 = 2.4×,
+even split) — one worker does **not** saturate the instance:
+
+| workers | 1 | 2 | 4 |
+|---|---:|---:|---:|
+| agg events/s | 338 | 553 | 810 |
+
+**Corrected model.** Per-worker throughput ≈ `1 / (loop_cpu_per_event + io_wait_per_event)`:
+- loop CPU/event = **driver work + engine + asyncio** (snapshot serialize is negligible),
+  ~1.25 ms on Postgres → a ~800 ev/s/worker CPU ceiling;
+- a backend whose per-event latency sits *below* that ceiling (fast Redis/Postgres) → the
+  worker is **loop/driver-CPU-bound** (i.e. *worker*-bound); a slow-I/O host → **I/O-wait-bound**;
+- the **aggregate on one instance** is backend-bound, scales sublinearly with worker
+  *processes* → past that, **shard** (next section).
+
+So "backend-bound, not worker-bound" is precise only for the aggregate ceiling; a single
+worker's limit is the `min(loop-CPU, backend-latency)` mix above — which is why a profile on
+a fast-disk Postgres can legitimately read as "loop-bound, the backend has more to give".
+
 ## Horizontal scaling — sharding across independent backends
 
 `bench/bench_shards.py`: a shard is its own Redis instance with its own worker; executions
@@ -118,8 +181,9 @@ queue partitioning). Our single-Postgres number is still well below that. Of the
 causes, the first is now **fixed**: the `claim` no longer takes a global `pg_advisory_xact_lock`
 (which serialized every claim) — it uses `FOR UPDATE SKIP LOCKED` on a per-group row, so claims
 run concurrently and Postgres now scales with workers (above). The remaining gap is (a) the
-**per-event protocol** (load + rewrite the whole Execution JSON + separate transport claim/ack +
-outbox + dedupe each event) vs DBOS's leaner step checkpoint, and (b) head-of-queue contention
+**per-event protocol** (load + rewrite the Execution + separate transport claim/ack + outbox +
+dedupe = ~5 round-trips/event — the *number* of round-trips and the per-query driver CPU, **not**
+the JSON serialize, which measures ~0.003 ms/event) vs DBOS's leaner step checkpoint, and (b) head-of-queue contention
 that DBOS only beats by **partitioning the queue** (a future per-partition queue here). Part of
 the gap is also inherent to being a full hierarchical statechart (richer per-transition work
 than a linear durable function).
@@ -127,8 +191,9 @@ than a linear durable function).
 ## Per-event round-trips — folding the dedupe into the load
 
 The per-event protocol is `claim → load → is_processed → commit → ack` — ~5 round-trips, two of
-them store reads (`load` then a separate `is_processed` dedupe check). On real backends the
-system is **IO-bound** (it runs at ~1k ev/s, far below the in-memory CPU ceiling of ~47k ev/s),
+them store reads (`load` then a separate `is_processed` dedupe check). On a slow-I/O host the
+system is largely **IO-bound** (it runs at ~1k ev/s, far below a full worker's in-memory loop
+ceiling of ~4.2k — itself far below the bare engine's ~47k; see the loop-CPU-vs-I/O section),
 so cutting a round-trip per event is a direct win.
 
 `store.load_for_event(execution_id, event_id) -> (Execution, processed)` returns both in **one**

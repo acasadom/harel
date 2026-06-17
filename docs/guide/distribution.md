@@ -94,7 +94,8 @@ without a separate scheduler.
 The worker is **async-native**. The bundled `python -m harel.worker` runs one `asyncio` event
 loop (via `anyio.run`) that drives up to `STM_CONCURRENCY` events in flight at once
 (`AsyncWorker.run`, default 256): while one execution's action awaits IO, the loop processes
-others — so a single worker process saturates an IO-bound backend without a thread per event.
+others — so one worker process overlaps many events' IO on a single event loop, with no thread
+per event.
 The synchronous façades shown above (`DistributedRunner`, `worker.step()`) are thin wrappers
 over that async core through an [anyio](https://anyio.readthedocs.io/) blocking portal, so the
 deterministic `step()`-in-a-loop style still works for embedding and tests.
@@ -108,10 +109,15 @@ a time regardless of how many are running.
 Two independent dials:
 
 - **Concurrency within a worker** (`STM_CONCURRENCY`): how many events one event loop keeps in
-  flight. Raising it lifts throughput until the backend's per-event round-trips (load → commit →
-  claim → ack) become the limit.
-- **More workers / shards**: a single backend instance is the ceiling — piling workers on one
-  backend plateaus (the backend, not the worker, is the bottleneck). Throughput scales
+  flight. Raising it lifts throughput until either the backend's per-event round-trips (load →
+  commit → claim → ack) **or** the event loop's own per-event CPU becomes the limit — which of
+  the two binds depends on the backend's per-op latency on your host (a slow-I/O backend is
+  round-trip-bound; a fast one is loop-CPU-bound). Too high a value *degrades* throughput: more
+  in-flight coroutines cost more to schedule than they save.
+- **More workers / shards**: the **aggregate** on a single backend instance plateaus
+  sublinearly as you add worker processes — that ceiling is the shared instance (a single
+  worker, by contrast, is bound by its own event-loop CPU + per-event latency, the dial above).
+  Throughput scales
   **horizontally by sharding**: because executions are independent (single-consumer per group,
   no cross-execution coordination), you partition them across independent `(store, transport)`
   instances — each shard shares nothing with the others. This is the same model Temporal (hash

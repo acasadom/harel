@@ -11,6 +11,9 @@ By default a finishing region reports only its `outcome`. List extra context key
 and they ride along too. Here the `Fraud` region computes a `score` and carries it:
 
 ```text
+event FraudCleared {}
+event StockReserved {}
+
 machine checkout {
   initial Verifying
   orthogonal Verifying {
@@ -44,6 +47,9 @@ import json
 from harel import definition_from_dsl, DurableRunner, DictStore, Event
 
 SOURCE = """
+event FraudCleared {}
+event StockReserved {}
+
 machine checkout {
   initial Verifying
   orthogonal Verifying {

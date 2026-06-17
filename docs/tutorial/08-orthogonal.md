@@ -8,6 +8,9 @@ AND-state): several regions, each its own sub-machine, running concurrently.
 ## An AND-state with two regions
 
 ```text
+event FraudCleared {}
+event StockReserved {}
+
 machine checkout {
   initial Verifying
   orthogonal Verifying {
@@ -53,6 +56,9 @@ independently.
 from harel import definition_from_dsl, DurableRunner, DictStore, Event
 
 SOURCE = """
+event FraudCleared {}
+event StockReserved {}
+
 machine checkout {
   initial Verifying
   orthogonal Verifying {

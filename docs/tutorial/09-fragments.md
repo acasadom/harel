@@ -44,6 +44,8 @@ Here `work` and `check` are `action` parameters: the consumer supplies *what to 
 from harel import definition_from_dsl, DurableRunner, DictStore, Event
 
 SOURCE = """
+event Result {}
+
 fragment AttemptWithRetry(work: action, check: action) {
   initial Attempt
   state Attempt { on enter work }
@@ -121,6 +123,8 @@ of `work`). The machine fills `RetryStep` once; the value travels two levels dee
 from harel import definition_from_dsl, DurableRunner, DictStore, Event
 
 SOURCE = """
+event Result {}
+
 fragment AttemptWithRetry(work: action, check: action, budget: value) {
   initial Attempt
   state Attempt { on enter work(budget: budget) }   # the forwarded value reaches the action's inputs

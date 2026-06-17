@@ -11,6 +11,9 @@ timer. When the timer is due, the engine delivers a reserved **`Timeout`** event
 model decides what that means by handling it like any other event:
 
 ```text
+event PaymentAuthorized {}
+event Deliver {}
+
 machine order {
   initial AwaitingPayment
   state AwaitingPayment { timeout 900 }
@@ -48,6 +51,9 @@ runner to sweep for due timers:
 from harel import definition_from_dsl, DurableRunner, DictStore, Event
 
 SOURCE = """
+event PaymentAuthorized {}
+event Deliver {}
+
 machine order {
   initial AwaitingPayment
   state AwaitingPayment { timeout 900 }

@@ -9,6 +9,11 @@ a little machine — pick the items, pack them, get them ready to ship.
 A `state` block that declares its own `initial` and child states is a **composite**:
 
 ```text
+event Capture {}
+event Picked {}
+event Packed {}
+event Dispatched {}
+
 machine order {
   initial Paid
   state Paid { on enter capture_payment }
@@ -63,6 +68,11 @@ active — handy for "no matter where we are in fulfilment, a cancel aborts it".
 from harel import definition_from_dsl, DurableRunner, DictStore, Event
 
 SOURCE = """
+event Capture {}
+event Picked {}
+event Packed {}
+event Dispatched {}
+
 machine order {
   initial Paid
   state Paid { on enter capture_payment }
