@@ -350,3 +350,41 @@ been retired — see the note at the top.)
   to compare backends.
 - DynamoDB/SQS not included: they need LocalStack (an AWS *simulation*), excluded here on
   purpose; available on request (caveat: LocalStack latency ≠ real AWS).
+
+## harel vs DBOS — same FSM, same Postgres, same laptop
+
+A paradigm comparison, **not apples-to-apples**: harel is a *declarative statechart engine*;
+[DBOS](https://www.dbos.dev/) is *imperative durable execution* (Postgres-backed). To put a number
+next to harel, `bench/bench_dbos.py` models the exact toy FSM (`Idle --Start--> Working --Finish-->
+Done`) on DBOS two ways, run against the **same Docker Postgres on the same laptop** as the harel
+numbers above:
+
+- **A — workflow + `send`/`recv`** (the paradigm match): one durable workflow per execution that
+  `recv`s the two events. Mirrors harel's "create, then send Start + Finish".
+- **B — workflow-per-event**: one durable workflow per event running a transaction that advances
+  the row. The "durable transition" floor.
+
+| | events/s (single process) |
+|---|---:|
+| **harel-on-Postgres, 1 worker** | **1205** |
+| **harel-on-Postgres, 8 workers** | **2057** |
+| DBOS — A (workflow + send/recv) | 388 |
+| DBOS — B (workflow-per-event) | 234 |
+
+On the same hardware, harel sustains **~3× DBOS** for this simple event-driven FSM (single process),
+and the gap is structural: DBOS does full durable-**workflow** bookkeeping per event (workflow-status
+rows, recovery tracking, the queue/notification machinery, `SERIALIZABLE` transactions) — the right
+machinery for arbitrary imperative durable code, but heavy for a trivial state transition. harel's
+per-event path is a lean claim → load → commit(CAS) → ack. **This is the statechart-vs-workflow
+distinction, with a number**: for a domain that *is* a state machine, the statechart engine's
+per-event model is lighter; for imperative "run these steps with retries" work, DBOS's model is the
+right fit — different jobs.
+
+```{note}
+Honest caveats: (1) both numbers carry the **laptop + Docker-Desktop** limit from the box at the top
+— so read the **ratio**, not the absolutes (it's the same handicap for both). (2) harel's figure is
+*drain-only* (the enqueue/publish is unmeasured setup), while DBOS-A's window *includes* the `send`,
+so harel is somewhat flattered — but ~3× is well beyond that asymmetry. (3) DBOS ran in its default
+single-instance config. (4) DBOS is **not** a harel dependency — `bench/bench_dbos.py` is a throwaway
+that needs `pip install dbos` and a Postgres.
+```
