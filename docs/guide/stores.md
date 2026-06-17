@@ -53,7 +53,7 @@ steps** (default 200) using its natural primitive (a capped table, an `LTRIM`'d 
 from harel import definition_from_dsl, DurableRunner, SqliteStore, Event
 
 defn = definition_from_dsl(
-    "machine m { initial A  state A {}  final Done success {}  from A to Done on Go }", "m"
+    "event Go {} machine m { initial A  state A {}  final Done success {}  from A to Done on Go }", "m"
 )
 store = SqliteStore(":memory:")
 runner = DurableRunner(store, {defn.id: defn}, trace=True)   # opt-in

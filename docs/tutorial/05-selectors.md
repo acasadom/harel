@@ -10,6 +10,11 @@ When a payment is declined, our order should retry a couple of times, then give 
 runs a function and routes on the string it returns:
 
 ```text
+event PlaceOrder {}
+event PaymentAuthorized {}
+event PaymentDeclined {}
+event Deliver {}
+
 machine order {
   initial Cart
   state Cart {}
@@ -54,6 +59,11 @@ the string it returns, and follows the matching branch. A selector function has 
 from harel import definition_from_dsl, DurableRunner, DictStore, Event
 
 SOURCE = """
+event PlaceOrder {}
+event PaymentAuthorized {}
+event PaymentDeclined {}
+event Deliver {}
+
 machine order {
   initial Cart
   state Cart {}

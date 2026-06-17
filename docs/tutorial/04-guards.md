@@ -10,7 +10,9 @@ An event carries data (`Event(kind="PaymentResult", data={...})`), and a guard t
 edges below react to the *same* event, `PaymentResult`, but branch on its `status`:
 
 ```text
+event PlaceOrder {}
 event PaymentResult { status: string  amount: int }
+event Deliver {}
 
 guard authorized = status == "authorized"
 
@@ -57,7 +59,9 @@ check that your guards reference fields that actually exist.
 from harel import definition_from_dsl, DurableRunner, DictStore, Event
 
 SOURCE = """
+event PlaceOrder {}
 event PaymentResult { status: string  amount: int }
+event Deliver {}
 
 guard authorized = status == "authorized"
 
