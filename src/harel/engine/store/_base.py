@@ -41,6 +41,39 @@ end
 return 1
 """
 
+# Postgres fast-path commit as a PL/pgSQL function (shared by the sync + async backends), the
+# analog of `_COMMIT_CAS_LUA`. For a state-only event (no emits/spawns/timers/trace) it does the
+# version-CAS + write (+ dedupe) in ONE server-side round-trip instead of UPDATE + (SELECT/INSERT)
+# + INSERT. Returns true on commit, false on a version conflict (no RAISE, so the txn isn't aborted
+# — the caller rolls back cleanly and raises StoreConflict). Created idempotently in the store's
+# schema setup under a pg_advisory_xact_lock (concurrent worker startup must not collide on the
+# CREATE OR REPLACE). Complex commits still take the multi-statement WATCH-free path.
+_PG_COMMIT_FN = """
+CREATE OR REPLACE FUNCTION harel_commit_cas(p_id text, p_defn text, p_data text, p_old bigint, p_event text)
+RETURNS boolean AS $$
+DECLARE n int; row_exists boolean;
+BEGIN
+  UPDATE executions SET data = p_data, version = p_old + 1 WHERE id = p_id AND version = p_old;
+  GET DIAGNOSTICS n = ROW_COUNT;
+  IF n = 0 THEN
+    SELECT EXISTS (SELECT 1 FROM executions WHERE id = p_id) INTO row_exists;
+    IF p_old = 0 AND NOT row_exists THEN
+      INSERT INTO executions (id, definition_id, data, version) VALUES (p_id, p_defn, p_data, 1);
+    ELSE
+      RETURN false;
+    END IF;
+  END IF;
+  IF p_event <> '' THEN
+    INSERT INTO processed_events (execution_id, event_id) VALUES (p_id, p_event) ON CONFLICT DO NOTHING;
+  END IF;
+  RETURN true;
+END; $$ LANGUAGE plpgsql;
+"""
+
+# one advisory-lock key for all harel schema setup (tables + functions), so concurrent
+# connections opening at once serialize their CREATE OR REPLACE FUNCTION (avoids pg_proc clashes).
+_PG_SCHEMA_LOCK = 7723019
+
 
 def _encode_offset(offset: int) -> str:
     """An opaque pagination cursor over an integer offset (the SQL/Mongo/Dict backends)."""

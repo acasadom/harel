@@ -138,8 +138,12 @@ FUNCTION`):
 | 8 | ~810 | 1926 | ~2.4× |
 
 So Postgres had the *same* shape of problem as Redis — not saturation (it has huge headroom), but
-per-event round-trips — and the stored-procedure fold is the same medicine as Lua. (`commit`'s fast
-path folds too; see below.)
+per-event round-trips — and the stored-procedure fold is the same medicine as Lua. The store
+**`commit` fast path** (state-only events) folds the same way — version-CAS + write + dedupe in one
+`harel_commit_cas` round-trip instead of UPDATE + (SELECT/INSERT) + INSERT — adding a smaller bump on
+top (1w 1196→1243, 8w 1926→1950); the commit was only ~2 statements, so the big win was the
+transport. Complex commits keep the multi-statement path. The ~4–8-worker plateau is host CPU
+(8 workers on one laptop), not Postgres (which is barely loaded).
 
 ---
 
