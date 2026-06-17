@@ -7,6 +7,7 @@ from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.store._base import (
+    _COMMIT_CAS_LUA,
     DEFAULT_TRACE_MAX,
     OutboxEntry,
     SpawnEntry,
@@ -26,17 +27,21 @@ class RedisStore:
 
     Keys (under `prefix`): ``exe:{id}`` = the Execution JSON; ``outbox`` = a hash
     {seq -> emit}; ``outbox:seq`` = the monotonic counter; ``processed:{id}`` = a
-    set of handled event ids. `commit` is atomic via WATCH/MULTI/EXEC on the
-    Execution key (no Lua, so fakeredis supports it): the version CAS is checked
-    under WATCH and the writes go in one EXEC; a concurrent change → `StoreConflict`."""
+    set of handled event ids. `commit` is atomic: a state-only event (no emits/
+    spawns/timers/trace) takes the fast path — version-CAS + SET (+ dedupe) in ONE
+    atomic Lua round-trip; a complex commit takes WATCH/MULTI/EXEC on the Execution
+    key. Either way a concurrent change → `StoreConflict` (the Lua needs `lupa` under
+    fakeredis)."""
 
     def __init__(self, client: Any, prefix: str = "stm") -> None:
-        from redis.exceptions import WatchError
+        from redis.exceptions import ResponseError, WatchError
 
         self._r = client
         self._prefix = prefix
         self._WatchError = WatchError
+        self._ResponseError = ResponseError
         self.trace_max = DEFAULT_TRACE_MAX
+        self._commit_cas_script = client.register_script(_COMMIT_CAS_LUA)
 
     @classmethod
     def from_url(cls, url: str, prefix: str = "stm") -> "RedisStore":
@@ -90,6 +95,11 @@ class RedisStore:
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,
     ) -> None:
+        # fast path: an event that only advances state (no emits/spawns/timers/trace) commits
+        # in ONE atomic round-trip — version-CAS + SET + optional dedupe — instead of WATCH/MULTI.
+        if not emits and not spawns and not timers and trace is None:
+            self._commit_cas(exe, processed_event_id)
+            return
         # allocate monotonic outbox seqs up front (INCR can't return its value
         # inside MULTI; a seq wasted by an aborted txn is harmless)
         queued = [(int(self._r.incr(self._k("outbox:seq"))), t, e.model_dump_json()) for t, e in emits]
@@ -137,6 +147,25 @@ class RedisStore:
             except self._WatchError:
                 exe.version = old  # a concurrent writer won between WATCH and EXEC
                 raise StoreConflict(exe.id, expected=old, found=None)
+
+    def _commit_cas(self, exe: Execution, processed_event_id: Optional[str]) -> None:
+        """The fast-path commit: version-CAS + SET (+ dedupe) in one atomic Lua round-trip."""
+        key = self._k(f"exe:{exe.id}")
+        old = exe.version
+        exe.version = old + 1
+        try:
+            self._commit_cas_script(
+                keys=[key, self._k(f"processed:{exe.id}")],
+                args=[exe.model_dump_json(), old, processed_event_id or ""],
+            )
+        except self._ResponseError as exc:
+            exe.version = old
+            msg = str(exc)
+            if "STM_CONFLICT" in msg:
+                tail = msg.split("STM_CONFLICT:")[-1].strip()
+                found = int(tail) if tail.lstrip("-").isdigit() else None
+                raise StoreConflict(exe.id, expected=old, found=found) from None
+            raise
 
     def is_processed(self, execution_id: str, event_id: str) -> bool:
         return bool(self._r.sismember(self._k(f"processed:{execution_id}"), event_id))
