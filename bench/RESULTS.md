@@ -73,6 +73,34 @@ reaches ~3.2k ev/s. A ceiling still appears at ~4–8 workers — but now it is 
 (the store's per-event commit + the global outbox sequence), not the claim. (Measured on one laptop;
 the per-worker split stays even, so it is genuinely balanced.)
 
+**Redis — fewer round-trips per event** (the follow-on to the atomic claim). Measured, a single
+worker was **CPU-bound** (CPU/wall ≈ 0.99 at concurrency ≥ 16) doing **~21 Redis ops/event** — *not*
+server-bound (Redis sat at a few % of one core). The cost was the worker's own event-loop work
+**issuing/awaiting ~13 round-trips/event**. Two cuts, no change to the commit/CAS path:
+
+- **`ack` → atomic Lua**: `GET`+`LPOP`+`LLEN`+`ZADD`/`ZREM`+`DEL` (5 round-trips) folded into one
+  `EVALSHA` (the ops still run, but server-side in one round-trip; also closes the lock-expires-mid-
+  ack window).
+- **relay guard**: the per-event outbox relay did `HGETALL outbox` + `HGETALL spawns` *every* event
+  (2 round-trips, and O(N) to deserialize as the outbox grows). Most events emit nothing, so the
+  driver now skips the relay unless the commit actually enqueued an emit/spawn — eliminating both
+  `HGETALL`s on the common path (orphan recovery is unchanged: the idle loop never flushed either,
+  and `recover()` covers startup).
+
+~13 round-trips/event → ~7. Redis-side op count barely moves (the ack ops moved inside the Lua), but
+the worker does ~6 fewer awaits/event, and it was CPU-bound on exactly that:
+
+| workers | atomic-claim only | + ack-Lua + relay-guard | vs v0.1.1 baseline |
+|---:|---:|---:|---:|
+| 1 | 1401 | 2359 | 2.82× |
+| 2 | 2554 | 4071 | — |
+| 4 | 3174 | 5133 | 3.70× |
+| 8 | 3161 | 5343 | 3.77× |
+
+The remaining round-trips are dominated by the **commit** (`INCR` + `WATCH` + `GET` + `MULTI/EXEC` ≈
+4), the next lever (fold into one atomic Lua script — now feasible since `lupa` lets fakeredis run
+Lua). The ~4–8-worker plateau on this laptop is still **host CPU** (8 CPU-bound workers), not Redis.
+
 **Postgres — before vs after the claim fix** (backlog ~2–2.5k execs):
 
 The original `claim` took a global `pg_advisory_xact_lock`, serializing every claim → flat,

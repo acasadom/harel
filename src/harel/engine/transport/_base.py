@@ -48,6 +48,31 @@ end
 return nil
 """
 
+# The Redis `ack`, server-side and atomic (shared by the sync + async backends). Fences on
+# the lock token (only the current holder mutates), pops the delivered head, re-readies the
+# group if more remain (else drops it from `ready`), and frees the lock — in ONE round-trip
+# instead of GET+LPOP+LLEN+ZADD/ZREM+DEL (~5). Atomicity also closes the lock-expires-mid-ack
+# window the multi-command version had. KEYS[1]=ready zset; ARGV = prefix, group, token.
+_ACK_LUA = """
+local ready = KEYS[1]
+local prefix = ARGV[1]
+local g = ARGV[2]
+local token = ARGV[3]
+local lockkey = prefix .. ':lock:' .. g
+if redis.call('GET', lockkey) ~= token then
+  return 0
+end
+local qkey = prefix .. ':q:' .. g
+redis.call('LPOP', qkey)
+if redis.call('LLEN', qkey) == 0 then
+  redis.call('ZREM', ready, g)
+else
+  redis.call('ZADD', ready, 0, g)
+end
+redis.call('DEL', lockkey)
+return 1
+"""
+
 
 @dataclass
 class Lease:

@@ -70,7 +70,10 @@ class AsyncDriver:
     # --- core --------------------------------------------------------------
     async def _run(
         self, exe: Execution, gen, event_id: Optional[str] = None, event: Optional[Event] = None
-    ) -> None:
+    ) -> bool:
+        """Drive the engine's effects for one event and commit. Returns whether the commit
+        enqueued anything for the relay (outbox emits or child spawns), so the caller can skip
+        the relay round-trips when there is nothing to deliver."""
         from_path = exe.active_path
         emits, timer_ops, spawns, actions = await self._drive(exe, gen)
         step = _trace_step(event, from_path, exe, actions, self._clock()) if self._trace_enabled else None
@@ -82,6 +85,7 @@ class AsyncDriver:
             spawns=tuple(spawns),
             trace=step,
         )
+        return bool(emits or spawns)
 
     async def _call_action(self, fn, proxy, event, inputs: dict):
         """Run a user action. Coroutine actions are awaited; sync actions go to the default

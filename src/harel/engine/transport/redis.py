@@ -6,7 +6,7 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 
-from harel.engine.transport._base import _CLAIM_LUA, Lease
+from harel.engine.transport._base import _ACK_LUA, _CLAIM_LUA, Lease
 from harel.spec.states import Event
 
 
@@ -49,6 +49,7 @@ class RedisTransport:
         self._prefix = prefix
         self._clock = clock  # injectable so the ready-score clock is deterministic in tests
         self._claim_script = client.register_script(_CLAIM_LUA)  # atomic server-side claim
+        self._ack_script = client.register_script(_ACK_LUA)  # atomic server-side ack
 
     @classmethod
     def from_url(cls, url: str, prefix: str = "stm") -> "RedisTransport":
@@ -104,15 +105,9 @@ class RedisTransport:
         return self._decode(self._r.get(self._k_lock(group_id))) == token
 
     def ack(self, lease: Lease) -> None:
-        # fencing: only the current lock holder removes the head + frees the group
-        if not self._owns(lease.group_id, lease.token):
-            return
-        self._r.lpop(self._k_q(lease.group_id))
-        if self._r.llen(self._k_q(lease.group_id)) == 0:
-            self._r.zrem(self._k_ready(), lease.group_id)
-        else:
-            self._r.zadd(self._k_ready(), {lease.group_id: 0})  # next message claimable now (FIFO)
-        self._r.delete(self._k_lock(lease.group_id))
+        # one atomic round-trip: fence on the token, pop the head, re-ready or drop, free the lock
+        # (replaces GET+LPOP+LLEN+ZADD/ZREM+DEL and closes the lock-expires-mid-ack window)
+        self._ack_script(keys=[self._k_ready()], args=[self._prefix, lease.group_id, lease.token])
 
     def nack(self, lease: Lease, delay: float = 0.0) -> None:
         if not self._owns(lease.group_id, lease.token):

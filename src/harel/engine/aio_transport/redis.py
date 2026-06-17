@@ -6,7 +6,7 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 
-from harel.engine.transport import _CLAIM_LUA, Lease
+from harel.engine.transport import _ACK_LUA, _CLAIM_LUA, Lease
 from harel.spec.states import Event
 
 
@@ -26,6 +26,7 @@ class AsyncRedisTransport:
         self._prefix = prefix
         self._clock = clock
         self._claim_script = client.register_script(_CLAIM_LUA)
+        self._ack_script = client.register_script(_ACK_LUA)
 
     @classmethod
     def from_url(cls, url: str, prefix: str = "stm") -> "AsyncRedisTransport":
@@ -76,14 +77,8 @@ class AsyncRedisTransport:
         return self._decode(await self._r.get(self._k_lock(group_id))) == token
 
     async def ack(self, lease: Lease) -> None:
-        if not await self._owns(lease.group_id, lease.token):
-            return
-        await self._r.lpop(self._k_q(lease.group_id))
-        if await self._r.llen(self._k_q(lease.group_id)) == 0:
-            await self._r.zrem(self._k_ready(), lease.group_id)
-        else:
-            await self._r.zadd(self._k_ready(), {lease.group_id: 0})
-        await self._r.delete(self._k_lock(lease.group_id))
+        # one atomic round-trip: fence on the token, pop the head, re-ready or drop, free the lock
+        await self._ack_script(keys=[self._k_ready()], args=[self._prefix, lease.group_id, lease.token])
 
     async def nack(self, lease: Lease, delay: float = 0.0) -> None:
         if not await self._owns(lease.group_id, lease.token):
