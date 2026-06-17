@@ -121,7 +121,29 @@ Mongo's per-op latency dominates more, and `ack` stays ~4 round-trips (a two-col
 can't be made atomic without a replica-set transaction). Remaining ceiling: Mongo per-op latency +
 host CPU. (`commit` is already one atomic `update_one` with a `{_id, version}` CAS filter.)
 
-**Postgres — before vs after the claim fix** (backlog ~2–2.5k execs):
+**Postgres — PL/pgSQL stored functions** (the Postgres analog of the Redis Lua scripts). The PG
+claim was already race-free (`UPDATE … WHERE … FOR UPDATE SKIP LOCKED`), so this was never a claim
+race — but the worker was **round-trip-bound**, not server-bound. The diagnostic: `synchronous_commit
+= off` *did not help* (830 vs 760 ev/s) → **not fsync-bound**; CPU/wall ≈ 0.3 at c=1 (mostly awaiting
+PG) with ~7 statements/event across claim (2) + commit (2) + ack (3). Folding `claim` and `ack` into
+one server-side `plpgsql` function each (one round-trip per op, `harel_claim`/`harel_ack`, created
+under a `pg_advisory_xact_lock` so concurrent worker startup doesn't collide on `CREATE OR REPLACE
+FUNCTION`):
+
+| workers | old (multi-statement) | new (PL/pgSQL claim+ack) | speedup |
+|---:|---:|---:|---:|
+| 1 | 338 | 1196 | 3.5× |
+| 2 | 553 | 1388 | 2.5× |
+| 4 | 810 | 1778 | 2.2× |
+| 8 | ~810 | 1926 | ~2.4× |
+
+So Postgres had the *same* shape of problem as Redis — not saturation (it has huge headroom), but
+per-event round-trips — and the stored-procedure fold is the same medicine as Lua. (`commit`'s fast
+path folds too; see below.)
+
+---
+
+**Postgres — the earlier claim mechanism** (historical, backlog ~2–2.5k execs):
 
 The original `claim` took a global `pg_advisory_xact_lock`, serializing every claim → flat,
 no worker scaling. It was replaced with a per-group row claimed via `FOR UPDATE SKIP LOCKED`

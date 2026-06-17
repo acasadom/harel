@@ -73,6 +73,44 @@ redis.call('DEL', lockkey)
 return 1
 """
 
+# Postgres `claim`/`ack` as PL/pgSQL functions (shared by the sync + async backends). The
+# diagnostic showed the PG worker is round-trip-bound (NOT fsync-bound — `synchronous_commit=off`
+# didn't help), with ~7 statements/event across the ops. Folding each op's statements into one
+# server-side function call is the Postgres analog of the Redis Lua scripts: `claim` (UPDATE-lease
+# + SELECT-head + stale-empty cleanup) and `ack` (fence + DELETE + free-lock) each become ONE
+# round-trip. Created idempotently in the transport's schema setup. The lease itself was already
+# atomic (FOR UPDATE SKIP LOCKED), so this is about round-trips, not a claim race.
+_PG_CLAIM_FN = """
+CREATE OR REPLACE FUNCTION harel_claim(p_now double precision, p_lease double precision, p_token text)
+RETURNS TABLE(group_id text, seq bigint, event text) AS $$
+DECLARE g text;
+BEGIN
+  LOOP
+    UPDATE transport_groups tg SET locked_by = p_token, lock_expiry = p_lease
+    WHERE tg.group_id = (
+      SELECT s.group_id FROM transport_groups s
+      WHERE s.locked_by IS NULL OR s.lock_expiry < p_now
+      ORDER BY s.group_id FOR UPDATE SKIP LOCKED LIMIT 1
+    ) RETURNING tg.group_id INTO g;
+    IF g IS NULL THEN RETURN; END IF;
+    RETURN QUERY SELECT m.group_id, m.seq, m.event FROM transport_messages m
+                 WHERE m.group_id = g ORDER BY m.seq LIMIT 1;
+    IF FOUND THEN RETURN; END IF;
+    DELETE FROM transport_groups WHERE transport_groups.group_id = g AND locked_by = p_token;
+  END LOOP;
+END; $$ LANGUAGE plpgsql;
+"""
+_PG_ACK_FN = """
+CREATE OR REPLACE FUNCTION harel_ack(p_group text, p_seq bigint, p_token text) RETURNS void AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM transport_groups WHERE group_id = p_group AND locked_by = p_token) THEN
+    DELETE FROM transport_messages WHERE seq = p_seq;
+    UPDATE transport_groups SET locked_by = NULL, lock_expiry = NULL
+    WHERE group_id = p_group AND locked_by = p_token;
+  END IF;
+END; $$ LANGUAGE plpgsql;
+"""
+
 
 @dataclass
 class Lease:

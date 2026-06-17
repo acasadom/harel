@@ -6,7 +6,7 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 
-from harel.engine.transport import Lease
+from harel.engine.transport import _PG_ACK_FN, _PG_CLAIM_FN, Lease
 from harel.spec.states import Event
 
 
@@ -33,6 +33,9 @@ class AsyncPostgresTransport:
         await pool.open()
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
+                # serialize concurrent schema setup: `CREATE OR REPLACE FUNCTION` rewrites pg_proc
+                # and several workers opening at once would collide ("tuple concurrently updated")
+                await cur.execute("SELECT pg_advisory_xact_lock(7723019)")
                 await cur.execute(
                     "CREATE TABLE IF NOT EXISTS transport_messages "
                     "(seq BIGSERIAL PRIMARY KEY, group_id TEXT NOT NULL, event TEXT NOT NULL)"
@@ -47,6 +50,8 @@ class AsyncPostgresTransport:
                 await cur.execute(
                     "CREATE INDEX IF NOT EXISTS transport_groups_claimable ON transport_groups (lock_expiry)"
                 )
+                await cur.execute(_PG_CLAIM_FN)  # server-side claim (one round-trip)
+                await cur.execute(_PG_ACK_FN)  # server-side ack (one round-trip)
             await conn.commit()
         return cls(pool, prefix, clock)
 
@@ -66,57 +71,30 @@ class AsyncPostgresTransport:
 
     async def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
         now = self._clock()
+        token = f"{worker_id}:{uuid.uuid4().hex}"
+        # one round-trip: the function leases the lowest claimable group (FOR UPDATE SKIP LOCKED,
+        # already race-free), drops stale empty groups, and returns its head — all server-side.
         async with self._pool.connection() as conn:
             try:
                 async with conn.cursor() as cur:
-                    while True:
-                        token = f"{worker_id}:{uuid.uuid4().hex}"
-                        # FOR UPDATE SKIP LOCKED: a concurrent claimer skips this group's row and
-                        # leases a different group — parallel claims, no global serialization
-                        await cur.execute(
-                            "UPDATE transport_groups SET locked_by = %s, lock_expiry = %s WHERE group_id = ("
-                            "  SELECT group_id FROM transport_groups "
-                            "  WHERE locked_by IS NULL OR lock_expiry < %s "
-                            "  ORDER BY group_id FOR UPDATE SKIP LOCKED LIMIT 1"
-                            ") RETURNING group_id",
-                            (token, now + visibility, now),
-                        )
-                        grow = await cur.fetchone()
-                        if grow is None:
-                            await conn.commit()
-                            return None
-                        group_id = grow[0]
-                        await cur.execute(
-                            "SELECT seq, event FROM transport_messages WHERE group_id = %s ORDER BY seq LIMIT 1",
-                            (group_id,),
-                        )
-                        head = await cur.fetchone()
-                        if head is None:
-                            await cur.execute(
-                                "DELETE FROM transport_groups WHERE group_id = %s AND locked_by = %s",
-                                (group_id, token),
-                            )
-                            continue
-                        await conn.commit()
-                        return Lease(head[0], group_id, Event.model_validate_json(head[1]), token=token)
+                    await cur.execute(
+                        "SELECT group_id, seq, event FROM harel_claim(%s, %s, %s)",
+                        (now, now + visibility, token),
+                    )
+                    row = await cur.fetchone()
+                await conn.commit()
             except Exception:
                 await conn.rollback()
                 raise
+        if row is None:
+            return None
+        return Lease(row[1], row[0], Event.model_validate_json(row[2]), token=token)
 
     async def ack(self, lease: Lease) -> None:
+        # one round-trip: the function fences on the token, deletes the head, frees the lock
         async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT 1 FROM transport_groups WHERE group_id = %s AND locked_by = %s",
-                    (lease.group_id, lease.token),
-                )
-                if await cur.fetchone() is not None:
-                    await cur.execute("DELETE FROM transport_messages WHERE seq = %s", (lease.seq,))
-                    await cur.execute(
-                        "UPDATE transport_groups SET locked_by = NULL, lock_expiry = NULL "
-                        "WHERE group_id = %s AND locked_by = %s",
-                        (lease.group_id, lease.token),
-                    )
+                await cur.execute("SELECT harel_ack(%s, %s, %s)", (lease.group_id, lease.seq, lease.token))
             await conn.commit()
 
     async def nack(self, lease: Lease, delay: float = 0.0) -> None:

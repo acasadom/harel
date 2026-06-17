@@ -6,7 +6,7 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 
-from harel.engine.transport._base import Lease
+from harel.engine.transport._base import _PG_ACK_FN, _PG_CLAIM_FN, Lease
 from harel.spec.states import Event
 
 
@@ -32,6 +32,9 @@ class PostgresTransport:
         self._conn = conn
         self._clock = clock
         with conn.cursor() as cur:
+            # serialize concurrent schema setup: `CREATE OR REPLACE FUNCTION` rewrites pg_proc and
+            # several connections opening at once would collide ("tuple concurrently updated")
+            cur.execute("SELECT pg_advisory_xact_lock(7723019)")
             cur.execute(
                 "CREATE TABLE IF NOT EXISTS transport_messages "
                 "(seq BIGSERIAL PRIMARY KEY, group_id TEXT NOT NULL, event TEXT NOT NULL)"
@@ -46,6 +49,8 @@ class PostgresTransport:
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS transport_groups_claimable ON transport_groups (lock_expiry)"
             )
+            cur.execute(_PG_CLAIM_FN)  # server-side claim (one round-trip)
+            cur.execute(_PG_ACK_FN)  # server-side ack (one round-trip)
         conn.commit()
 
     @classmethod
@@ -80,57 +85,28 @@ class PostgresTransport:
 
     def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
         now = self._clock()
+        token = f"{worker_id}:{uuid.uuid4().hex}"
+        # one round-trip: the function leases the lowest claimable group (FOR UPDATE SKIP LOCKED,
+        # already race-free), drops stale empty groups, and returns its head — all server-side.
         try:
             with self._conn.cursor() as cur:
-                while True:
-                    token = f"{worker_id}:{uuid.uuid4().hex}"
-                    # lease one claimable group; FOR UPDATE SKIP LOCKED locks that group row so a
-                    # concurrent claimer skips it and takes a different group (parallel, no global lock)
-                    cur.execute(
-                        "UPDATE transport_groups SET locked_by = %s, lock_expiry = %s WHERE group_id = ("
-                        "  SELECT group_id FROM transport_groups "
-                        "  WHERE locked_by IS NULL OR lock_expiry < %s "
-                        "  ORDER BY group_id FOR UPDATE SKIP LOCKED LIMIT 1"
-                        ") RETURNING group_id",
-                        (token, now + visibility, now),
-                    )
-                    grow = cur.fetchone()
-                    if grow is None:
-                        self._conn.commit()
-                        return None
-                    group_id = grow[0]
-                    cur.execute(
-                        "SELECT seq, event FROM transport_messages WHERE group_id = %s ORDER BY seq LIMIT 1",
-                        (group_id,),
-                    )
-                    head = cur.fetchone()
-                    if head is None:
-                        # drained group (last message already acked): drop its row and keep looking
-                        cur.execute(
-                            "DELETE FROM transport_groups WHERE group_id = %s AND locked_by = %s",
-                            (group_id, token),
-                        )
-                        continue
-                    self._conn.commit()
-                    return Lease(head[0], group_id, Event.model_validate_json(head[1]), token=token)
+                cur.execute(
+                    "SELECT group_id, seq, event FROM harel_claim(%s, %s, %s)",
+                    (now, now + visibility, token),
+                )
+                row = cur.fetchone()
+            self._conn.commit()
         except Exception:
             self._conn.rollback()
             raise
+        if row is None:
+            return None
+        return Lease(row[1], row[0], Event.model_validate_json(row[2]), token=token)
 
     def ack(self, lease: Lease) -> None:
+        # one round-trip: the function fences on the token, deletes the head, frees the lock
         with self._conn.cursor() as cur:
-            # fence: only the current lease holder removes the head + frees the group
-            cur.execute(
-                "SELECT 1 FROM transport_groups WHERE group_id = %s AND locked_by = %s",
-                (lease.group_id, lease.token),
-            )
-            if cur.fetchone() is not None:
-                cur.execute("DELETE FROM transport_messages WHERE seq = %s", (lease.seq,))
-                cur.execute(
-                    "UPDATE transport_groups SET locked_by = NULL, lock_expiry = NULL "
-                    "WHERE group_id = %s AND locked_by = %s",
-                    (lease.group_id, lease.token),
-                )
+            cur.execute("SELECT harel_ack(%s, %s, %s)", (lease.group_id, lease.seq, lease.token))
         self._conn.commit()
 
     def nack(self, lease: Lease, delay: float = 0.0) -> None:
