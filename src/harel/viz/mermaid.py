@@ -74,13 +74,33 @@ def _desc_parts(node: Node) -> list[str]:
     return parts
 
 
+# `field__op` suffix -> a readable operator for the diagram label.
+_PRED_OPS = {"eq": "==", "ne": "!=", "lt": "<", "le": "<=", "gt": ">", "ge": ">=", "in": "in"}
+
+
+def _fmt_predicates(predicates: dict) -> str:
+    """Render flat ``field__op`` predicates as a Mermaid-safe label.
+
+    Uses square brackets, NOT ``{}`` — curly braces open a composite-state block, so a
+    ``{...}`` transition label is a syntax error in ``stateDiagram-v2``. String values are
+    single-quoted (so an empty string shows as ``''`` rather than a dangling operator)."""
+    parts: list[str] = []
+    for key, value in predicates.items():
+        field, sep, op = key.rpartition("__")
+        opsym = _PRED_OPS.get(op, op) if sep else "=="
+        if not sep:
+            field = key
+        shown = f"'{value}'" if isinstance(value, str) else str(value)
+        parts.append(f"{field} {opsym} {shown}")
+    return "[" + ", ".join(parts) + "]"
+
+
 def _filter_text(ef: Optional[EventFilter]) -> Optional[str]:
     """A transition label from its event filter (``None`` for an automatic edge)."""
     if ef is None:
         return None
     if ef.predicates:
-        data = str(ef.predicates).replace("'", "").replace(": ", "=")
-        return f"{ef.kind}<br/>{data}"
+        return f"{ef.kind}<br/>{_fmt_predicates(ef.predicates)}"
     return ef.kind
 
 
