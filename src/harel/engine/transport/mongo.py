@@ -20,26 +20,22 @@ class MongoTransport:
     - ``{prefix}_locks`` — one document per group that has messages, the
       **ready-index + lock in one**: `available_at` is the epoch at which the
       group is next claimable (0 = now), and `token` is the current lease (for
-      fencing). `claim` reads only the few lowest `available_at <= now` groups
-      (`find(...).sort(available_at).limit(K)`), so its cost is O(log N + K) in the
-      number of *active groups* — NOT a `$group` aggregation over every message (the
-      old design, which scanned the whole `messages` collection on each claim and
-      collapsed under a backlog). Leasing bumps `available_at` to `now + visibility`,
-      so concurrent claimers skip the group AND it reappears on its own once the
-      lease expires (crash recovery, no separate sweep).
+      fencing). `claim` leases the lowest-`available_at <= now` group in ONE atomic
+      `find_one_and_update` (`sort=available_at`), so its cost is O(log N) in the number
+      of *active groups* — NOT a `$group` aggregation over every message (the old design,
+      which scanned the whole `messages` collection on each claim and collapsed under a
+      backlog). Leasing bumps `available_at` to `now + visibility`, so concurrent claimers
+      each get a DISTINCT group (no lost-lease races) AND a group reappears on its own
+      once the lease expires (crash recovery, no separate sweep).
 
-    `claim` atomically leases the group (a `find_one_and_update` whose filter still
-    requires `available_at <= now`, so only one worker wins the race) and returns its
-    head without removing it; `ack` (lock still owned) deletes the head and re-readies
-    the group (`available_at=0`) or drops it if empty; `nack` re-readies now, or parks
-    it for `delay`. The client is injected (duck-typed), so `pymongo` is an optional
-    extra and tests use mongomock. NOTE: like the other lease backends, a lock that
-    expires mid-ack can let two workers touch one group; the store's version/CAS is the
-    backstop."""
-
-    # how many lowest-`available_at` due groups `claim` considers per call — bounds the
-    # work so it never scales with the total number of active groups.
-    _CANDIDATES = 8
+    `claim`'s single sorted `find_one_and_update` picks-and-leases the head group
+    atomically (server-side; replaced a `find().sort().limit(K)`-then-loop where workers
+    raced for the same candidate window) and returns its head without removing it; `ack`
+    (lock still owned) deletes the head and re-readies the group (`available_at=0`) or
+    drops it if empty; `nack` re-readies now, or parks it for `delay`. The client is
+    injected (duck-typed), so `pymongo` is an optional extra and tests use mongomock.
+    NOTE: like the other lease backends, a lock that expires mid-ack can let two workers
+    touch one group; the store's version/CAS is the backstop."""
 
     def __init__(
         self, client: Any, db_name: str = "harel", prefix: str = "stm", clock: Callable[[], float] = time.time
@@ -94,27 +90,26 @@ class MongoTransport:
 
     def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
         now = self._clock()
-        # only the few lowest-`available_at` groups due now — O(log N + K), not a scan
-        candidates = (
-            self._locks.find({"available_at": {"$lte": now}}).sort("available_at", 1).limit(self._CANDIDATES)
-        )
-        for c in list(candidates):
-            group_id = c["_id"]
+        while True:
             token = f"{worker_id}:{uuid.uuid4().hex}"
-            # atomic lease: re-check `available_at <= now` in the filter so only one worker
-            # wins; the loser's filter no longer matches once the winner bumps it out.
+            # ONE atomic op: find the lowest-`available_at` due group AND lease it (sort +
+            # find_one_and_update). Concurrent claimers each get a DISTINCT group — the update
+            # bumps `available_at` out of range, so no two race for the same head (no lost
+            # leases). Replaces a find()-then-loop-of-find_one_and_update where workers fished
+            # the same candidate window and burned round-trips on lost leases.
             leased = self._locks.find_one_and_update(
-                {"_id": group_id, "available_at": {"$lte": now}},
+                {"available_at": {"$lte": now}},
                 {"$set": {"token": token, "available_at": now + visibility}},
+                sort=[("available_at", 1)],
             )
             if leased is None:
-                continue  # another worker leased it first
+                return None  # nothing due
+            group_id = leased["_id"]
             head = self._msgs.find_one({"group_id": group_id}, sort=[("_id", 1)])
             if head is None:
-                self._locks.delete_one({"_id": group_id, "token": token})  # stale group, release
+                self._locks.delete_one({"_id": group_id, "token": token})  # stale empty group
                 continue
             return Lease(head["_id"], group_id, Event.model_validate_json(head["event"]), token=token)
-        return None
 
     def _owns(self, group_id: str, token: str) -> bool:
         doc = self._locks.find_one({"_id": group_id})

@@ -110,6 +110,17 @@ The worker-side per-event waste (claim races, ack round-trips, relay polling, th
 gone; what remains is the engine's own per-event CPU (≈minimal) and, only far above this, Redis's
 single-thread op throughput — the regime where Valkey (multi-threaded I/O) or sharding finally pay.
 
+**Mongo — atomic claim** (the same lost-lease race as old Redis). The claim did a
+`find().sort().limit(K)` then a loop of `find_one_and_update` per candidate — all workers fished
+the same window and raced for the lease. Measured, the `find_one_and_update`→None (lost-lease)
+rate climbed `0% → 18% (4w) → 38% (8w)` and throughput regressed past 4 workers. Fix: lease the
+lowest-`available_at` group in ONE sorted `find_one_and_update` (server-side pick-and-lease), so
+concurrent claimers get distinct groups — lost-lease **38% → 0.8%**. Real-Mongo multiprocess bench
+(2000 execs): 1w 660→750, 4w 1147→1560, 8w 1238→**1655** (**1.34×**). Smaller than Redis's win —
+Mongo's per-op latency dominates more, and `ack` stays ~4 round-trips (a two-collection op that
+can't be made atomic without a replica-set transaction). Remaining ceiling: Mongo per-op latency +
+host CPU. (`commit` is already one atomic `update_one` with a `{_id, version}` CAS filter.)
+
 **Postgres — before vs after the claim fix** (backlog ~2–2.5k execs):
 
 The original `claim` took a global `pg_advisory_xact_lock`, serializing every claim → flat,
