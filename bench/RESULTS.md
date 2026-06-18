@@ -364,27 +364,34 @@ numbers above:
 - **B — workflow-per-event**: one durable workflow per event running a transaction that advances
   the row. The "durable transition" floor.
 
-| | events/s (single process) |
-|---|---:|
-| **harel-on-Postgres, 1 worker** | **1205** |
-| **harel-on-Postgres, 8 workers** | **2057** |
-| DBOS — A (workflow + send/recv) | 388 |
-| DBOS — B (workflow-per-event) | 234 |
+Measured **symmetrically** — the timed window for *both* is **enqueue + process** (executions/
+workflows created in setup, not timed; then time enqueuing all `2N` events *and* processing them).
+Single process, same Postgres + laptop:
 
-On the same hardware, harel sustains **~3× DBOS** for this simple event-driven FSM (single process),
-and the gap is structural: DBOS does full durable-**workflow** bookkeeping per event (workflow-status
-rows, recovery tracking, the queue/notification machinery, `SERIALIZABLE` transactions) — the right
-machinery for arbitrary imperative durable code, but heavy for a trivial state transition. harel's
-per-event path is a lean claim → load → commit(CAS) → ack. **This is the statechart-vs-workflow
-distinction, with a number**: for a domain that *is* a state machine, the statechart engine's
-per-event model is lighter; for imperative "run these steps with retries" work, DBOS's model is the
-right fit — different jobs.
+| | events/s (single process, enqueue + process) |
+|---|---:|
+| **harel-on-Postgres** | **795** |
+| DBOS — A (durable workflow + send/recv) | 388 |
+| DBOS — B (durable workflow per event) | 234 |
+
+(harel's *drain-only* rate — enqueue excluded, the way `bench_workers.py` measures it — is ~1205
+single-worker and ~2050 at 8 workers; here it's the lower end-to-end figure so it lines up with how
+DBOS is measured.)
+
+On the same hardware, measured the same way, harel sustains **~2× DBOS** for this simple event-driven
+FSM, and the gap is structural: DBOS does full durable-**workflow** bookkeeping per event (workflow-
+status rows, recovery tracking, the queue/notification machinery, `SERIALIZABLE` transactions) — the
+right machinery for arbitrary imperative durable code, but heavy for a trivial state transition.
+harel's per-event path is a lean claim → load → commit(CAS) → ack. **This is the statechart-vs-
+workflow distinction, with a number**: for a domain that *is* a state machine, the statechart
+engine's per-event model is lighter; for imperative "run these steps with retries" work, DBOS's model
+is the right fit — different jobs.
 
 ```{note}
 Honest caveats: (1) both numbers carry the **laptop + Docker-Desktop** limit from the box at the top
-— so read the **ratio**, not the absolutes (it's the same handicap for both). (2) harel's figure is
-*drain-only* (the enqueue/publish is unmeasured setup), while DBOS-A's window *includes* the `send`,
-so harel is somewhat flattered — but ~3× is well beyond that asymmetry. (3) DBOS ran in its default
+— so read the **ratio**, not the absolutes (same handicap for both). (2) It's a *toy* FSM, and the two
+tools do different work — this is illustrative, not a DBOS benchmark. (3) DBOS ran in its default
 single-instance config. (4) DBOS is **not** a harel dependency — `bench/bench_dbos.py` is a throwaway
-that needs `pip install dbos` and a Postgres.
+that needs `pip install dbos` and a Postgres; the harel side is `bench_workers.py` plus a small
+publish+drain-timed variant for the symmetric end-to-end figure.
 ```

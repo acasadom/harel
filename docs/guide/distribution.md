@@ -147,23 +147,24 @@ crashes — but model the problem differently: declarative named states versus i
 ```{warning}
 The figures below are **illustrative only — NOT a fair benchmark of DBOS**, and should not be cited
 as one. They run the same *toy* FSM on the same laptop + Docker Postgres (so both carry the handicap
-above), but the two tools do different work and the harness *favours harel*: its number is drain-only
-while the DBOS one includes enqueuing each event. DBOS ran in its default single-instance config. The
+above), but the two tools do different work. DBOS ran in its default single-instance config. The
 point is the *shape* of the difference, not the ratio. Full caveats and the script
 ([`bench/bench_dbos.py`](https://github.com/acasadom/harel/blob/main/bench/bench_dbos.py)) are in
 [`bench/RESULTS.md`](https://github.com/acasadom/harel/blob/main/bench/RESULTS.md).
 ```
 
-On the toy FSM (`Idle → Working → Done`), single process, same Postgres + laptop:
+On the toy FSM (`Idle → Working → Done`), single process, same Postgres + laptop, measured the
+**same way for both** (timed window = enqueue *and* process every event):
 
 | | events/s |
 |---|---:|
-| harel-on-Postgres (1 worker) | ~1200 |
-| harel-on-Postgres (8 workers) | ~2050 |
+| harel-on-Postgres | ~800 |
 | DBOS — durable workflow + `send`/`recv` | ~390 |
 | DBOS — durable workflow per event | ~230 |
 
-harel comes out ahead here, but **that's the paradigm, not a verdict on DBOS**: DBOS does full
+(harel scales further with more worker processes — ~2050 at 8 workers — but the single-process row is
+the like-for-like one here.) harel comes out ahead, but **that's the paradigm, not a verdict on
+DBOS**: DBOS does full
 durable-*workflow* bookkeeping per event — workflow-status rows, automatic recovery of arbitrary
 imperative code, queues, `SERIALIZABLE` transactions — which is exactly what you want for "run these
 steps, with retries, and survive a crash mid-way", and is overkill for the trivial state transition
