@@ -138,6 +138,39 @@ Run `bench/bench_async.py`, `bench_workers.py`, `bench_shards.py` against your o
 numbers.
 ```
 
+### harel and durable-execution engines (illustrative)
+
+harel is a *statechart* engine; [DBOS](https://www.dbos.dev/), Temporal and friends are
+*durable-execution* / workflow engines. They overlap — both keep long-lived state alive across
+crashes — but model the problem differently: declarative named states versus imperative durable code.
+
+```{warning}
+The figures below are **illustrative only — NOT a fair benchmark of DBOS**, and should not be cited
+as one. They run the same *toy* FSM on the same laptop + Docker Postgres (so both carry the handicap
+above), but the two tools do different work and the harness *favours harel*: its number is drain-only
+while the DBOS one includes enqueuing each event. DBOS ran in its default single-instance config. The
+point is the *shape* of the difference, not the ratio. Full caveats and the script
+([`bench/bench_dbos.py`](https://github.com/acasadom/harel/blob/main/bench/bench_dbos.py)) are in
+[`bench/RESULTS.md`](https://github.com/acasadom/harel/blob/main/bench/RESULTS.md).
+```
+
+On the toy FSM (`Idle → Working → Done`), single process, same Postgres + laptop:
+
+| | events/s |
+|---|---:|
+| harel-on-Postgres (1 worker) | ~1200 |
+| harel-on-Postgres (8 workers) | ~2050 |
+| DBOS — durable workflow + `send`/`recv` | ~390 |
+| DBOS — durable workflow per event | ~230 |
+
+harel comes out ahead here, but **that's the paradigm, not a verdict on DBOS**: DBOS does full
+durable-*workflow* bookkeeping per event — workflow-status rows, automatic recovery of arbitrary
+imperative code, queues, `SERIALIZABLE` transactions — which is exactly what you want for "run these
+steps, with retries, and survive a crash mid-way", and is overkill for the trivial state transition
+this toy does. harel's per-event path is a lean claim → load → commit → ack. So pick by the shape of
+the problem: a **statechart engine** when the domain *is* a machine of named states with hierarchy and
+guards; a **durable-execution engine** when it's imperative code that must survive crashes.
+
 ## Orthogonal & fan-out, distributed
 
 The same machinery carries [orthogonal regions](../tutorial/08-orthogonal) and
