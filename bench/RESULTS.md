@@ -366,7 +366,8 @@ numbers above:
 
 Measured **symmetrically** — the timed window for *both* is **enqueue + process** (executions/
 workflows created in setup, not timed; then time enqueuing all `2N` events *and* processing them).
-Single process, same Postgres + laptop:
+The harel side is `bench_async.py --e2e` (the `--e2e` flag moves the publish into the timed window);
+the DBOS side is `bench_dbos.py`. Single process, same Postgres + laptop (run variance ~±10%):
 
 | | events/s (single process, enqueue + process) |
 |---|---:|
@@ -392,6 +393,7 @@ Honest caveats: (1) both numbers carry the **laptop + Docker-Desktop** limit fro
 — so read the **ratio**, not the absolutes (same handicap for both). (2) It's a *toy* FSM, and the two
 tools do different work — this is illustrative, not a DBOS benchmark. (3) DBOS ran in its default
 single-instance config. (4) DBOS is **not** a harel dependency — `bench/bench_dbos.py` is a throwaway
-that needs `pip install dbos` and a Postgres; the harel side is `bench_workers.py` plus a small
-publish+drain-timed variant for the symmetric end-to-end figure.
+that needs `pip install dbos` and a Postgres; the harel side is reproducible with
+`bench/bench_async.py --e2e` (drain-only is the default; `bench_workers.py` gives the multi-worker
+drain-only numbers).
 ```
