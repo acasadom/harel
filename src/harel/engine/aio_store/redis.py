@@ -7,22 +7,26 @@ from typing import Any, Optional
 
 from harel.engine.execution import Execution
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
-from harel.engine.store._base import DEFAULT_TRACE_MAX
+from harel.engine.store._base import _COMMIT_CAS_LUA, DEFAULT_TRACE_MAX
 from harel.spec.states import Event
 
 
 class AsyncRedisStore:
-    """Async mirror of `RedisStore` over `redis.asyncio`: version-CAS via WATCH/MULTI/EXEC
-    (no Lua, so fakeredis.aioredis works), transactional outbox in a hash, dedupe in a set,
-    timers in a sorted set. The client is injected (duck-typed)."""
+    """Async mirror of `RedisStore` over `redis.asyncio`: a state-only commit takes the
+    fast path (version-CAS + SET + dedupe in one atomic Lua round-trip); a complex commit
+    (emits/spawns/timers/trace) takes WATCH/MULTI/EXEC. Transactional outbox in a hash,
+    dedupe in a set, timers in a sorted set. The client is injected (duck-typed; the Lua
+    fast path needs `lupa` under fakeredis.aioredis)."""
 
     def __init__(self, client: Any, prefix: str = "stm") -> None:
-        from redis.exceptions import WatchError
+        from redis.exceptions import ResponseError, WatchError
 
         self._r = client
         self._prefix = prefix
         self._WatchError = WatchError
+        self._ResponseError = ResponseError
         self.trace_max = DEFAULT_TRACE_MAX
+        self._commit_cas_script = client.register_script(_COMMIT_CAS_LUA)
 
     @classmethod
     def from_url(cls, url: str, prefix: str = "stm") -> "AsyncRedisStore":
@@ -59,6 +63,11 @@ class AsyncRedisStore:
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,
     ) -> None:
+        # fast path: an event that only advances state (no emits/spawns/timers/trace) commits
+        # in ONE atomic round-trip — version-CAS + SET + optional dedupe — instead of WATCH/MULTI.
+        if not emits and not spawns and not timers and trace is None:
+            await self._commit_cas(exe, processed_event_id)
+            return
         queued = [(int(await self._r.incr(self._k("outbox:seq"))), t, e.model_dump_json()) for t, e in emits]
         queued_spawns = [
             (int(await self._r.incr(self._k("spawns:seq"))), cid, rp, ctx) for cid, rp, ctx in spawns
@@ -103,6 +112,25 @@ class AsyncRedisStore:
             except self._WatchError:
                 exe.version = old
                 raise StoreConflict(exe.id, expected=old, found=None)
+
+    async def _commit_cas(self, exe: Execution, processed_event_id: Optional[str]) -> None:
+        """The fast-path commit: version-CAS + SET (+ dedupe) in one atomic Lua round-trip."""
+        key = self._k(f"exe:{exe.id}")
+        old = exe.version
+        exe.version = old + 1
+        try:
+            await self._commit_cas_script(
+                keys=[key, self._k(f"processed:{exe.id}")],
+                args=[exe.model_dump_json(), old, processed_event_id or ""],
+            )
+        except self._ResponseError as exc:
+            exe.version = old
+            msg = str(exc)
+            if "STM_CONFLICT" in msg:
+                tail = msg.split("STM_CONFLICT:")[-1].strip()
+                found = int(tail) if tail.lstrip("-").isdigit() else None
+                raise StoreConflict(exe.id, expected=old, found=found) from None
+            raise
 
     async def is_processed(self, execution_id: str, event_id: str) -> bool:
         return bool(await self._r.sismember(self._k(f"processed:{execution_id}"), event_id))

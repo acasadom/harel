@@ -73,6 +73,43 @@ reaches ~3.2k ev/s. A ceiling still appears at ~4–8 workers — but now it is 
 (the store's per-event commit + the global outbox sequence), not the claim. (Measured on one laptop;
 the per-worker split stays even, so it is genuinely balanced.)
 
+**Redis — fewer round-trips per event** (the follow-on to the atomic claim). Measured, a single
+worker was **CPU-bound** (CPU/wall ≈ 0.99 at concurrency ≥ 16) doing **~21 Redis ops/event** — *not*
+server-bound (Redis sat at a few % of one core). The cost was the worker's own event-loop work
+**issuing/awaiting ~13 round-trips/event**. Two cuts, no change to the commit/CAS path:
+
+- **`ack` → atomic Lua**: `GET`+`LPOP`+`LLEN`+`ZADD`/`ZREM`+`DEL` (5 round-trips) folded into one
+  `EVALSHA` (the ops still run, but server-side in one round-trip; also closes the lock-expires-mid-
+  ack window).
+- **relay guard**: the per-event outbox relay did `HGETALL outbox` + `HGETALL spawns` *every* event
+  (2 round-trips, and O(N) to deserialize as the outbox grows). Most events emit nothing, so the
+  driver now skips the relay unless the commit actually enqueued an emit/spawn — eliminating both
+  `HGETALL`s on the common path (orphan recovery is unchanged: the idle loop never flushed either,
+  and `recover()` covers startup).
+
+~13 round-trips/event → ~7. Redis-side op count barely moves (the ack ops moved inside the Lua), but
+the worker does ~6 fewer awaits/event, and it was CPU-bound on exactly that:
+
+Then the **commit fast-path**: an event that only advances state (no emits/spawns/timers/trace —
+the common case) committed via `WATCH` + `GET` + `MULTI/EXEC` (~3 round-trips). A `_COMMIT_CAS_LUA`
+script does the version-CAS + `SET` (+ dedupe `SADD`) in **one** atomic round-trip (atomicity replaces
+optimistic locking — no WATCH, no retry); complex commits keep the WATCH/MULTI path. Net per-event:
+
+| workers | atomic-claim | + ack-Lua + relay-guard | + commit fast-path | vs v0.1.1 |
+|---:|---:|---:|---:|---:|
+| 1 | 1401 | 2359 | 3111 | 3.7× |
+| 2 | 2554 | 4071 | 4851 | 4.1× |
+| 4 | 3174 | 5133 | 6397 | 4.6× |
+| 8 | 3161 | 5343 | **7159** (7605 at 12k backlog) | **5.4×** |
+
+**Where Redis ends up.** Per-event the worker now does ~4 atomic round-trips — `claim` (Lua), `load`
+(one pipelined GET+SISMEMBER), `commit` (Lua fast-path), `ack` (Lua) — each minimal and necessary.
+At W=8 / ~7.6k ev/s, Redis itself sat at **~1–8% CPU (≈25% peak)** — *not* saturated; the ceiling is
+**host CPU** (8 CPU-bound workers on an 11-core laptop), which scales out by sharding / real hosts.
+The worker-side per-event waste (claim races, ack round-trips, relay polling, the commit dance) is
+gone; what remains is the engine's own per-event CPU (≈minimal) and, only far above this, Redis's
+single-thread op throughput — the regime where Valkey (multi-threaded I/O) or sharding finally pay.
+
 **Postgres — before vs after the claim fix** (backlog ~2–2.5k execs):
 
 The original `claim` took a global `pg_advisory_xact_lock`, serializing every claim → flat,

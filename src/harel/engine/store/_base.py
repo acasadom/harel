@@ -17,6 +17,30 @@ from harel.spec.states import Event
 
 DEFAULT_TRACE_MAX = 200  # ring size: the store keeps only the last N trace steps per execution
 
+# Fast-path Redis `commit` (shared by the sync + async backends) for the common case where the
+# event only advances state — no emits, spawns, timers, or trace. Does the version-CAS and the
+# write in ONE atomic round-trip (read version, compare to expected, SET + optional dedupe SADD)
+# instead of the WATCH + GET + MULTI/EXEC dance (~3 round-trips). Atomicity replaces optimistic
+# locking — the script either commits or returns a conflict, with no retry. Complex commits
+# (anything to enqueue) still take the battle-tested WATCH/MULTI path. On conflict it returns an
+# error reply `STM_CONFLICT:<current_version>` (raised as a ResponseError, mapped to StoreConflict).
+# KEYS[1]=exe key, KEYS[2]=processed set; ARGV = exe_json (version pre-bumped), old_version,
+# processed_event_id ('' if none).
+_COMMIT_CAS_LUA = """
+local cur = redis.call('GET', KEYS[1])
+local curv = false
+if cur then curv = cjson.decode(cur)['version'] end
+local old = tonumber(ARGV[2])
+if not (cur == false and old == 0) and curv ~= old then
+  return redis.error_reply('STM_CONFLICT:' .. tostring(curv))
+end
+redis.call('SET', KEYS[1], ARGV[1])
+if ARGV[3] ~= '' then
+  redis.call('SADD', KEYS[2], ARGV[3])
+end
+return 1
+"""
+
 
 def _encode_offset(offset: int) -> str:
     """An opaque pagination cursor over an integer offset (the SQL/Mongo/Dict backends)."""
