@@ -114,20 +114,63 @@ Two independent dials:
   the two binds depends on the backend's per-op latency on your host (a slow-I/O backend is
   round-trip-bound; a fast one is loop-CPU-bound). Too high a value *degrades* throughput: more
   in-flight coroutines cost more to schedule than they save.
-- **More workers / shards**: the **aggregate** on a single backend instance plateaus
-  sublinearly as you add worker processes — that ceiling is the shared instance (a single
-  worker, by contrast, is bound by its own event-loop CPU + per-event latency, the dial above).
-  Throughput scales
-  **horizontally by sharding**: because executions are independent (single-consumer per group,
-  no cross-execution coordination), you partition them across independent `(store, transport)`
-  instances — each shard shares nothing with the others. This is the same model Temporal (hash
-  the id to a shard, add shards) and DBOS (partition, "your ceiling is your Postgres") use.
+- **More workers / shards**: adding worker processes lifts the aggregate sublinearly until
+  something shared saturates. That ceiling is **either the host** (CPU-bound worker processes
+  oversubscribing the cores) **or the single backend instance** — which one binds depends on your
+  hardware. On a busy single instance you scale **horizontally by sharding**: because executions
+  are independent (single-consumer per group, no cross-execution coordination), you partition them
+  across independent `(store, transport)` instances — each shard shares nothing with the others.
+  This is the same model Temporal (hash the id to a shard, add shards) and DBOS (partition, "your
+  ceiling is your Postgres") use.
 
-The Postgres transport's `SKIP LOCKED` claim lets workers on one Postgres lease different groups
-concurrently rather than serializing on a global lock. Measured numbers, the worker-vs-backend
-and sharding experiments, and the methodology live in
-[`bench/RESULTS.md`](https://github.com/acasadom/harel/blob/main/bench/RESULTS.md) (run them
-yourself with `bench/bench_async.py`, `bench_workers.py`, `bench_shards.py`).
+Each backend's claim/commit is folded into the fewest round-trips it can be — an atomic Lua script
+on Redis, one sorted `find_one_and_update` on Mongo, a `plpgsql` function (`FOR UPDATE SKIP LOCKED`
+inside) on Postgres — because the per-worker limit is usually round-trips, not the server (a single
+Postgres/Redis sat at single-digit % CPU even at the top rates we measured).
+
+```{warning}
+The numbers in [`bench/RESULTS.md`](https://github.com/acasadom/harel/blob/main/bench/RESULTS.md)
+are **A/B comparisons on one laptop with the backends in Docker Desktop** — its VM/network proxy and
+the shared cores cap the *absolute* throughput, so the multi-worker plateau there is the **laptop**,
+not the backend. Read them as relative gains; a backend on native hardware / managed cloud, with
+workers on a multi-core host, scales far higher on a *single* instance before sharding is needed.
+Run `bench/bench_async.py`, `bench_workers.py`, `bench_shards.py` against your own backend for real
+numbers.
+```
+
+### harel and durable-execution engines (illustrative)
+
+harel is a *statechart* engine; [DBOS](https://www.dbos.dev/), Temporal and friends are
+*durable-execution* / workflow engines. They overlap — both keep long-lived state alive across
+crashes — but model the problem differently: declarative named states versus imperative durable code.
+
+```{warning}
+The figures below are **illustrative only — NOT a fair benchmark of DBOS**, and should not be cited
+as one. They run the same *toy* FSM on the same laptop + Docker Postgres (so both carry the handicap
+above), but the two tools do different work. DBOS ran in its default single-instance config. The
+point is the *shape* of the difference, not the ratio. Full caveats and the script
+([`bench/bench_dbos.py`](https://github.com/acasadom/harel/blob/main/bench/bench_dbos.py)) are in
+[`bench/RESULTS.md`](https://github.com/acasadom/harel/blob/main/bench/RESULTS.md).
+```
+
+On the toy FSM (`Idle → Working → Done`), single process, same Postgres + laptop, measured the
+**same way for both** (timed window = enqueue *and* process every event):
+
+| | events/s |
+|---|---:|
+| harel-on-Postgres | ~800 |
+| DBOS — durable workflow + `send`/`recv` | ~390 |
+| DBOS — durable workflow per event | ~230 |
+
+(harel scales further with more worker processes — ~2050 at 8 workers — but the single-process row is
+the like-for-like one here.) harel comes out ahead, but **that's the paradigm, not a verdict on
+DBOS**: DBOS does full
+durable-*workflow* bookkeeping per event — workflow-status rows, automatic recovery of arbitrary
+imperative code, queues, `SERIALIZABLE` transactions — which is exactly what you want for "run these
+steps, with retries, and survive a crash mid-way", and is overkill for the trivial state transition
+this toy does. harel's per-event path is a lean claim → load → commit → ack. So pick by the shape of
+the problem: a **statechart engine** when the domain *is* a machine of named states with hierarchy and
+guards; a **durable-execution engine** when it's imperative code that must survive crashes.
 
 ## Orthogonal & fan-out, distributed
 

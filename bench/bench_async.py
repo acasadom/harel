@@ -162,28 +162,37 @@ async def _run_once(
     transport: Any,
     n: int,
     concurrency: int,
+    e2e: bool = False,
 ) -> tuple[float, float]:
-    """Drain throughput for n machines × 2 events (Start, Finish). Everything before
-    `t0` (create + publish the whole backlog) is setup and NOT measured; we time only
-    the worker draining the pre-loaded queue, and detect the end by counting acks (no
-    probe). Returns (elapsed_seconds, events_per_second)."""
+    """Throughput for n machines × 2 events (Start, Finish). `create` is always setup
+    (not measured). By default we then pre-load the backlog (also setup) and time only the
+    worker draining it. With `e2e=True` the publish is *inside* the timed window too
+    (enqueue + process), which is how a durable-execution engine like DBOS is measured
+    (send + process) — use it for an apples-to-apples cross-engine comparison. End detected
+    by counting acks (no probe). Returns (elapsed_seconds, events_per_second)."""
     counting = _AckCounter(transport, target=n * 2)
     runner = AsyncDistributedRunner(store, counting, {defn.id: defn})
 
-    # --- setup (not measured): create executions and pre-load the full backlog ---
+    # setup (never measured): create the executions
     exe_ids = [(await runner.create(defn.id)).id for _ in range(n)]
-    # publish Start then Finish for each group; FIFO-per-group delivers Start first, so
-    # the worker advances Idle->Working->Done in order (Finish queues behind Start).
-    for eid in exe_ids:
-        await runner.send(eid, Event(kind="Start"))
-    for eid in exe_ids:
-        await runner.send(eid, Event(kind="Finish"))
 
-    # --- measured: drain the backlog until every event has been acked ---
+    async def _publish_all() -> None:
+        # Start then Finish per group; FIFO-per-group delivers Start first, so the worker
+        # advances Idle->Working->Done in order (Finish queues behind Start).
+        for eid in exe_ids:
+            await runner.send(eid, Event(kind="Start"))
+        for eid in exe_ids:
+            await runner.send(eid, Event(kind="Finish"))
+
+    if not e2e:
+        await _publish_all()  # pre-load the backlog as setup (drain-only measurement)
+
     stop = asyncio.Event()
     worker = AsyncWorker(store, counting, {defn.id: defn}, concurrency=concurrency)
     t0 = time.perf_counter()
     drain_task = asyncio.create_task(worker.run(stop))
+    if e2e:
+        await _publish_all()  # enqueue is part of the timed window (end-to-end)
     await counting.done.wait()
     elapsed = time.perf_counter() - t0
 
@@ -205,8 +214,10 @@ async def _main(args: argparse.Namespace) -> None:
 
     backend_store = os.environ.get("STM_STORE_BACKEND", "redis")
     backend_transport = os.environ.get("STM_TRANSPORT_BACKEND", backend_store)
+    mode = "end-to-end (enqueue+process timed)" if args.e2e else "drain-only (enqueue is setup)"
     print(
-        f"store={backend_store}  transport={backend_transport}  n={args.n_executions}  sleep={not args.no_sleep}"
+        f"store={backend_store}  transport={backend_transport}  n={args.n_executions}  "
+        f"sleep={not args.no_sleep}  mode={mode}"
     )
     print(_HEADER)
     print("-" * len(_HEADER))
@@ -222,7 +233,7 @@ async def _main(args: argparse.Namespace) -> None:
         transport = await _build_transport(pg_pool_size, redis_pool_size)
 
         try:
-            elapsed, eps = await _run_once(defn, store, transport, args.n_executions, level)
+            elapsed, eps = await _run_once(defn, store, transport, args.n_executions, level, args.e2e)
         finally:
             await store.close()
             await transport.close()
@@ -242,6 +253,11 @@ def main() -> None:
         "--no-sleep", action="store_true", help="disable the 10ms async sleep (pure overhead)"
     )
     parser.add_argument("--pool-size", type=int, default=0, metavar="N", help="Postgres pool size (0=auto)")
+    parser.add_argument(
+        "--e2e",
+        action="store_true",
+        help="time enqueue+process (end-to-end), not drain-only — apples-to-apples with DBOS",
+    )
     args = parser.parse_args()
 
     # register bench_actions so the DSL runner resolves it

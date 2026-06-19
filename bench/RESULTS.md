@@ -4,9 +4,25 @@ Measured with `bench/bench_async.py` (the minimal-overhead variant: pre-load the
 backlog as setup, then time only the worker draining it, detecting the end by counting
 real `ack`s — no polling probe, no sleeps in the measured path).
 
-Machine: local dev (single host). Each backend run as **store + transport unified**.
-`--no-sleep` (the action is a no-op) so the number reflects the **backend/engine
-event-processing rate**, not a fixed per-action delay.
+> ## ⚠️ Read the numbers as RELATIVE, not as a ceiling
+> **Every number here was measured on one developer laptop (Apple-Silicon, ~11 cores) with the
+> backends in Docker Desktop.** Two consequences shape *all* the absolute figures below:
+> 1. **Docker Desktop runs the containers in a Linux VM with a network/filesystem proxy**, so every
+>    backend round-trip crosses the host↔VM boundary — that adds latency and CPU per op and caps
+>    absolute throughput regardless of how fast the backend itself is.
+> 2. **Workers, the backend, and the bench all share the same ~11 cores**, so once a few CPU-bound
+>    worker processes are running they oversubscribe the host — the multi-worker "plateau" you see is
+>    the *laptop*, not the backend (which sits at single-digit % CPU even at the top rates).
+>
+> So treat these as **A/B comparisons** (the *relative* gain of a change, same host, same run) — the
+> ratios are real. The **absolute** ev/s are not the backends' capacity: a backend on native
+> hardware / a managed cloud instance, with workers on a box with more cores, scales **far** higher
+> on a *single* instance before sharding is needed (e.g. DBOS sustains ~40k steps/s on one Postgres;
+> our laptop tops out in the low thousands purely because of the two limits above). To measure a real
+> ceiling, run `bench/bench_workers.py` against a native/cloud backend from a multi-core host.
+
+Each backend run as **store + transport unified**. `--no-sleep` (the action is a no-op) so the
+number reflects the **backend/engine event-processing rate**, not a fixed per-action delay.
 
 ## Single worker, sweep over `concurrency` (one AsyncWorker, one event loop)
 
@@ -121,7 +137,33 @@ Mongo's per-op latency dominates more, and `ack` stays ~4 round-trips (a two-col
 can't be made atomic without a replica-set transaction). Remaining ceiling: Mongo per-op latency +
 host CPU. (`commit` is already one atomic `update_one` with a `{_id, version}` CAS filter.)
 
-**Postgres — before vs after the claim fix** (backlog ~2–2.5k execs):
+**Postgres — PL/pgSQL stored functions** (the Postgres analog of the Redis Lua scripts). The PG
+claim was already race-free (`UPDATE … WHERE … FOR UPDATE SKIP LOCKED`), so this was never a claim
+race — but the worker was **round-trip-bound**, not server-bound. The diagnostic: `synchronous_commit
+= off` *did not help* (830 vs 760 ev/s) → **not fsync-bound**; CPU/wall ≈ 0.3 at c=1 (mostly awaiting
+PG) with ~7 statements/event across claim (2) + commit (2) + ack (3). Folding `claim` and `ack` into
+one server-side `plpgsql` function each (one round-trip per op, `harel_claim`/`harel_ack`, created
+under a `pg_advisory_xact_lock` so concurrent worker startup doesn't collide on `CREATE OR REPLACE
+FUNCTION`):
+
+| workers | old (multi-statement) | new (PL/pgSQL claim+ack) | speedup |
+|---:|---:|---:|---:|
+| 1 | 338 | 1196 | 3.5× |
+| 2 | 553 | 1388 | 2.5× |
+| 4 | 810 | 1778 | 2.2× |
+| 8 | ~810 | 1926 | ~2.4× |
+
+So Postgres had the *same* shape of problem as Redis — not saturation (it has huge headroom), but
+per-event round-trips — and the stored-procedure fold is the same medicine as Lua. The store
+**`commit` fast path** (state-only events) folds the same way — version-CAS + write + dedupe in one
+`harel_commit_cas` round-trip instead of UPDATE + (SELECT/INSERT) + INSERT — adding a smaller bump on
+top (1w 1196→1243, 8w 1926→1950); the commit was only ~2 statements, so the big win was the
+transport. Complex commits keep the multi-statement path. The ~4–8-worker plateau is host CPU
+(8 workers on one laptop), not Postgres (which is barely loaded).
+
+---
+
+**Postgres — the earlier claim mechanism** (historical, backlog ~2–2.5k execs):
 
 The original `claim` took a global `pg_advisory_xact_lock`, serializing every claim → flat,
 no worker scaling. It was replaced with a per-group row claimed via `FOR UPDATE SKIP LOCKED`
@@ -308,3 +350,50 @@ been retired — see the note at the top.)
   to compare backends.
 - DynamoDB/SQS not included: they need LocalStack (an AWS *simulation*), excluded here on
   purpose; available on request (caveat: LocalStack latency ≠ real AWS).
+
+## harel vs DBOS — same FSM, same Postgres, same laptop
+
+A paradigm comparison, **not apples-to-apples**: harel is a *declarative statechart engine*;
+[DBOS](https://www.dbos.dev/) is *imperative durable execution* (Postgres-backed). To put a number
+next to harel, `bench/bench_dbos.py` models the exact toy FSM (`Idle --Start--> Working --Finish-->
+Done`) on DBOS two ways, run against the **same Docker Postgres on the same laptop** as the harel
+numbers above:
+
+- **A — workflow + `send`/`recv`** (the paradigm match): one durable workflow per execution that
+  `recv`s the two events. Mirrors harel's "create, then send Start + Finish".
+- **B — workflow-per-event**: one durable workflow per event running a transaction that advances
+  the row. The "durable transition" floor.
+
+Measured **symmetrically** — the timed window for *both* is **enqueue + process** (executions/
+workflows created in setup, not timed; then time enqueuing all `2N` events *and* processing them).
+The harel side is `bench_async.py --e2e` (the `--e2e` flag moves the publish into the timed window);
+the DBOS side is `bench_dbos.py`. Single process, same Postgres + laptop (run variance ~±10%):
+
+| | events/s (single process, enqueue + process) |
+|---|---:|
+| **harel-on-Postgres** | **795** |
+| DBOS — A (durable workflow + send/recv) | 388 |
+| DBOS — B (durable workflow per event) | 234 |
+
+(harel's *drain-only* rate — enqueue excluded, the way `bench_workers.py` measures it — is ~1205
+single-worker and ~2050 at 8 workers; here it's the lower end-to-end figure so it lines up with how
+DBOS is measured.)
+
+On the same hardware, measured the same way, harel sustains **~2× DBOS** for this simple event-driven
+FSM, and the gap is structural: DBOS does full durable-**workflow** bookkeeping per event (workflow-
+status rows, recovery tracking, the queue/notification machinery, `SERIALIZABLE` transactions) — the
+right machinery for arbitrary imperative durable code, but heavy for a trivial state transition.
+harel's per-event path is a lean claim → load → commit(CAS) → ack. **This is the statechart-vs-
+workflow distinction, with a number**: for a domain that *is* a state machine, the statechart
+engine's per-event model is lighter; for imperative "run these steps with retries" work, DBOS's model
+is the right fit — different jobs.
+
+```{note}
+Honest caveats: (1) both numbers carry the **laptop + Docker-Desktop** limit from the box at the top
+— so read the **ratio**, not the absolutes (same handicap for both). (2) It's a *toy* FSM, and the two
+tools do different work — this is illustrative, not a DBOS benchmark. (3) DBOS ran in its default
+single-instance config. (4) DBOS is **not** a harel dependency — `bench/bench_dbos.py` is a throwaway
+that needs `pip install dbos` and a Postgres; the harel side is reproducible with
+`bench/bench_async.py --e2e` (drain-only is the default; `bench_workers.py` gives the multi-worker
+drain-only numbers).
+```

@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 from harel.engine.execution import Execution
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
-from harel.engine.store._base import DEFAULT_TRACE_MAX
+from harel.engine.store._base import _PG_COMMIT_FN, _PG_SCHEMA_LOCK, DEFAULT_TRACE_MAX
 from harel.spec.states import Event
 
 
@@ -30,6 +30,8 @@ class AsyncPostgresStore:
         await pool.open()
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
+                # serialize concurrent schema setup (CREATE OR REPLACE FUNCTION rewrites pg_proc)
+                await cur.execute("SELECT pg_advisory_xact_lock(%s)", (_PG_SCHEMA_LOCK,))
                 await cur.execute(
                     "CREATE TABLE IF NOT EXISTS executions "
                     "(id TEXT PRIMARY KEY, definition_id TEXT NOT NULL, data TEXT NOT NULL, version INT NOT NULL)"
@@ -57,6 +59,7 @@ class AsyncPostgresStore:
                     "(execution_id TEXT NOT NULL, idx INT NOT NULL, entry TEXT NOT NULL, "
                     "PRIMARY KEY (execution_id, idx))"
                 )
+                await cur.execute(_PG_COMMIT_FN)  # the state-only commit fast path (one round-trip)
             await conn.commit()
         return cls(pool)
 
@@ -129,6 +132,11 @@ class AsyncPostgresStore:
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,
     ) -> None:
+        # fast path: a state-only event (no emits/spawns/timers/trace) commits in ONE atomic
+        # round-trip via the version-CAS function — instead of UPDATE + (SELECT/INSERT) + INSERT.
+        if not emits and not spawns and not timers and trace is None:
+            await self._commit_cas(exe, processed_event_id)
+            return
         old = exe.version
         exe.version = old + 1
         data = exe.model_dump_json()
@@ -193,6 +201,24 @@ class AsyncPostgresStore:
                     raise
         except StoreConflict:
             raise
+
+    async def _commit_cas(self, exe: Execution, processed_event_id: Optional[str]) -> None:
+        """The fast-path commit: version-CAS + write (+ dedupe) in one atomic Lua-style round-trip
+        via `harel_commit_cas`. Returns false on a version conflict (no RAISE, so the txn is clean)."""
+        old = exe.version
+        exe.version = old + 1
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT harel_commit_cas(%s, %s, %s, %s, %s)",
+                    (exe.id, exe.definition_id, exe.model_dump_json(), old, processed_event_id or ""),
+                )
+                ok = (await cur.fetchone())[0]
+            if not ok:
+                exe.version = old
+                await conn.rollback()
+                raise StoreConflict(exe.id, expected=old, found=None)
+            await conn.commit()
 
     async def is_processed(self, execution_id: str, event_id: str) -> bool:
         async with self._pool.connection() as conn:

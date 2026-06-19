@@ -92,8 +92,8 @@ stores/dynamodb
 | [DictStore](stores/dict) | tests, embedding (in-memory, not durable) | object identity |
 | [SqliteStore](stores/sqlite) | one machine / shared volume, zero infra | `UPDATE … WHERE version=old` |
 | [LibsqlStore](stores/libsql) | libSQL/Turso — file, `sqld`, or embedded replica *(experimental)* | `UPDATE … WHERE version=old` |
-| [RedisStore](stores/redis) | all-network, pairs with `RedisTransport` | `WATCH`/`MULTI`/`EXEC` |
-| [PostgresStore](stores/postgres) | distributed SQL | `UPDATE … WHERE version=old` (row lock) |
+| [RedisStore](stores/redis) | all-network, pairs with `RedisTransport` | atomic Lua CAS (state-only fast path); `WATCH`/`MULTI`/`EXEC` for complex commits |
+| [PostgresStore](stores/postgres) | distributed SQL | `UPDATE … WHERE version=old` (row lock); state-only commit folds into one `harel_commit_cas` round-trip |
 | [RqliteStore](stores/rqlite) | HA SQLite over Raft (HTTP) | guarded upsert, one request |
 | [MongoStore](stores/mongo) | document store, single-document atomic | `update_one({_id, version})` |
 | [DynamoDBStore](stores/dynamodb) | AWS serverless, pairs with `SqsTransport` | conditional write + `TransactWriteItems` |

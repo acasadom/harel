@@ -74,10 +74,10 @@ transports/sqs
 | [InMemoryTransport](transports/inmemory) | in-process list + lock (tests, single process) |
 | [SqliteTransport](transports/sqlite) | `BEGIN IMMEDIATE` (global write-lock) + lease |
 | [LibsqlTransport](transports/libsql) | `BEGIN IMMEDIATE` + lease over libSQL *(experimental)* |
-| [RedisTransport](transports/redis) | `SET NX PX` group-lock + a `ready` ZSET index |
-| [PostgresTransport](transports/postgres) | per-group row claimed `FOR UPDATE SKIP LOCKED` |
+| [RedisTransport](transports/redis) | `ready` ZSET index + per-group lock; `claim`/`ack` are atomic Lua (one round-trip each) |
+| [PostgresTransport](transports/postgres) | per-group row, `FOR UPDATE SKIP LOCKED`; `claim`/`ack` are `plpgsql` functions (one round-trip each) |
 | [RqliteTransport](transports/rqlite) | one serialized `UPDATE` (Raft orders it) |
-| [MongoTransport](transports/mongo) | per-group ready-index/lock doc + atomic `find_one_and_update` |
+| [MongoTransport](transports/mongo) | per-group ready-index/lock doc; `claim` is one atomic sorted `find_one_and_update` |
 | [SqsTransport](transports/sqs) | SQS FIFO `MessageGroupId` (native) + visibility-timeout lease |
 
 ## Store and transport are independent

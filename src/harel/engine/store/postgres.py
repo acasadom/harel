@@ -7,6 +7,8 @@ from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.store._base import (
+    _PG_COMMIT_FN,
+    _PG_SCHEMA_LOCK,
     DEFAULT_TRACE_MAX,
     OutboxEntry,
     SpawnEntry,
@@ -32,6 +34,8 @@ class PostgresStore:
     def __init__(self, conn: Any) -> None:
         self._conn = conn
         with conn.cursor() as cur:
+            # serialize concurrent schema setup (CREATE OR REPLACE FUNCTION rewrites pg_proc)
+            cur.execute("SELECT pg_advisory_xact_lock(%s)", (_PG_SCHEMA_LOCK,))
             cur.execute(
                 "CREATE TABLE IF NOT EXISTS executions "
                 "(id TEXT PRIMARY KEY, definition_id TEXT NOT NULL, data TEXT NOT NULL, version INT NOT NULL)"
@@ -59,6 +63,7 @@ class PostgresStore:
                 "(execution_id TEXT NOT NULL, idx INT NOT NULL, entry TEXT NOT NULL, "
                 "PRIMARY KEY (execution_id, idx))"
             )
+            cur.execute(_PG_COMMIT_FN)  # the state-only commit fast path (one round-trip)
         self.trace_max = DEFAULT_TRACE_MAX
         conn.commit()
 
@@ -173,6 +178,11 @@ class PostgresStore:
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,
     ) -> None:
+        # fast path: a state-only event (no emits/spawns/timers/trace) commits in ONE atomic
+        # round-trip via the version-CAS function — instead of UPDATE + (SELECT/INSERT) + INSERT.
+        if not emits and not spawns and not timers and trace is None:
+            self._commit_cas(exe, processed_event_id)
+            return
         old = exe.version
         exe.version = old + 1
         data = exe.model_dump_json()
@@ -231,6 +241,23 @@ class PostgresStore:
             exe.version = old
             self._conn.rollback()
             raise
+
+    def _commit_cas(self, exe: Execution, processed_event_id: Optional[str]) -> None:
+        """The fast-path commit: version-CAS + write (+ dedupe) in one atomic round-trip via
+        `harel_commit_cas`. Returns false on a version conflict (no RAISE, so the txn is clean)."""
+        old = exe.version
+        exe.version = old + 1
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT harel_commit_cas(%s, %s, %s, %s, %s)",
+                (exe.id, exe.definition_id, exe.model_dump_json(), old, processed_event_id or ""),
+            )
+            ok = cur.fetchone()[0]
+        if not ok:
+            exe.version = old
+            self._conn.rollback()
+            raise StoreConflict(exe.id, expected=old, found=None)
+        self._conn.commit()
 
     def is_processed(self, execution_id: str, event_id: str) -> bool:
         with self._conn.cursor() as cur:

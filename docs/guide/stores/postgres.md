@@ -18,11 +18,14 @@ A few defining properties:
   the optional trace step) run on one cursor and land with a single `self._conn.commit()`. Either
   all of it commits or none of it does — that all-or-nothing property is what makes a crash safe.
   See [durability](../durability).
-- **CAS is a plain `UPDATE ... WHERE version = old`** — there is **no app-level locking**. Postgres
-  row-locks serialize concurrent writers to the same Execution row: exactly one writer's `UPDATE`
-  matches and reports `rowcount == 1` (it wins), and any writer that loaded the same old version and
-  lost the race sees `rowcount == 0` and raises `StoreConflict`. The database does the serialization;
-  the code does not.
+- **CAS is a version compare-and-swap** — there is **no app-level locking**. Postgres row-locks
+  serialize concurrent writers to the same Execution row: exactly one writer wins the version CAS,
+  and any writer that loaded the same old version and lost the race raises `StoreConflict`. The
+  database does the serialization; the code does not. There are **two paths**: a **state-only
+  commit** (no emits/spawns/timers/trace, the common case) takes a fast path — the server-side
+  `harel_commit_cas` PL/pgSQL function does the version-CAS + write (+ dedupe) in **ONE round-trip**;
+  a **complex commit** keeps the multi-statement `UPDATE ... WHERE version = old` path. See
+  [the commit section](#the-cas-commit) below.
 - **`from_dsn` retries the connection.** A worker container that starts alongside Postgres (e.g. in
   a Docker Compose stack) will often come up before Postgres accepts connections. `from_dsn` retries
   the connect (15 attempts, 1 s apart by default) so the worker **waits** for Postgres rather than
@@ -39,8 +42,11 @@ store = PostgresStore.from_dsn("postgresql://stm:stm@db:5432/stm")
 ## Schema
 
 Six tables, all created with `CREATE TABLE IF NOT EXISTS` in `__init__` (on one cursor) and then a
-single `conn.commit()`. `data` everywhere is `exe.model_dump_json()` — the whole Execution as JSON
-text — and a few scalars are denormalized out of it so the hot paths (CAS, listing) never parse JSON.
+single `conn.commit()`. `__init__` also creates the `harel_commit_cas` PL/pgSQL function (the
+fast-path commit), idempotently and under a `pg_advisory_xact_lock` so several workers opening
+connections at once don't collide on `CREATE OR REPLACE FUNCTION` (which rewrites `pg_proc`). `data`
+everywhere is `exe.model_dump_json()` — the whole Execution as JSON text — and a few scalars are
+denormalized out of it so the hot paths (CAS, listing) never parse JSON.
 
 ### `executions` — the durable state
 
@@ -142,10 +148,31 @@ CREATE TABLE IF NOT EXISTS trace
 Opt-in (off by default); a ring capped at `trace_max` steps per execution — see
 [`_write_trace`](#the-trace-ring-_write_trace).
 
+(the-cas-commit)=
 ## The CAS + `commit`
 
-`commit` is the heart of the store. It bumps the version, serializes the Execution, then runs the
-CAS and every side effect on one cursor and commits once. Here is the body in order:
+`commit` is the heart of the store. It has **two paths**, picked by what the commit carries:
+
+- **The fast path — a state-only commit** (no emits, spawns, timers or trace, the common case)
+  calls `_commit_cas`, which runs the server-side `harel_commit_cas(id, defn, data, old, event)`
+  PL/pgSQL function: the version-CAS, the write, and the optional dedupe in **ONE round-trip**. The
+  function **returns `false`** on a version conflict — it does **not** `RAISE`, so the transaction
+  stays clean; the caller rolls back and raises `StoreConflict` itself. See
+  [`_commit_cas`](#pg-fast-path-commit-cas) below.
+- **The complex path — anything to enqueue** (emits / spawns / timers / trace) takes the
+  multi-statement body shown next.
+
+```text
+def commit(self, exe, emits, processed_event_id=None, timers=(), spawns=(), trace=None):
+    if not emits and not spawns and not timers and trace is None:
+        self._commit_cas(exe, processed_event_id)   # fast path: one round-trip via harel_commit_cas
+        return
+    # ... otherwise the multi-statement path below
+```
+
+The rest of this section walks the **complex path**. It bumps the version, serializes the
+Execution, then runs the CAS and every side effect on one cursor and commits once. Here is the body
+in order:
 
 ```text
 old = exe.version
@@ -243,7 +270,38 @@ Step by step, and why:
     other exception restores `exe.version = old` (so the in-memory object is consistent with what is
     persisted), rolls back the transaction, and re-raises — nothing partial is left behind.
 
-`save(exe)` is just `commit(exe, [])` — the same CAS path with no side effects.
+`save(exe)` is just `commit(exe, [])` — the same CAS path with no side effects (a state-only
+commit, so it takes the fast path below).
+
+(pg-fast-path-commit-cas)=
+## The fast-path commit (`_commit_cas`)
+
+A state-only event — one that only advances the Execution — skips the multi-statement body above
+for **one round-trip** to the server-side `harel_commit_cas` function:
+
+```text
+def _commit_cas(self, exe, processed_event_id):
+    old = exe.version
+    exe.version = old + 1
+    with self._conn.cursor() as cur:
+        cur.execute(
+            "SELECT harel_commit_cas(%s, %s, %s, %s, %s)",
+            (exe.id, exe.definition_id, exe.model_dump_json(), old, processed_event_id or ""))
+        ok = cur.fetchone()[0]
+    if not ok:                       # version conflict: the function returned false (no RAISE)
+        exe.version = old
+        self._conn.rollback()        # txn is clean, so the rollback is cheap
+        raise StoreConflict(exe.id, expected=old, found=None)
+    self._conn.commit()
+```
+
+The function folds the whole CAS into one server-side call: the `UPDATE ... WHERE version = old`,
+the insert-or-conflict disambiguation (a first save inserts; a real conflict returns `false`), and
+the optional dedupe `INSERT ... ON CONFLICT DO NOTHING`. The crucial detail is that on a version
+conflict it **returns `false` rather than `RAISE`ing** — so the transaction is never aborted by the
+function, the caller's `rollback()` is a clean no-op rollback, and `_commit_cas` raises
+`StoreConflict` itself. This keeps the fast path's conflict handling identical in semantics to the
+multi-statement path, just in one round-trip.
 
 ## The trace ring (`_write_trace`)
 
@@ -395,9 +453,11 @@ The key differences:
 
   It returns `(Execution | None, already_processed: bool)` — `(None, False)` if the row is absent.
 
-Everything else — the CAS `UPDATE ... WHERE version`, the `rowcount == 0` insert-or-conflict branch,
-the outbox/dedupe/spawn/timer/trace statements, the inline-`idx` trace ring — is identical to the
-sync store, just `await`ed.
+Everything else — both commit paths (the `harel_commit_cas` fast path for a state-only commit and
+the multi-statement `UPDATE ... WHERE version` complex path), the `rowcount == 0`
+insert-or-conflict branch, the outbox/dedupe/spawn/timer/trace statements, the inline-`idx` trace
+ring — is identical to the sync store, just `await`ed (the `harel_commit_cas` function is created in
+schema setup under the same `pg_advisory_xact_lock`).
 
 ## When to pick it / tradeoffs
 
