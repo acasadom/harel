@@ -84,6 +84,9 @@ dev = [
     "sphinxcontrib-mermaid",
     "furo",
     "fakeredis>=2.36.0",
+    # the Redis transport's `claim` is an atomic Lua script; fakeredis only runs Lua
+    # when `lupa` is installed, so the RedisTransport unit tests need it present
+    "lupa>=2",
     "mongomock>=4.1",
     # MongoStore/MongoTransport import `pymongo` (e.g. ReturnDocument); mongomock only
     # supplies the client, so the unit tests need pymongo present even without a server

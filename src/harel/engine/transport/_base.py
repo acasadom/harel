@@ -13,6 +13,41 @@ from harel.spec.states import Event
 # claim's "available"/in-flight checks skip it) until its `lock_expiry` passes.
 _PARKED = "__parked__"
 
+# The Redis `claim`, server-side and atomic (shared by the sync + async backends).
+# Scan the lowest-due groups, lock the first whose lock is free and whose queue has a
+# head, bump its ready-score out of the visibility window, and return (group, head). All
+# in ONE round-trip that Redis runs atomically — so concurrent claimers each get a
+# DISTINCT group with ZERO lost races. It replaces a client-side ZRANGEBYSCORE-then-loop-
+# of-`SET NX`, where workers raced for the same candidate head and burned round-trips on
+# lost locks (throughput plateaued ~8 workers and *regressed* beyond). KEYS[1]=ready zset;
+# ARGV = prefix, now_ms, lease_px_ms, fencing_token, candidate_limit. The lock:/q: keys are
+# computed from the prefix, so this targets a single Redis instance (not Redis Cluster —
+# the transport never was). A stale empty group found in the window is dropped (ZREM).
+_CLAIM_LUA = """
+local ready = KEYS[1]
+local prefix = ARGV[1]
+local now = tonumber(ARGV[2])
+local px = tonumber(ARGV[3])
+local token = ARGV[4]
+local limit = tonumber(ARGV[5])
+local cands = redis.call('ZRANGEBYSCORE', ready, '-inf', now, 'LIMIT', 0, limit)
+for i = 1, #cands do
+  local g = cands[i]
+  local lockkey = prefix .. ':lock:' .. g
+  if redis.call('EXISTS', lockkey) == 0 then
+    local payload = redis.call('LINDEX', prefix .. ':q:' .. g, 0)
+    if payload then
+      redis.call('SET', lockkey, token, 'PX', px)
+      redis.call('ZADD', ready, now + px, g)
+      return {g, payload}
+    else
+      redis.call('ZREM', ready, g)
+    end
+  end
+end
+return nil
+"""
+
 
 @dataclass
 class Lease:

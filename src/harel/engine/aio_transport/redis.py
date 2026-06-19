@@ -6,16 +6,18 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 
-from harel.engine.transport import Lease
+from harel.engine.transport import _CLAIM_LUA, Lease
 from harel.spec.states import Event
 
 
 class AsyncRedisTransport:
     """Async mirror of `RedisTransport` over `redis.asyncio`: per-group exclusivity by hand
-    (`SET NX PX` group-lock-as-lease + a list per group), and a `ready` ZSET scored by
+    (a `SET PX` group-lock-as-lease + a list per group), and a `ready` ZSET scored by
     available-at time so `claim` reads only the few lowest-scored due groups (O(log N + K),
-    not a full scan). Leasing bumps the score (concurrent claimers skip it + free expiry
-    recovery). The client is injected (fakeredis.aioredis in tests)."""
+    not a full scan). `claim` runs `_CLAIM_LUA` server-side, so concurrent claimers each get a
+    DISTINCT group atomically (no lost `SET NX` races). Leasing bumps the score (concurrent
+    claimers skip it + free expiry recovery). The client is injected (fakeredis.aioredis in
+    tests; the Lua claim needs `lupa` for fakeredis)."""
 
     _CANDIDATES = 8
 
@@ -23,6 +25,7 @@ class AsyncRedisTransport:
         self._r = client
         self._prefix = prefix
         self._clock = clock
+        self._claim_script = client.register_script(_CLAIM_LUA)
 
     @classmethod
     def from_url(cls, url: str, prefix: str = "stm") -> "AsyncRedisTransport":
@@ -57,21 +60,17 @@ class AsyncRedisTransport:
     async def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
         px = max(1, int(visibility * 1000))
         now = self._now_ms()
-        candidates = await self._r.zrangebyscore(self._k_ready(), "-inf", now, start=0, num=self._CANDIDATES)
-        for raw in candidates:
-            group_id = self._decode(raw)
-            assert group_id is not None
-            token = f"{worker_id}:{uuid.uuid4().hex}"
-            if not await self._r.set(self._k_lock(group_id), token, nx=True, px=px):
-                continue
-            payload = self._decode(await self._r.lindex(self._k_q(group_id), 0))
-            if payload is None:
-                await self._r.zrem(self._k_ready(), group_id)
-                await self._r.delete(self._k_lock(group_id))
-                continue
-            await self._r.zadd(self._k_ready(), {group_id: now + px})
-            return Lease(seq=0, group_id=group_id, event=Event.model_validate_json(payload), token=token)
-        return None
+        token = f"{worker_id}:{uuid.uuid4().hex}"
+        # one atomic round-trip: lock a distinct due group + return its head (no SET NX race)
+        res = await self._claim_script(
+            keys=[self._k_ready()], args=[self._prefix, now, px, token, self._CANDIDATES]
+        )
+        if not res:
+            return None
+        group_id = self._decode(res[0])
+        payload = self._decode(res[1])
+        assert group_id is not None and payload is not None
+        return Lease(seq=0, group_id=group_id, event=Event.model_validate_json(payload), token=token)
 
     async def _owns(self, group_id: str, token: str) -> bool:
         return self._decode(await self._r.get(self._k_lock(group_id))) == token

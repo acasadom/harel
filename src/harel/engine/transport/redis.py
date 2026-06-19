@@ -6,7 +6,7 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 
-from harel.engine.transport._base import Lease
+from harel.engine.transport._base import _CLAIM_LUA, Lease
 from harel.spec.states import Event
 
 
@@ -15,10 +15,10 @@ class RedisTransport:
     Redis has no native message groups:
 
     - `q:{G}` — a list per group, the FIFO (RPUSH to enqueue, the head is oldest).
-    - `lock:{G}` — `SET NX PX` is the group lock *and* the fencing token: only one
-      worker holds it (the synchronous mutual exclusion that makes the claim race
-      safe), and its TTL (the visibility timeout) auto-releases it if the worker
-      dies, so the head becomes claimable again.
+    - `lock:{G}` — the group lock *and* the fencing token: only one worker holds it,
+      and its TTL (the visibility timeout) auto-releases it if the worker dies, so the
+      head becomes claimable again. `claim` sets it inside the atomic Lua script
+      (`_CLAIM_LUA`), so two workers never race for the same group.
     - `ready` — a sorted set of groups that have messages, scored by the epoch-ms
       at which the group is next claimable (0 = now). `claim` reads only the few
       lowest-scored due groups (`ZRANGEBYSCORE -inf now LIMIT 0 K`), so its cost is
@@ -26,7 +26,10 @@ class RedisTransport:
       (the old `SMEMBERS groups`, which collapsed throughput under a large backlog).
       Leasing a group bumps its score to `now + visibility`, so other claimers skip
       it AND it reappears on its own once the lease expires (the expiry-recovery
-      timer, with no separate sweep).
+      timer, with no separate sweep). `claim` runs server-side as one atomic Lua call
+      (`_CLAIM_LUA`): concurrent claimers each get a DISTINCT group with zero lost
+      lock races (the previous client-side `SET NX` loop made workers race for the
+      same head and collapsed throughput past ~8 workers).
 
     `claim` locks a due group and returns its head without removing it; `ack` (lock
     still owned) pops the head and re-readies the group (or drops it); `nack`
@@ -45,6 +48,7 @@ class RedisTransport:
         self._r = client
         self._prefix = prefix
         self._clock = clock  # injectable so the ready-score clock is deterministic in tests
+        self._claim_script = client.register_script(_CLAIM_LUA)  # atomic server-side claim
 
     @classmethod
     def from_url(cls, url: str, prefix: str = "stm") -> "RedisTransport":
@@ -83,27 +87,18 @@ class RedisTransport:
     def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
         px = max(1, int(visibility * 1000))
         now = self._now_ms()
-        # only the few lowest-scored groups that are due now — O(log N + K), not O(N)
-        candidates = self._r.zrangebyscore(self._k_ready(), "-inf", now, start=0, num=self._CANDIDATES)
-        for raw in candidates:
-            group_id = self._decode(raw)
-            assert group_id is not None
-            token = f"{worker_id}:{uuid.uuid4().hex}"
-            # SET NX PX is the per-group lock: only one worker wins the race for a
-            # candidate, and it expires on its own (the lease) if the worker dies.
-            if not self._r.set(self._k_lock(group_id), token, nx=True, px=px):
-                continue  # held by another worker -> try the next candidate
-            payload = self._decode(self._r.lindex(self._k_q(group_id), 0))
-            if payload is None:
-                # a stale group with no messages: drop it and release the lock
-                self._r.zrem(self._k_ready(), group_id)
-                self._r.delete(self._k_lock(group_id))
-                continue
-            # bump the score out by the visibility window: concurrent claimers skip
-            # it, and it reappears as a candidate once the lease expires (recovery).
-            self._r.zadd(self._k_ready(), {group_id: now + px})
-            return Lease(seq=0, group_id=group_id, event=Event.model_validate_json(payload), token=token)
-        return None
+        token = f"{worker_id}:{uuid.uuid4().hex}"
+        # one atomic round-trip: the script locks a distinct due group (scoring it out of
+        # the window) and returns its head — no client-side SET NX race between workers.
+        res = self._claim_script(
+            keys=[self._k_ready()], args=[self._prefix, now, px, token, self._CANDIDATES]
+        )
+        if not res:
+            return None
+        group_id = self._decode(res[0])
+        payload = self._decode(res[1])
+        assert group_id is not None and payload is not None
+        return Lease(seq=0, group_id=group_id, event=Event.model_validate_json(payload), token=token)
 
     def _owns(self, group_id: str, token: str) -> bool:
         return self._decode(self._r.get(self._k_lock(group_id))) == token

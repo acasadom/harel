@@ -53,6 +53,26 @@ balance across processes.
 | 4 | 1389 | 1.66× | [1502, 1501, 1506, 1491] |
 | 8 | 1417 | 1.69× | [~750 each] |
 
+**Redis — atomic Lua claim** (the lost-lock-race fix). The table above is the *old* client-side
+claim (`ZRANGEBYSCORE` then a loop of `SET NX`): all workers fish the same candidate head and race
+for the lock. Measured directly, the **`SET NX` failure rate** climbs `0% → 38% (4w) → 70% (8w) →
+88% (16w)` — it is **not** the server (single-threaded Redis sits at ~20% of one core) but **lost
+lock races burning round-trips** (single-thread ⇒ no mutex contention; the cost is wasted client
+work). Moving the claim into **one atomic Lua script** (each concurrent claimer gets a *distinct*
+group) lifts both single-worker latency (one round-trip, not ~4) and the aggregate ceiling:
+
+| workers | old (SET NX loop) | new (atomic Lua) | speedup |
+|---:|---:|---:|---:|
+| 1 | 836  | 1401 | 1.67× |
+| 2 | 1179 | 2554 | 2.17× |
+| 4 | 1389 | 3174 | 2.28× |
+| 8 | 1417 | 3161 | 2.23× |
+
+The old claim plateaued (and *regressed* past ~8 workers, with 35% empty claims at 16w); the new one
+reaches ~3.2k ev/s. A ceiling still appears at ~4–8 workers — but now it is the **next** bottleneck
+(the store's per-event commit + the global outbox sequence), not the claim. (Measured on one laptop;
+the per-worker split stays even, so it is genuinely balanced.)
+
 **Postgres — before vs after the claim fix** (backlog ~2–2.5k execs):
 
 The original `claim` took a global `pg_advisory_xact_lock`, serializing every claim → flat,
