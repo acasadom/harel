@@ -13,12 +13,10 @@ from harel.spec.states import Event
 class AsyncMongoTransport:
     """Async mirror of `MongoTransport` over `motor.motor_asyncio`: per-group exclusivity via
     a per-group `locks` document that is the ready-index + lock in one (`available_at` = next
-    claimable epoch, `token` = the lease). `claim` reads only the few lowest `available_at <=
-    now` groups (`find(...).sort(available_at).limit(K)`) and atomically leases one — O(log N + K)
-    in active groups, not a `$group` over every message. Build with
-    `await AsyncMongoTransport.from_url(url)` or inject an `AsyncIOMotorClient`."""
-
-    _CANDIDATES = 8
+    claimable epoch, `token` = the lease). `claim` leases the lowest-`available_at <= now` group
+    in ONE atomic `find_one_and_update` (`sort=available_at`) — O(log N) in active groups, not a
+    `$group` over every message, and concurrent claimers each get a DISTINCT group (no lost-lease
+    races). Build with `await AsyncMongoTransport.from_url(url)` or inject an `AsyncIOMotorClient`."""
 
     def __init__(
         self,
@@ -80,26 +78,26 @@ class AsyncMongoTransport:
 
     async def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
         now = self._clock()
-        # only the few lowest-`available_at` groups due now — O(log N + K), not a scan
-        cursor = (
-            self._locks.find({"available_at": {"$lte": now}}).sort("available_at", 1).limit(self._CANDIDATES)
-        )
-        for c in [doc async for doc in cursor]:
-            group_id = c["_id"]
+        while True:
             token = f"{worker_id}:{uuid.uuid4().hex}"
-            # atomic lease: re-check `available_at <= now` so only one racing worker wins
+            # ONE atomic op: find the lowest-`available_at` due group AND lease it (sort +
+            # find_one_and_update). Concurrent claimers each get a DISTINCT group — the update
+            # bumps `available_at` out of range, so no two race for the same head (no lost
+            # leases). Replaces a find()-then-loop-of-find_one_and_update where workers fished
+            # the same candidate window and burned round-trips on lost leases.
             leased = await self._locks.find_one_and_update(
-                {"_id": group_id, "available_at": {"$lte": now}},
+                {"available_at": {"$lte": now}},
                 {"$set": {"token": token, "available_at": now + visibility}},
+                sort=[("available_at", 1)],
             )
             if leased is None:
-                continue  # another worker leased it first
+                return None  # nothing due
+            group_id = leased["_id"]
             head = await self._msgs.find_one({"group_id": group_id}, sort=[("_id", 1)])
             if head is None:
-                await self._locks.delete_one({"_id": group_id, "token": token})  # stale group, release
+                await self._locks.delete_one({"_id": group_id, "token": token})  # stale empty group
                 continue
             return Lease(head["_id"], group_id, Event.model_validate_json(head["event"]), token=token)
-        return None
 
     async def _owns(self, group_id: str, token: str) -> bool:
         doc = await self._locks.find_one({"_id": group_id})
