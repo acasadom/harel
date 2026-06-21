@@ -1,0 +1,42 @@
+# Stripe-style payment webhook flow.
+#
+# Design:
+#   POST /orders              → creates this Execution; returns its id
+#   POST /webhooks/stripe     → maps the Stripe event to a harel Event, calls runner.process()
+#   GET  /orders/{id}         → reads current state from the store
+#
+# Three things worth noting:
+#
+#   Idempotency — Stripe retries failed deliveries for up to 72 h.
+#   Passing Event(id=stripe_event_id) deduplicates at the engine level:
+#   a retried webhook is a safe no-op.  No manual idempotency table needed.
+#
+#   Durable timeout — `timeout 15` fires a Timeout even across process restarts.
+#   No cron job, no celery-beat.  Change to 600 (10 min) for production.
+#
+#   Thin handler — the webhook endpoint is a JSON→Event mapping.
+#   All "what happens next" logic lives here, not scattered across handler code.
+
+event PaymentSucceeded { payment_id: string  amount: int }
+event PaymentFailed    { reason: string }
+
+machine payment {
+  initial AwaitingPayment
+
+  state AwaitingPayment {
+    timeout 15   # demo: 15 s; production → 600 (10 min)
+  }
+
+  state Fulfilling {
+    on enter examples.webhook_payment.actions.start_fulfillment
+  }
+
+  final Done    success   { on enter examples.webhook_payment.actions.on_done }
+  final Failed  failed    { on enter examples.webhook_payment.actions.on_failed }
+  final Expired abandoned { on enter examples.webhook_payment.actions.on_expired }
+
+  from AwaitingPayment to Fulfilling on PaymentSucceeded
+  from AwaitingPayment to Failed     on PaymentFailed
+  from AwaitingPayment to Expired    on Timeout
+  from Fulfilling to Done
+}
