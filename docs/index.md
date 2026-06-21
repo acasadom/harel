@@ -54,6 +54,7 @@ guide/durability
 guide/stores
 guide/distribution
 guide/transports
+guide/resolvers
 guide/control-plane
 guide/faas
 guide/monitor

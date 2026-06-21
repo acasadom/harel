@@ -85,7 +85,17 @@ See [distribution](distribution).
 
 ## Resolvers (submachine `invoke`)
 
-`MachineResolver` is the seam mapping an `invoke` FQN to a `Definition`. `DictResolver` (in
-memory), `FileResolver` / `ModuleResolver` / `SourceResolver` (load from disk / module / an
-injected loader). Imported and inline targets resolve without one; an injected resolver is for
-the general "fetch the machine from a database/registry" case.
+`MachineResolver` is the seam that maps an `invoke` FQN to a built `Definition`.
+Inline `invoke { … }` targets and imported definitions resolve without one.
+
+Four implementations ship out of the box:
+
+| Class | Source |
+| ----- | ------ |
+| `DictResolver` | in-memory registry (pre-built `Definition` objects) |
+| `FileResolver` | `.stm` file under a root directory (`a.b.c` → `root/a/b/c.stm`) |
+| `ModuleResolver` | Python module attribute (`a.b.c` → `import a.b; mod.c`) |
+| `SourceResolver` | injected `fqn → str` callable — databases, remote registries, etc. |
+
+All four cache by FQN (each machine is compiled at most once). See the
+[resolvers guide](resolvers) for usage examples and how to write a custom one.
