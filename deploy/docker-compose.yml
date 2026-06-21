@@ -17,6 +17,11 @@ services:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
 
   postgres:
     image: postgres:16-alpine
@@ -26,18 +31,37 @@ services:
       POSTGRES_USER: stm
       POSTGRES_PASSWORD: stm
       POSTGRES_DB: stm
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "stm"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
 
   rqlite:
     image: rqlite/rqlite:8.43.4
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4001/readyz"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
 
   mongo:
     image: mongo:7
-
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
 
   localstack:
     image: localstack/localstack:4.14
     environment:
       SERVICES: sqs,dynamodb,lambda
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:4566/_localstack/health"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
     volumes:
       # LocalStack runs each Lambda (zip) in a container it launches on the HOST
       # docker daemon, so it needs the socket. (Image packaging is Pro; we use zip.)

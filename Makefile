@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help sync test lint format fmt-stm fmt-stm-check type-check docs build clean vscode-install
+.PHONY: help sync test test-stack lint format fmt-stm fmt-stm-check type-check docs build clean vscode-install
 
 # every .stm machine in the repo (excludes the virtualenv)
 STM_FILES := $(shell find . -path ./.venv -prune -o -name '*.stm' -print)
@@ -15,8 +15,16 @@ help: ## Show this help
 sync: ## Install/refresh the virtualenv from pyproject + lock
 	uv sync
 
-test: ## Run the test suite
+test: ## Run the test suite (unit + in-process fakes; no Docker needed)
 	uv run pytest
+
+test-stack: ## Run the full suite against real backends (needs Docker); run before merging backend changes
+	docker compose -f deploy/docker-compose.yml down -v 2>/dev/null || true; \
+	docker compose -f deploy/docker-compose.yml up -d --build --wait --scale worker=3 redis postgres rqlite mongo localstack worker && \
+	docker compose -f deploy/docker-compose.yml run --rm test; \
+	EXIT=$$?; \
+	docker compose -f deploy/docker-compose.yml down -v; \
+	exit $$EXIT
 
 lint: ## Check style and imports without modifying files
 	uv run ruff check .
