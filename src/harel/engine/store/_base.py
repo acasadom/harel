@@ -148,6 +148,16 @@ class StoreConflict(RuntimeError):
         self.found = found
 
 
+class ExecutionAlreadyExists(RuntimeError):
+    """Raised by `create(..., execution_id=...)` when the caller supplies an explicit
+    id that is already in the store.  Either choose a different id or load the
+    existing execution with `store.load(execution_id)`."""
+
+    def __init__(self, execution_id: str) -> None:
+        super().__init__(f"execution {execution_id!r} already exists")
+        self.execution_id = execution_id
+
+
 @runtime_checkable
 class ExecutionStore(Protocol):
     def load(self, execution_id: str) -> Optional[Execution]: ...

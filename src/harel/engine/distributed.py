@@ -173,10 +173,15 @@ class DistributedRunner:
 
         return facade.run(build)
 
-    def create(self, definition_id: str, context: Optional[dict] = None) -> Execution:
+    def create(
+        self,
+        definition_id: str,
+        context: Optional[dict] = None,
+        execution_id: Optional[str] = None,
+    ) -> Execution:
         from harel.engine.aio import facade
 
-        return facade.run(self._async.create, definition_id, context)
+        return facade.run(self._async.create, definition_id, context, execution_id)
 
     def send(self, execution_id: str, event: Event) -> None:
         from harel.engine.aio import facade
