@@ -7,7 +7,7 @@ FROM python:3.13-slim
 RUN pip install --no-cache-dir uv
 WORKDIR /app
 
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 COPY test ./test
 COPY deploy ./deploy
@@ -20,7 +20,7 @@ ENV SETUPTOOLS_SCM_PRETEND_VERSION=${SETUPTOOLS_SCM_PRETEND_VERSION}
 # runtime + the redis/postgres/rqlite/mongo/libsql/sqs extras (the backend clients) +
 # dev group (pytest, for the test service). One image keeps the stack simple;
 # it's a dev/integration stack.
-RUN uv sync --frozen --extra redis --extra postgres --extra rqlite --extra mongo --extra libsql --extra sqs --extra dynamodb
+RUN uv sync --frozen --extra redis --extra postgres --extra rqlite --extra mongo --extra sqs --extra dynamodb
 
 # demo_actions resolves from deploy/ at worker runtime; the registry is baked in
 ENV PYTHONPATH=/app/deploy

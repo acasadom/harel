@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help sync test lint format fmt-stm fmt-stm-check type-check docs build clean vscode-install
+.PHONY: help sync test test-stack lint format fmt-stm fmt-stm-check type-check docs build clean vscode-install
 
 # every .stm machine in the repo (excludes the virtualenv)
 STM_FILES := $(shell find . -path ./.venv -prune -o -name '*.stm' -print)
@@ -15,8 +15,44 @@ help: ## Show this help
 sync: ## Install/refresh the virtualenv from pyproject + lock
 	uv sync
 
-test: ## Run the test suite
+test: ## Run the test suite (unit + in-process fakes; no Docker needed)
 	uv run pytest
+
+test-stack: ## Run each backend's tests directly against the real stack (needs Docker)
+	@docker compose -f deploy/docker-compose.yml down -v 2>/dev/null || true
+	@docker compose -f deploy/docker-compose.yml up -d --build --wait --scale worker=3 \
+	    redis postgres rqlite mongo localstack worker || { \
+	        docker compose -f deploy/docker-compose.yml down -v; exit 1; }
+	@EXIT=0; \
+	DC=docker\ compose\ -f\ deploy/docker-compose.yml\ run\ --rm; \
+	echo "=== sqlite (worker stack) ===" && \
+	$$DC test uv run pytest -m stack \
+	    test/integration/test_compose_stack.py -v || EXIT=1; \
+	echo "=== postgres ===" && \
+	$$DC -e STM_STORE_BACKEND=postgres -e STM_TRANSPORT_BACKEND=postgres \
+	    test uv run pytest -m stack \
+	    test/integration/test_postgres_store.py \
+	    test/integration/test_async_postgres.py \
+	    "test/integration/test_store_listing.py::test_postgres_listing" -v || EXIT=1; \
+	echo "=== rqlite ===" && \
+	$$DC -e STM_STORE_BACKEND=rqlite -e STM_TRANSPORT_BACKEND=rqlite \
+	    test uv run pytest -m stack \
+	    test/integration/test_rqlite_store.py \
+	    test/integration/test_async_rqlite.py \
+	    "test/integration/test_store_listing.py::test_rqlite_listing" -v || EXIT=1; \
+	echo "=== mongo ===" && \
+	$$DC -e STM_STORE_BACKEND=mongo -e STM_TRANSPORT_BACKEND=mongo \
+	    test uv run pytest -m stack \
+	    test/integration/test_mongo_store.py \
+	    test/integration/test_async_mongo.py \
+	    "test/integration/test_store_listing.py::test_mongo_listing" -v || EXIT=1; \
+	echo "=== dynamodb+sqs ===" && \
+	$$DC -e STM_STORE_BACKEND=dynamodb -e STM_TRANSPORT_BACKEND=sqs \
+	    test uv run pytest -m stack \
+	    test/integration/test_dynamodb_store.py \
+	    "test/integration/test_store_listing.py::test_dynamodb_listing" -v || EXIT=1; \
+	docker compose -f deploy/docker-compose.yml down -v; \
+	exit $$EXIT
 
 lint: ## Check style and imports without modifying files
 	uv run ruff check .

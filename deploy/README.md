@@ -32,6 +32,12 @@ fine; the named volume is portable either way.
 ## Run the stack + its integration test
 
 ```bash
+make test-stack   # shortcut: brings up the default stack (sqlite store + redis transport), runs tests, tears down
+```
+
+Or manually:
+
+```bash
 docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 redis worker
 docker compose -f deploy/docker-compose.yml run --rm test
 docker compose -f deploy/docker-compose.yml down -v   # -v drops the state volume
