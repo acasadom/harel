@@ -255,8 +255,11 @@ class PostgresStore:
             ok = cur.fetchone()[0]
         if not ok:
             exe.version = old
+            with self._conn.cursor() as cur2:
+                cur2.execute("SELECT version FROM executions WHERE id = %s", (exe.id,))
+                row = cur2.fetchone()
             self._conn.rollback()
-            raise StoreConflict(exe.id, expected=old, found=None)
+            raise StoreConflict(exe.id, expected=old, found=row[0] if row else None)
         self._conn.commit()
 
     def is_processed(self, execution_id: str, event_id: str) -> bool:

@@ -42,6 +42,11 @@ async def transport():
     from harel.engine.aio_transport import AsyncMongoTransport
 
     t = await AsyncMongoTransport.from_url(url, db)
+    # reset state so each test starts with empty collections (group names are reused across tests)
+    await t._msgs.drop()
+    await t._locks.drop()
+    await t._counters.drop()
+    await t._locks.create_index("available_at")
     yield t
     await t.close()
 

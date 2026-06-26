@@ -186,33 +186,38 @@ class DynamoDBStore:
         limit: int = 100,
         cursor: Optional[str] = None,
     ) -> ExecutionPage:
-        # Scan (unordered) projecting only data+version; status/parent_id are inside the
-        # `data` JSON so they're filtered client-side (definition_id can be a server-side
-        # FilterExpression). cursor = base64 of the native LastEvaluatedKey. `Limit` bounds
-        # items EXAMINED before the filter, so a page may return fewer than `limit` matches.
+        # DynamoDB Scan's `Limit` bounds items EXAMINED (before FilterExpression), not items
+        # returned — with a selective filter, a single Scan call can return 0 matches even if
+        # matches exist later in the table. We drain Scan pages until we have enough matching
+        # items, then paginate with a Python integer offset encoded in the cursor.
         status = set(status) if status is not None else None
         kwargs: dict[str, Any] = {
             "TableName": self._t("executions"),
             "ProjectionExpression": "#dat,#v",
             "ExpressionAttributeNames": {"#dat": "data", "#v": "version"},
-            "Limit": limit,
         }
         if definition_id is not None:
             kwargs["ExpressionAttributeNames"]["#def"] = "definition_id"
             kwargs["FilterExpression"] = "#def = :def"
             kwargs["ExpressionAttributeValues"] = {":def": {"S": definition_id}}
-        if cursor:
-            kwargs["ExclusiveStartKey"] = json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
-        resp = self._db.scan(**kwargs)
-        items = []
-        for raw in resp.get("Items", []):
-            item = self._item(raw)
-            summary = ExecutionSummary.from_data(json.loads(item["data"]), int(item.get("version", 0)))
-            if _matches(summary, status, definition_id, roots_only):
-                items.append(summary)
-        lek = resp.get("LastEvaluatedKey")
-        nxt = base64.urlsafe_b64encode(json.dumps(lek).encode()).decode() if lek else None
-        return ExecutionPage(items=items, next_cursor=nxt)
+        off = int(base64.urlsafe_b64decode(cursor.encode()).decode()) if cursor else 0
+        all_items: list[ExecutionSummary] = []
+        scan_kw = dict(kwargs)
+        while True:
+            resp = self._db.scan(**scan_kw)
+            for raw in resp.get("Items", []):
+                item = self._item(raw)
+                summary = ExecutionSummary.from_data(json.loads(item["data"]), int(item.get("version", 0)))
+                if _matches(summary, status, definition_id, roots_only):
+                    all_items.append(summary)
+            lek = resp.get("LastEvaluatedKey")
+            if not lek:
+                break
+            scan_kw["ExclusiveStartKey"] = lek
+        page = all_items[off : off + limit]
+        has_more = off + limit < len(all_items)
+        nxt = base64.urlsafe_b64encode(str(off + limit).encode()).decode() if has_more else None
+        return ExecutionPage(items=page, next_cursor=nxt)
 
     def save(self, exe: Execution) -> None:
         self.commit(exe, [])
