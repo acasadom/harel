@@ -48,9 +48,19 @@ class DurableRunner:
     async def _build(store, definitions, clock, resolver, trace=False) -> AsyncDurableRunner:
         return AsyncDurableRunner(facade.as_async_store(store), definitions, clock, resolver, trace=trace)
 
-    def create(self, definition_id: str, context: Optional[dict] = None) -> Execution:
-        """Create, start and persist a new Execution; return its committed state."""
-        return facade.run(self._async.create, definition_id, context)
+    def create(
+        self,
+        definition_id: str,
+        context: Optional[dict] = None,
+        execution_id: Optional[str] = None,
+    ) -> Execution:
+        """Create, start and persist a new Execution; return its committed state.
+
+        Pass `execution_id` to use an externally-supplied id (e.g. a Stripe PaymentIntent
+        id) instead of a generated one.  Raises `ExecutionAlreadyExists` if that id is
+        already in the store.
+        """
+        return facade.run(self._async.create, definition_id, context, execution_id)
 
     def process(self, execution_id: str, event: Event) -> Execution:
         """Load a persisted Execution, feed it one event, return the committed state."""

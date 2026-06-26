@@ -11,7 +11,7 @@ from harel.dsl import definition_from_dsl
 from harel.engine.durable import DurableRunner
 from harel.engine.execution import Execution, Status
 from harel.engine.runtime import Driver, _SyncDriver
-from harel.engine.store import SqliteStore
+from harel.engine.store import ExecutionAlreadyExists, SqliteStore
 from harel.spec.states import Event
 
 
@@ -311,3 +311,26 @@ def test_an_immediately_finishing_region_is_not_lost_on_a_fork_crash(tmp_path):
     assert final.active_path == "Done"
     assert final.status is Status.DONE
     store2.close()
+
+
+def test_create_with_explicit_execution_id(tmp_path):
+    defn = definition_from_dsl(FLAT, "M")
+    runner = DurableRunner(SqliteStore(tmp_path / "stm.db"), {defn.id: defn})
+
+    exe = runner.create(defn.id, execution_id="my-custom-id")
+
+    assert exe.id == "my-custom-id"
+    assert exe.active_path == "B"  # FLAT auto-transitions A→B on start
+
+
+def test_create_with_duplicate_execution_id_raises(tmp_path):
+    import pytest
+
+    defn = definition_from_dsl(FLAT, "M")
+    runner = DurableRunner(SqliteStore(tmp_path / "stm.db"), {defn.id: defn})
+
+    runner.create(defn.id, execution_id="pi_abc123")
+
+    with pytest.raises(ExecutionAlreadyExists) as exc_info:
+        runner.create(defn.id, execution_id="pi_abc123")
+    assert exc_info.value.execution_id == "pi_abc123"

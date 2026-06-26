@@ -244,8 +244,21 @@ class AsyncDistributedRunner:
             trace=self._trace,
         )
 
-    async def create(self, definition_id: str, context: Optional[dict] = None) -> Execution:
-        exe = Execution(definition_id=definition_id, context=dict(context or {}))
+    async def create(
+        self,
+        definition_id: str,
+        context: Optional[dict] = None,
+        execution_id: Optional[str] = None,
+    ) -> Execution:
+        if execution_id is not None and await self.store.load(execution_id) is not None:
+            from harel.engine.store import ExecutionAlreadyExists
+
+            raise ExecutionAlreadyExists(execution_id)
+        exe = Execution(
+            definition_id=definition_id,
+            context=dict(context or {}),
+            **({"id": execution_id} if execution_id is not None else {}),
+        )
         await self._transport_driver(self.definitions[definition_id]).start(exe)
         loaded = await self.store.load(exe.id)
         assert loaded is not None

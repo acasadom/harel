@@ -14,7 +14,7 @@ from harel.engine.durable import DurableRunner
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary
 from harel.engine.resolve import DictResolver, MachineResolver, ResolveError
 from harel.engine.runtime import Driver
-from harel.engine.store import DictStore, ExecutionStore, SqliteStore
+from harel.engine.store import DictStore, ExecutionAlreadyExists, ExecutionStore, SqliteStore
 from harel.faas import handler, http_action, lambda_action, openfaas_action, remote_action
 from harel.idempotency import DictIdempotency, IdempotencyBackend, idempotent
 from harel.spec.states import Action, Event, EventFilter, LogEvent, Selector, Transition
@@ -40,6 +40,7 @@ __all__ = [
     "ExecutionPage",
     "Driver",
     "DurableRunner",
+    "ExecutionAlreadyExists",
     "ExecutionStore",
     "DictStore",
     "SqliteStore",
