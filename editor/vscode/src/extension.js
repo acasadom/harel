@@ -30,15 +30,22 @@ function detectWorkspacePython() {
   return null;
 }
 
+function expandVars(s) {
+  const folder = workspace.workspaceFolders?.[0]?.uri.fsPath ?? "";
+  return s.replace(/\$\{workspaceFolder\}/g, folder);
+}
+
 function resolveServerCommand() {
   const cfg = workspace.getConfiguration("harel");
   const override = cfg.get("serverCommand") || [];
   if (Array.isArray(override) && override.length > 0) {
-    return { command: override[0], args: override.slice(1) };
+    return { command: expandVars(override[0]), args: override.slice(1).map(expandVars) };
   }
   let python = cfg.get("pythonPath") || "python";
   if (python === "python") {
     python = detectWorkspacePython() || python;
+  } else {
+    python = expandVars(python);
   }
   return { command: python, args: ["-m", "harel.lsp"] };
 }
