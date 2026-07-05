@@ -94,7 +94,7 @@ class AsyncPostgresTransport:
         # one round-trip: the function fences on the token, deletes the head, frees the lock
         async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("SELECT harel_ack(%s, %s, %s)", (lease.group_id, lease.seq, lease.token))
+                await cur.execute("SELECT harel_ack(%s, %s, %s, %s)", (lease.group_id, lease.seq, lease.token, self._clock()))
             await conn.commit()
 
     async def nack(self, lease: Lease, delay: float = 0.0) -> None:

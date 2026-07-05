@@ -58,6 +58,7 @@ local ready = KEYS[1]
 local prefix = ARGV[1]
 local g = ARGV[2]
 local token = ARGV[3]
+local now_ms = tonumber(ARGV[4])
 local lockkey = prefix .. ':lock:' .. g
 if redis.call('GET', lockkey) ~= token then
   return 0
@@ -67,7 +68,8 @@ redis.call('LPOP', qkey)
 if redis.call('LLEN', qkey) == 0 then
   redis.call('ZREM', ready, g)
 else
-  redis.call('ZADD', ready, 0, g)
+  -- score = now_ms so this group goes to the back of the ready queue (round-robin)
+  redis.call('ZADD', ready, now_ms, g)
 end
 redis.call('DEL', lockkey)
 return 1
@@ -101,11 +103,13 @@ BEGIN
 END; $$ LANGUAGE plpgsql;
 """
 _PG_ACK_FN = """
-CREATE OR REPLACE FUNCTION harel_ack(p_group text, p_seq bigint, p_token text) RETURNS void AS $$
+CREATE OR REPLACE FUNCTION harel_ack(p_group text, p_seq bigint, p_token text, p_now double precision)
+RETURNS void AS $$
 BEGIN
   IF EXISTS (SELECT 1 FROM transport_groups WHERE group_id = p_group AND locked_by = p_token) THEN
     DELETE FROM transport_messages WHERE seq = p_seq;
-    UPDATE transport_groups SET locked_by = NULL, lock_expiry = NULL
+    -- lock_expiry = p_now (not NULL) so this group sorts after unprocessed ones (round-robin)
+    UPDATE transport_groups SET locked_by = NULL, lock_expiry = p_now
     WHERE group_id = p_group AND locked_by = p_token;
   END IF;
 END; $$ LANGUAGE plpgsql;

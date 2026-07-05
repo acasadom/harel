@@ -106,7 +106,7 @@ class PostgresTransport:
     def ack(self, lease: Lease) -> None:
         # one round-trip: the function fences on the token, deletes the head, frees the lock
         with self._conn.cursor() as cur:
-            cur.execute("SELECT harel_ack(%s, %s, %s)", (lease.group_id, lease.seq, lease.token))
+            cur.execute("SELECT harel_ack(%s, %s, %s, %s)", (lease.group_id, lease.seq, lease.token, self._clock()))
         self._conn.commit()
 
     def nack(self, lease: Lease, delay: float = 0.0) -> None:

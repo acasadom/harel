@@ -107,7 +107,7 @@ class RedisTransport:
     def ack(self, lease: Lease) -> None:
         # one atomic round-trip: fence on the token, pop the head, re-ready or drop, free the lock
         # (replaces GET+LPOP+LLEN+ZADD/ZREM+DEL and closes the lock-expires-mid-ack window)
-        self._ack_script(keys=[self._k_ready()], args=[self._prefix, lease.group_id, lease.token])
+        self._ack_script(keys=[self._k_ready()], args=[self._prefix, lease.group_id, lease.token, self._now_ms()])
 
     def nack(self, lease: Lease, delay: float = 0.0) -> None:
         if not self._owns(lease.group_id, lease.token):

@@ -78,7 +78,7 @@ class AsyncRedisTransport:
 
     async def ack(self, lease: Lease) -> None:
         # one atomic round-trip: fence on the token, pop the head, re-ready or drop, free the lock
-        await self._ack_script(keys=[self._k_ready()], args=[self._prefix, lease.group_id, lease.token])
+        await self._ack_script(keys=[self._k_ready()], args=[self._prefix, lease.group_id, lease.token, self._now_ms()])
 
     async def nack(self, lease: Lease, delay: float = 0.0) -> None:
         if not await self._owns(lease.group_id, lease.token):

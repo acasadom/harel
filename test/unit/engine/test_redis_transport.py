@@ -276,6 +276,28 @@ def test_claim_does_not_scan_all_groups(transport):
     assert transport._r.zcount(transport._k_ready(), now_ms + 1, "+inf") == 1
 
 
+def test_round_robin_fairness(server):
+    """After processing group A's first message, group B (never claimed, score=0)
+    must be preferred over group A (score=now_ms > 0) on the next claim."""
+    clock = [1000.0]
+    t = RedisTransport(fakeredis.FakeStrictRedis(server=server), clock=lambda: clock[0])
+
+    for i in range(5):
+        t.publish("A", _event(f"a{i}"))
+    t.publish("B", _event("b0"))
+
+    clock[0] = 1001.0
+    lease_a = t.claim("w", visibility=30)
+    assert lease_a is not None and lease_a.group_id == "A"
+
+    clock[0] = 1002.0
+    t.ack(lease_a)  # A's score is now 1002000 ms; B's score stays at 0
+
+    clock[0] = 1003.0
+    lease_b = t.claim("w", visibility=30)
+    assert lease_b is not None and lease_b.group_id == "B"
+
+
 def test_concurrent_claims_get_distinct_groups(server):
     """The atomic Lua claim hands each concurrent claimer a DISTINCT group — no two
     workers ever lease the same one. This is the lost-`SET NX`-race the script removes:

@@ -108,9 +108,10 @@ class AsyncMongoTransport:
             return
         await self._msgs.delete_one({"_id": lease.seq})
         if await self._msgs.find_one({"group_id": lease.group_id}) is not None:
+            # score = now so this group goes to the back of the ready queue (round-robin)
             await self._locks.update_one(
                 {"_id": lease.group_id, "token": lease.token},
-                {"$set": {"available_at": 0.0, "token": None}},
+                {"$set": {"available_at": self._clock(), "token": None}},
             )
         else:
             await self._locks.delete_one({"_id": lease.group_id, "token": lease.token})
