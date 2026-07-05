@@ -14,6 +14,7 @@ Reuses the pure dict helpers from the sync module (`_defn_for`/`_register_submac
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 from typing import Any, Callable, Optional
 
@@ -26,6 +27,7 @@ from harel.engine.execution import Execution, Status
 from harel.engine.resolve import MachineResolver
 from harel.engine.runtime import _CONTROL
 from harel.engine.store import StoreConflict
+from harel.engine.transport import Lease
 from harel.spec.states import Event
 
 
@@ -50,9 +52,15 @@ class AsyncTransportDriver(_AsyncRuntimeDriver):
         self.transport = transport
 
     async def _deliver_timeout(self, execution_id: str, event: Event) -> None:
-        await self.transport.publish(execution_id, event)
+        exe = await self.store.load(execution_id)
+        priority = exe.priority if exe is not None else 0
+        await self.transport.publish(execution_id, event, priority=priority)
 
-    async def _flush(self) -> None:
+    async def start(self, exe: Execution) -> None:
+        await self._run(exe, engine.core.start(self.defn, exe))
+        await self._flush(primary_priority={exe.id: exe.priority})
+
+    async def _flush(self, primary_priority: Optional[dict[str, int]] = None) -> None:
         while True:
             progressed = False
             for spawn in await self.store.pending_spawns():
@@ -61,7 +69,8 @@ class AsyncTransportDriver(_AsyncRuntimeDriver):
                 progressed = True
             for entry in await self.store.pending_outbox():
                 if entry.target_id is not None:
-                    await self.transport.publish(entry.target_id, entry.event)
+                    prio = (primary_priority or {}).get(entry.target_id, 0)
+                    await self.transport.publish(entry.target_id, entry.event, priority=prio)
                 await self.store.ack_outbox(entry.seq)
                 progressed = True
             if not progressed:
@@ -75,7 +84,7 @@ class AsyncTransportDriver(_AsyncRuntimeDriver):
         ]
         if event.kind not in _CONTROL and live:
             for child in live:
-                await self.transport.publish(child.id, event)
+                await self.transport.publish(child.id, event, priority=child.priority)
             await self.store.commit(exe, [], processed_event_id=event.id)
             enqueued = False  # broadcast went straight to the transport; nothing in the outbox
         else:
@@ -85,7 +94,7 @@ class AsyncTransportDriver(_AsyncRuntimeDriver):
         # by the next emitting event's relay and by `recover()` on startup (the idle loop never
         # flushed either, so this does not change the at-least-once guarantee).
         if enqueued:
-            await self._flush()
+            await self._flush(primary_priority={exe.id: exe.priority})
 
 
 class AsyncWorker:
@@ -104,6 +113,8 @@ class AsyncWorker:
         resolver: Optional[MachineResolver] = None,
         concurrency: int = 256,
         trace: bool = False,
+        high_ratio: float = 0.0,
+        priority_threshold: int = 1,
     ) -> None:
         self.store = store
         self.transport = transport
@@ -116,6 +127,8 @@ class AsyncWorker:
         self._clock = clock
         self.concurrency = concurrency
         self._trace = trace  # opt-in execution timeline, threaded to each per-execution driver
+        self.high_ratio = high_ratio
+        self.priority_threshold = priority_threshold
 
     def _driver(self, exe: Execution) -> AsyncTransportDriver:
         return AsyncTransportDriver(
@@ -160,9 +173,19 @@ class AsyncWorker:
         await self.transport.ack(lease)
         return True
 
+    async def _claim(self) -> Optional[Lease]:
+        """Claim one message, applying the high_ratio/priority_threshold policy.
+        When high_ratio>0, tries priority>=threshold first; falls back to any priority
+        so the worker isn't idle when no high-priority work is available."""
+        if self.high_ratio > 0 and random.random() < self.high_ratio:
+            lease = await self.transport.claim(self.worker_id, self.visibility, self.priority_threshold)
+            if lease is not None:
+                return lease
+        return await self.transport.claim(self.worker_id, self.visibility)
+
     async def step(self) -> bool:
         """Process at most one message. Returns False if nothing was claimable."""
-        lease = await self.transport.claim(self.worker_id, self.visibility)
+        lease = await self._claim()
         if lease is None:
             return False
         return await self._handle(lease)
@@ -190,7 +213,7 @@ class AsyncWorker:
 
         while not stop.is_set():
             await sem.acquire()
-            lease = await self.transport.claim(self.worker_id, self.visibility)
+            lease = await self._claim()
             if lease is None:
                 sem.release()
                 if await self.fire_due_timers() == 0:
@@ -249,6 +272,7 @@ class AsyncDistributedRunner:
         definition_id: str,
         context: Optional[dict] = None,
         execution_id: Optional[str] = None,
+        priority: int = 0,
     ) -> Execution:
         if execution_id is not None and await self.store.load(execution_id) is not None:
             from harel.engine.store import ExecutionAlreadyExists
@@ -257,6 +281,7 @@ class AsyncDistributedRunner:
         exe = Execution(
             definition_id=definition_id,
             context=dict(context or {}),
+            priority=priority,
             **({"id": execution_id} if execution_id is not None else {}),
         )
         await self._transport_driver(self.definitions[definition_id]).start(exe)
@@ -265,7 +290,9 @@ class AsyncDistributedRunner:
         return loaded
 
     async def send(self, execution_id: str, event: Event) -> None:
-        await self.transport.publish(execution_id, event)
+        exe = await self.store.load(execution_id)
+        priority = exe.priority if exe is not None else 0
+        await self.transport.publish(execution_id, event, priority=priority)
 
     def worker(
         self,
@@ -274,6 +301,8 @@ class AsyncDistributedRunner:
         suspend_recheck: float = 5.0,
         clock: Optional[Callable[[], float]] = None,
         concurrency: int = 256,
+        high_ratio: float = 0.0,
+        priority_threshold: int = 1,
     ) -> AsyncWorker:
         return AsyncWorker(
             self.store,
@@ -286,19 +315,21 @@ class AsyncDistributedRunner:
             resolver=self.resolver,
             concurrency=concurrency,
             trace=self._trace,
+            high_ratio=high_ratio,
+            priority_threshold=priority_threshold,
         )
 
     # --- control plane ------------------------------------------------------
-    async def _driver_for(self, execution_id: str) -> AsyncTransportDriver:
+    async def _driver_for(self, execution_id: str) -> tuple[AsyncTransportDriver, "Execution"]:
         exe = await self.store.load(execution_id)
         if exe is None:
             raise KeyError(execution_id)
-        return self._transport_driver(_defn_for(self.definitions, self.resolver, exe))
+        return self._transport_driver(_defn_for(self.definitions, self.resolver, exe)), exe
 
     async def cancel(self, execution_id: str, *, reason: Optional[dict] = None) -> None:
-        driver = await self._driver_for(execution_id)
+        driver, exe = await self._driver_for(execution_id)
         await control.cancel(self.store, driver.defn, execution_id, reason=reason)
-        await driver._flush()  # publish the injected Cancel (if any) to the transport
+        await driver._flush(primary_priority={execution_id: exe.priority})
 
     async def terminate(self, execution_id: str) -> None:
         await control.terminate(self.store, execution_id)

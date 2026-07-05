@@ -30,7 +30,9 @@ class RqliteTransport:
                 "CREATE TABLE IF NOT EXISTS messages (seq INTEGER PRIMARY KEY AUTOINCREMENT, "
                 "group_id TEXT NOT NULL, event TEXT NOT NULL, locked_by TEXT, lock_expiry REAL)",
                 "CREATE TABLE IF NOT EXISTS groups "
-                "(group_id TEXT PRIMARY KEY, last_claimed_at REAL NOT NULL DEFAULT 0.0)",
+                "(group_id TEXT PRIMARY KEY, last_claimed_at REAL NOT NULL DEFAULT 0.0, "
+                "priority INT NOT NULL DEFAULT 0)",
+                "INSERT OR IGNORE INTO groups (group_id) SELECT DISTINCT group_id FROM messages",
             ]
         )
 
@@ -69,16 +71,16 @@ class RqliteTransport:
             raise RuntimeError(f"rqlite query error: {result['error']}")
         return result.get("values") or []
 
-    def publish(self, group_id: str, event: Event) -> None:
+    def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
         self._execute(
             [
                 ["INSERT INTO messages (group_id, event) VALUES (?, ?)", group_id, event.model_dump_json()],
-                ["INSERT OR IGNORE INTO groups (group_id) VALUES (?)", group_id],
+                ["INSERT OR IGNORE INTO groups (group_id, priority) VALUES (?, ?)", group_id, priority],
             ],
             transaction=True,
         )
 
-    def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
+    def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
         now = self._clock()
         token = f"{worker_id}:{uuid.uuid4().hex}"
         results = self._execute(
@@ -90,11 +92,13 @@ class RqliteTransport:
                     "  WHERE (m.locked_by IS NULL OR m.lock_expiry < ?) "
                     "    AND m.group_id NOT IN ("
                     "      SELECT group_id FROM messages WHERE locked_by IS NOT NULL AND lock_expiry >= ?"
-                    "    ) ORDER BY g.last_claimed_at ASC, m.seq ASC LIMIT 1)",
+                    "    ) AND g.priority >= ?"
+                    "  ORDER BY g.last_claimed_at ASC, m.seq ASC LIMIT 1)",
                     token,
                     now + visibility,
                     now,
                     now,
+                    min_priority,
                 ]
             ]
         )

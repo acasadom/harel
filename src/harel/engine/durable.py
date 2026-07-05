@@ -53,14 +53,15 @@ class DurableRunner:
         definition_id: str,
         context: Optional[dict] = None,
         execution_id: Optional[str] = None,
+        priority: int = 0,
     ) -> Execution:
         """Create, start and persist a new Execution; return its committed state.
 
         Pass `execution_id` to use an externally-supplied id (e.g. a Stripe PaymentIntent
         id) instead of a generated one.  Raises `ExecutionAlreadyExists` if that id is
-        already in the store.
+        already in the store.  Pass `priority` (0–4) to control claim weighting.
         """
-        return facade.run(self._async.create, definition_id, context, execution_id)
+        return facade.run(self._async.create, definition_id, context, execution_id, priority)
 
     def process(self, execution_id: str, event: Event) -> Execution:
         """Load a persisted Execution, feed it one event, return the committed state."""

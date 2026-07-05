@@ -28,13 +28,13 @@ each backend is a sibling module under `harel/engine/transport/`, with a twin un
 
 | Method | Purpose |
 | --- | --- |
-| `publish(group_id, event)` | enqueue `event` in `group_id`'s FIFO |
-| `claim(worker_id, visibility)` | lease the oldest message of some group with **nothing in flight**, for `visibility` seconds; `None` if nothing is deliverable now |
+| `publish(group_id, event, priority=0)` | enqueue `event` in `group_id`'s FIFO; sets the group's priority on first publish |
+| `claim(worker_id, visibility, min_priority=0)` | lease the oldest message of some group with **nothing in flight**, for `visibility` seconds, considering only groups with `priority >= min_priority`; `None` if nothing deliverable |
 | `ack(lease)` | the message was handled — remove it, freeing its group |
 | `nack(lease, delay=0)` | return it to the queue: `delay=0` re-claimable now (retry); `delay>0` **parks** it (and blocks its group) until `delay` passes |
 | `close()` | release the connection/client |
 
-Two mechanisms recur across the backends, which each per-backend page then spells out exactly:
+Three mechanisms recur across the backends, which each per-backend page then spells out exactly:
 
 - **The lease / visibility timeout.** `claim` marks a group in-flight until `now + visibility`. If
   the worker `ack`s, the message is gone; if the worker **dies**, the lease expires and the
@@ -45,6 +45,11 @@ Two mechanisms recur across the backends, which each per-backend page then spell
 - **Parking (`nack` with delay).** The control plane parks a suspended group's message rather than
   spinning a worker on it — see [control plane](control-plane). The `_PARKED` sentinel marks a
   message that is non-claimable until its delay elapses.
+- **Round-robin fairness.** After `ack`, a group's claimability timestamp is set to `now` (not to
+  0/earliest) so it yields to groups that haven't been claimed recently. Groups that have never been
+  claimed have timestamp 0 and always go first. This prevents a handful of high-traffic executions
+  from monopolizing worker capacity — the hot-partition problem — while still processing every group
+  fairly.
 
 Backends differ only in *how* they enforce per-group exclusivity: a database that has a cheap
 serialization primitive (SQLite's write-lock, Postgres's row-lock, SQS's native `MessageGroupId`)

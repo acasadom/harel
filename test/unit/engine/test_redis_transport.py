@@ -270,7 +270,7 @@ def test_claim_does_not_scan_all_groups(transport):
     # the bounded candidate window is applied inside the atomic Lua claim — a single call,
     # independent of the 1000 pending groups, with the limit threaded through as the last arg
     assert claim_script.call_count == 1
-    assert claim_script.call_args.kwargs["args"][-1] == RedisTransport._CANDIDATES
+    assert RedisTransport._CANDIDATES in claim_script.call_args.kwargs["args"]
     # exactly one group was leased (its score bumped into the future); the rest stay at 0
     now_ms = int(time.time() * 1000)
     assert transport._r.zcount(transport._k_ready(), now_ms + 1, "+inf") == 1
@@ -296,6 +296,43 @@ def test_round_robin_fairness(server):
     clock[0] = 1003.0
     lease_b = t.claim("w", visibility=30)
     assert lease_b is not None and lease_b.group_id == "B"
+
+
+def test_min_priority_filters_low_priority_groups(server):
+    """claim(min_priority=N) skips groups whose priority < N; fallback to 0 picks them."""
+    t = RedisTransport(fakeredis.FakeStrictRedis(server=server))
+
+    t.publish("lo", _event("e1"), priority=0)
+    t.publish("hi", _event("e2"), priority=2)
+
+    lease = t.claim("w", visibility=30, min_priority=2)
+    assert lease is not None and lease.group_id == "hi"
+    t.ack(lease)
+
+    # low-priority group is invisible at min_priority=2
+    assert t.claim("w", visibility=30, min_priority=2) is None
+
+    lo = t.claim("w", visibility=30)
+    assert lo is not None and lo.group_id == "lo"
+
+
+def test_prio_hash_cleaned_up_on_drain(server):
+    """After a group is fully drained, HDEL removes its prio hash entry so a
+    re-publish can set a new (higher) priority via HSETNX.  Without the HDEL,
+    HSETNX is a no-op and the stale priority silently persists."""
+    t = RedisTransport(fakeredis.FakeStrictRedis(server=server))
+
+    t.publish("G", _event("e1"), priority=0)
+    lease = t.claim("w", visibility=30)
+    assert lease is not None
+    t.ack(lease)  # drains the group; HDEL must remove the prio hash entry
+
+    # re-publish the same group with a higher priority
+    t.publish("G", _event("e2"), priority=2)
+
+    # must be claimable at min_priority=2 (returns None if stale prio=0 persisted)
+    hi = t.claim("w", visibility=30, min_priority=2)
+    assert hi is not None and hi.group_id == "G"
 
 
 def test_concurrent_claims_get_distinct_groups(server):

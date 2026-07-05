@@ -211,6 +211,32 @@ def test_round_robin_fairness(backend, tmp_path):
         t.close()
 
 
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+def test_min_priority_filters_low_priority_groups(backend, tmp_path):
+    """claim(min_priority=N) skips groups whose priority < N; fallback to min_priority=0 picks them."""
+    if backend == "memory":
+        t = InMemoryTransport()
+    else:
+        t = SqliteTransport(tmp_path / "q.db")
+
+    t.publish("lo", _event("e1"), priority=0)
+    t.publish("hi", _event("e2"), priority=2)
+
+    lease = t.claim("w", visibility=30, min_priority=2)
+    assert lease is not None and lease.group_id == "hi"
+    t.ack(lease)
+
+    # low group is invisible at min_priority=2
+    assert t.claim("w", visibility=30, min_priority=2) is None
+
+    # falls back to any priority
+    lo = t.claim("w", visibility=30)
+    assert lo is not None and lo.group_id == "lo"
+
+    if backend == "sqlite":
+        t.close()
+
+
 def test_sqlite_concurrency_preserves_group_exclusivity(tmp_path):
     db = tmp_path / "q.db"  # workers open separate connections to the same file
     processed, expected, violations, errors = _drain_concurrently(

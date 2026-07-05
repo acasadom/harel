@@ -257,6 +257,64 @@ async def _mongo_runner():
     return store, transport
 
 
+# ---------------------------------------------------------------------------
+# AsyncMongoTransport fairness and priority contract
+# ---------------------------------------------------------------------------
+
+
+async def test_async_mongo_transport_round_robin(transport):
+    """After acking A, a fresh group B (available_at=0.0) must be preferred over
+    A (available_at=current epoch) on the next claim."""
+    from harel.spec.states import Event
+
+    for i in range(5):
+        await transport.publish("A", Event(kind=f"a{i}"))
+
+    lease_a = await transport.claim("w", visibility=30)
+    assert lease_a is not None and lease_a.group_id == "A"
+    await transport.ack(lease_a)  # A's available_at = time.time()
+
+    # B is fresh: available_at=0.0 < A's current-epoch value
+    await transport.publish("B", Event(kind="b0"))
+
+    lease_b = await transport.claim("w", visibility=30)
+    assert lease_b is not None and lease_b.group_id == "B"
+
+
+async def test_async_mongo_transport_min_priority_filters(transport):
+    """claim(min_priority=N) skips groups whose priority < N; fallback to 0 picks them."""
+    from harel.spec.states import Event
+
+    await transport.publish("lo", Event(kind="e1"), priority=0)
+    await transport.publish("hi", Event(kind="e2"), priority=2)
+
+    lease = await transport.claim("w", visibility=30, min_priority=2)
+    assert lease is not None and lease.group_id == "hi"
+    await transport.ack(lease)
+
+    assert await transport.claim("w", visibility=30, min_priority=2) is None
+
+    lo = await transport.claim("w", visibility=30)
+    assert lo is not None and lo.group_id == "lo"
+
+
+async def test_async_mongo_transport_priority_reset_on_drain(transport):
+    """When a group drains, the lock document is deleted so a re-publish can set
+    a new (higher) priority.  Without the delete, the stale priority=0 persists
+    and claim(min_priority=2) returns None."""
+    from harel.spec.states import Event
+
+    await transport.publish("G", Event(kind="e1"), priority=0)
+    lease = await transport.claim("w", visibility=30)
+    assert lease is not None
+    await transport.ack(lease)  # group drained → lock document deleted
+
+    await transport.publish("G", Event(kind="e2"), priority=2)
+
+    hi = await transport.claim("w", visibility=30, min_priority=2)
+    assert hi is not None and hi.group_id == "G"
+
+
 async def test_pipeline_flat_async_mongo():
     from harel.dsl import definition_from_dsl
     from harel.engine.aio.distributed import AsyncDistributedRunner

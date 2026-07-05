@@ -42,13 +42,13 @@ class AsyncLibsqlTransport:
         )
         return cls(sync)
 
-    async def publish(self, group_id: str, event: Event) -> None:
+    async def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
         async with self._lock:
-            await asyncio.to_thread(self._t.publish, group_id, event)
+            await asyncio.to_thread(self._t.publish, group_id, event, priority)
 
-    async def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
+    async def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
         async with self._lock:
-            return await asyncio.to_thread(self._t.claim, worker_id, visibility)
+            return await asyncio.to_thread(self._t.claim, worker_id, visibility, min_priority)
 
     async def ack(self, lease: Lease) -> None:
         async with self._lock:

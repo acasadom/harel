@@ -18,9 +18,10 @@ class AsyncInMemoryTransport:
     def __init__(self, clock: Callable[[], float] = time.time) -> None:
         self._messages: list[dict] = []
         self._seq = 0
+        self._groups: dict[str, dict] = {}  # group_id → {last_claimed_at, priority}
         self._clock = clock
 
-    async def publish(self, group_id: str, event: Event) -> None:
+    async def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
         self._seq += 1
         self._messages.append(
             {
@@ -31,22 +32,33 @@ class AsyncInMemoryTransport:
                 "lock_expiry": 0.0,
             }
         )
+        self._groups.setdefault(group_id, {"last_claimed_at": 0.0, "priority": priority})
 
-    async def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
+    async def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
         now = self._clock()
         in_flight = {
             m["group_id"] for m in self._messages if m["locked_by"] is not None and m["lock_expiry"] >= now
         }
-        for m in sorted(self._messages, key=lambda m: m["seq"]):
+        for m in sorted(
+            self._messages,
+            key=lambda m: (self._groups.get(m["group_id"], {}).get("last_claimed_at", 0.0), m["seq"]),
+        ):
             available = m["locked_by"] is None or m["lock_expiry"] < now
-            if available and m["group_id"] not in in_flight:
-                m["locked_by"] = worker_id
-                m["lock_expiry"] = now + visibility
-                return Lease(m["seq"], m["group_id"], m["event"])
+            if not available or m["group_id"] in in_flight:
+                continue
+            if self._groups.get(m["group_id"], {}).get("priority", 0) < min_priority:
+                continue
+            m["locked_by"] = worker_id
+            m["lock_expiry"] = now + visibility
+            if m["group_id"] in self._groups:
+                self._groups[m["group_id"]]["last_claimed_at"] = now
+            return Lease(m["seq"], m["group_id"], m["event"])
         return None
 
     async def ack(self, lease: Lease) -> None:
         self._messages = [m for m in self._messages if m["seq"] != lease.seq]
+        if not any(m["group_id"] == lease.group_id for m in self._messages):
+            self._groups.pop(lease.group_id, None)
 
     async def nack(self, lease: Lease, delay: float = 0.0) -> None:
         for m in self._messages:

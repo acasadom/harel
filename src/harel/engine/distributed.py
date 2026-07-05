@@ -78,6 +78,8 @@ class Worker:
         clock: Callable[[], float] = time.time,
         resolver: Optional[MachineResolver] = None,
         concurrency: int = 256,
+        high_ratio: float = 0.0,
+        priority_threshold: int = 1,
     ) -> None:
         self.store = store
         self.transport = transport
@@ -93,11 +95,23 @@ class Worker:
             clock,
             resolver,
             concurrency,
+            high_ratio,
+            priority_threshold,
         )
 
     @staticmethod
     def _portal_build(
-        store, transport, definitions, worker_id, visibility, suspend_recheck, clock, resolver, concurrency
+        store,
+        transport,
+        definitions,
+        worker_id,
+        visibility,
+        suspend_recheck,
+        clock,
+        resolver,
+        concurrency,
+        high_ratio=0.0,
+        priority_threshold=1,
     ):
         from harel.engine.aio import facade
 
@@ -114,6 +128,8 @@ class Worker:
                 clock,
                 resolver,
                 concurrency,
+                high_ratio=high_ratio,
+                priority_threshold=priority_threshold,
             )
 
         return facade.run(build)
@@ -178,10 +194,11 @@ class DistributedRunner:
         definition_id: str,
         context: Optional[dict] = None,
         execution_id: Optional[str] = None,
+        priority: int = 0,
     ) -> Execution:
         from harel.engine.aio import facade
 
-        return facade.run(self._async.create, definition_id, context, execution_id)
+        return facade.run(self._async.create, definition_id, context, execution_id, priority)
 
     def send(self, execution_id: str, event: Event) -> None:
         from harel.engine.aio import facade
@@ -195,6 +212,8 @@ class DistributedRunner:
         suspend_recheck: float = 5.0,
         clock: Optional[Callable[[], float]] = None,
         concurrency: int = 256,
+        high_ratio: float = 0.0,
+        priority_threshold: int = 1,
     ) -> Worker:
         return Worker(
             self.store,
@@ -206,6 +225,8 @@ class DistributedRunner:
             clock or self._clock,
             self.resolver,
             concurrency,
+            high_ratio=high_ratio,
+            priority_threshold=priority_threshold,
         )
 
     # --- control plane (lifecycle commands; bypass the event queue) ---------

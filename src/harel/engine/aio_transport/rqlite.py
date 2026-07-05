@@ -46,7 +46,9 @@ class AsyncRqliteTransport:
                         "(seq INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT NOT NULL, "
                         "event TEXT NOT NULL, locked_by TEXT, lock_expiry REAL)",
                         "CREATE TABLE IF NOT EXISTS groups "
-                        "(group_id TEXT PRIMARY KEY, last_claimed_at REAL NOT NULL DEFAULT 0.0)",
+                        "(group_id TEXT PRIMARY KEY, last_claimed_at REAL NOT NULL DEFAULT 0.0, "
+                        "priority INT NOT NULL DEFAULT 0)",
+                        "INSERT OR IGNORE INTO groups (group_id) SELECT DISTINCT group_id FROM messages",
                     ]
                 )
                 return transport
@@ -79,16 +81,16 @@ class AsyncRqliteTransport:
             raise RuntimeError(f"rqlite query error: {result['error']}")
         return result.get("values") or []
 
-    async def publish(self, group_id: str, event: Event) -> None:
+    async def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
         await self._execute(
             [
                 ["INSERT INTO messages (group_id, event) VALUES (?, ?)", group_id, event.model_dump_json()],
-                ["INSERT OR IGNORE INTO groups (group_id) VALUES (?)", group_id],
+                ["INSERT OR IGNORE INTO groups (group_id, priority) VALUES (?, ?)", group_id, priority],
             ],
             transaction=True,
         )
 
-    async def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
+    async def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
         now = self._clock()
         token = f"{worker_id}:{uuid.uuid4().hex}"
         results = await self._execute(
@@ -100,11 +102,13 @@ class AsyncRqliteTransport:
                     "  WHERE (m.locked_by IS NULL OR m.lock_expiry < ?) "
                     "    AND m.group_id NOT IN ("
                     "      SELECT group_id FROM messages WHERE locked_by IS NOT NULL AND lock_expiry >= ?"
-                    "    ) ORDER BY g.last_claimed_at ASC, m.seq ASC LIMIT 1)",
+                    "    ) AND g.priority >= ?"
+                    "  ORDER BY g.last_claimed_at ASC, m.seq ASC LIMIT 1)",
                     token,
                     now + visibility,
                     now,
                     now,
+                    min_priority,
                 ]
             ]
         )
@@ -112,9 +116,7 @@ class AsyncRqliteTransport:
             return None
         rows = await self._query("SELECT seq, group_id, event FROM messages WHERE locked_by = ?", (token,))
         seq, group_id, event = rows[0]
-        await self._execute(
-            [["UPDATE groups SET last_claimed_at = ? WHERE group_id = ?", now, group_id]]
-        )
+        await self._execute([["UPDATE groups SET last_claimed_at = ? WHERE group_id = ?", now, group_id]])
         return Lease(seq, group_id, Event.model_validate_json(event), token=token)
 
     async def ack(self, lease: Lease) -> None:

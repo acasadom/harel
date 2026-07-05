@@ -60,7 +60,7 @@ class SqsTransport:
                 _time.sleep(retry_delay)
         raise last if last is not None else RuntimeError("sqs connect failed")
 
-    def publish(self, group_id: str, event: Event) -> None:
+    def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
         self._sqs.send_message(
             QueueUrl=self._queue_url,
             MessageBody=event.model_dump_json(),
@@ -68,7 +68,7 @@ class SqsTransport:
             MessageDeduplicationId=uuid.uuid4().hex,  # unique per send (fan-out reuses event ids)
         )
 
-    def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
+    def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
         resp = self._sqs.receive_message(
             QueueUrl=self._queue_url,
             MaxNumberOfMessages=1,

@@ -9,7 +9,7 @@ with `isolation_level=None` (autocommit) so the code drives `BEGIN IMMEDIATE`/`C
 
 ## Schema
 
-One table:
+Two tables:
 
 ```text
 CREATE TABLE IF NOT EXISTS messages (
@@ -19,49 +19,59 @@ CREATE TABLE IF NOT EXISTS messages (
   locked_by    TEXT,                               -- worker id while leased / "__parked__" / NULL when free
   lock_expiry  REAL                                -- epoch when the lease (or park) ends; NULL when free
 )
+
+CREATE TABLE IF NOT EXISTS groups (
+  group_id       TEXT PRIMARY KEY,    -- one row per group that has messages
+  last_claimed_at REAL NOT NULL DEFAULT 0.0,  -- epoch of last claim (0 = never claimed)
+  priority        INT  NOT NULL DEFAULT 0     -- set on first publish; 0–4
+)
 ```
 
-`(locked_by, lock_expiry)` is the **lease**: a message is *in flight* while `locked_by IS NOT NULL
-AND lock_expiry >= now`. `seq` is both the FIFO key (ordered delivery within a group) and the
-handle a `Lease` carries for `ack`/`nack`.
+`(locked_by, lock_expiry)` is the **lease**. The `groups` table drives **round-robin fairness**
+and **priority filtering**: `claim` sorts by `last_claimed_at ASC` (oldest-claimed first) and
+filters by `priority >= min_priority`.
 
-## The claim — atomic select-then-lease
+## The claim — atomic select-then-lease with round-robin and priority
 
 ```text
 BEGIN IMMEDIATE                                   -- take SQLite's write-lock: claims serialize
-SELECT seq, group_id, event FROM messages m
-  WHERE (m.locked_by IS NULL OR m.lock_expiry < ?)          -- this message is free (or its lease lapsed)
-    AND m.group_id NOT IN (                                 -- and its GROUP has nothing in flight
+SELECT m.seq, m.group_id, m.event
+  FROM messages m JOIN groups g ON g.group_id = m.group_id
+  WHERE (m.locked_by IS NULL OR m.lock_expiry < ?)          -- message free / lease lapsed (recovery)
+    AND m.group_id NOT IN (                                  -- group has nothing in flight
       SELECT group_id FROM messages WHERE locked_by IS NOT NULL AND lock_expiry >= ?)
-  ORDER BY m.seq LIMIT 1                                     -- oldest deliverable message
+    AND g.priority >= ?                                      -- priority floor (min_priority)
+  ORDER BY g.last_claimed_at ASC, m.seq ASC LIMIT 1         -- oldest-claimed group first (round-robin)
 -- if a row matched:
+UPDATE groups SET last_claimed_at = ? WHERE group_id = ?    -- record claim time (round-robin)
 UPDATE messages SET locked_by = ?, lock_expiry = now+visibility WHERE seq = ?
 COMMIT                                              -- (ROLLBACK on any error)
 ```
 
-Two predicates do the work: the message itself must be free (`locked_by IS NULL OR lock_expiry <
-now` — the second half is the **crash recovery**, an expired lease is treated as free), **and**
-the `NOT IN (… in-flight groups …)` subquery enforces the single-active-consumer-per-group
-invariant. Because the whole select-then-lease runs under `BEGIN IMMEDIATE`, no two workers can
-lease the same group — SQLite's write-lock is the serialization primitive (the same role
-Postgres's row lock or Redis's `SET NX` play elsewhere). Returns `Lease(seq, group_id, event)` or
-`None` when nothing is deliverable.
+Sorting by `g.last_claimed_at ASC` makes groups that have never been claimed (`0`) always go
+first; after each ack, `last_claimed_at` is set to `now` so a just-processed group yields to
+others. `AND g.priority >= ?` skips groups below the priority floor (pass `min_priority=0` for
+normal operation). Returns `Lease(seq, group_id, event)` or `None` when nothing is deliverable.
 
 ## Operations
 
 ```text
-publish(group_id, event)      # INSERT INTO messages (group_id, event) VALUES (?, ?)
-claim(worker_id, visibility)  # the BEGIN IMMEDIATE select-then-lease above
-ack(lease)                    # DELETE FROM messages WHERE seq = ?  (the group is then free)
+publish(group_id, event, priority=0)
+    # INSERT INTO messages (group_id, event) VALUES (?, ?)
+    # INSERT OR IGNORE INTO groups (group_id, priority) VALUES (?, ?)  -- first publish sets priority
+claim(worker_id, visibility, min_priority=0)  # the BEGIN IMMEDIATE select-then-lease above
+ack(lease)
+    # DELETE FROM messages WHERE seq = ?
+    # DELETE FROM groups WHERE group_id = ? AND NOT EXISTS (SELECT 1 FROM messages WHERE group_id = ?)
 nack(lease, delay=0)          # delay>0  -> UPDATE locked_by="__parked__", lock_expiry=now+delay  (park)
                               # delay==0 -> UPDATE locked_by=NULL, lock_expiry=NULL              (retry now)
 close()                       # close the connection
 ```
 
-`ack` removes the message; the group's next message becomes claimable on the next `claim`.
-`nack(delay>0)` **parks** the message (`_PARKED` sentinel keeps its group blocked) until the delay
-elapses — the portable queue-park the [control plane](../control-plane) uses for a suspended
-group. `nack(0)` frees it for immediate retry (e.g. after a `StoreConflict`).
+`ack` removes the message and drops the group row when no messages remain. `nack(delay>0)` **parks**
+the message (`_PARKED` sentinel keeps its group blocked) until the delay elapses — the portable
+queue-park the [control plane](../control-plane) uses for a suspended group. `nack(0)` frees it
+for immediate retry (e.g. after a `StoreConflict`).
 
 ## FIFO
 
