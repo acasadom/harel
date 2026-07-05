@@ -152,11 +152,11 @@ class _AsyncTransportAdapter:
     def __init__(self, transport: Any) -> None:
         self._t = transport
 
-    async def publish(self, group_id, event):
-        return self._t.publish(group_id, event)
+    async def publish(self, group_id, event, priority=0):
+        return self._t.publish(group_id, event, priority)
 
-    async def claim(self, worker_id, visibility):
-        return self._t.claim(worker_id, visibility)
+    async def claim(self, worker_id, visibility, min_priority=0):
+        return self._t.claim(worker_id, visibility, min_priority)
 
     async def ack(self, lease):
         return self._t.ack(lease)

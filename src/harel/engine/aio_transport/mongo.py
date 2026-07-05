@@ -66,17 +66,20 @@ class AsyncMongoTransport:
         )
         return int(doc["n"])
 
-    async def publish(self, group_id: str, event: Event) -> None:
+    async def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
         await self._msgs.insert_one(
             {"_id": await self._next_seq(), "group_id": group_id, "event": event.model_dump_json()}
         )
         # ready the group NOW iff it is new ($setOnInsert): don't make an in-flight/parked
-        # group claimable before its lease/park elapses
+        # group claimable before its lease/park elapses.
+        # priority is fixed on first publish ($setOnInsert ignores subsequent publishes).
         await self._locks.update_one(
-            {"_id": group_id}, {"$setOnInsert": {"available_at": 0.0, "token": None}}, upsert=True
+            {"_id": group_id},
+            {"$setOnInsert": {"available_at": 0.0, "token": None, "priority": priority}},
+            upsert=True,
         )
 
-    async def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
+    async def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
         now = self._clock()
         while True:
             token = f"{worker_id}:{uuid.uuid4().hex}"
@@ -86,7 +89,7 @@ class AsyncMongoTransport:
             # leases). Replaces a find()-then-loop-of-find_one_and_update where workers fished
             # the same candidate window and burned round-trips on lost leases.
             leased = await self._locks.find_one_and_update(
-                {"available_at": {"$lte": now}},
+                {"available_at": {"$lte": now}, "priority": {"$gte": min_priority}},
                 {"$set": {"token": token, "available_at": now + visibility}},
                 sort=[("available_at", 1)],
             )
@@ -108,9 +111,10 @@ class AsyncMongoTransport:
             return
         await self._msgs.delete_one({"_id": lease.seq})
         if await self._msgs.find_one({"group_id": lease.group_id}) is not None:
+            # score = now so this group goes to the back of the ready queue (round-robin)
             await self._locks.update_one(
                 {"_id": lease.group_id, "token": lease.token},
-                {"$set": {"available_at": 0.0, "token": None}},
+                {"$set": {"available_at": self._clock(), "token": None}},
             )
         else:
             await self._locks.delete_one({"_id": lease.group_id, "token": lease.token})

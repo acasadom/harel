@@ -78,17 +78,20 @@ class MongoTransport:
         )
         return int(doc["n"])
 
-    def publish(self, group_id: str, event: Event) -> None:
+    def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
         self._msgs.insert_one(
             {"_id": self._next_seq(), "group_id": group_id, "event": event.model_dump_json()}
         )
         # ready the group NOW iff it is new ($setOnInsert): a publish into an in-flight or
         # parked group must not make it claimable before its lease/park elapses.
+        # priority is fixed on first publish ($setOnInsert ignores subsequent publishes).
         self._locks.update_one(
-            {"_id": group_id}, {"$setOnInsert": {"available_at": 0.0, "token": None}}, upsert=True
+            {"_id": group_id},
+            {"$setOnInsert": {"available_at": 0.0, "token": None, "priority": priority}},
+            upsert=True,
         )
 
-    def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
+    def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
         now = self._clock()
         while True:
             token = f"{worker_id}:{uuid.uuid4().hex}"
@@ -98,7 +101,7 @@ class MongoTransport:
             # leases). Replaces a find()-then-loop-of-find_one_and_update where workers fished
             # the same candidate window and burned round-trips on lost leases.
             leased = self._locks.find_one_and_update(
-                {"available_at": {"$lte": now}},
+                {"available_at": {"$lte": now}, "priority": {"$gte": min_priority}},
                 {"$set": {"token": token, "available_at": now + visibility}},
                 sort=[("available_at", 1)],
             )
@@ -120,10 +123,10 @@ class MongoTransport:
             return  # fencing: only the current lock holder removes + re-readies
         self._msgs.delete_one({"_id": lease.seq})
         if self._msgs.find_one({"group_id": lease.group_id}) is not None:
-            # more messages: claimable now, in FIFO order (next head)
+            # score = now so this group goes to the back of the ready queue (round-robin)
             self._locks.update_one(
                 {"_id": lease.group_id, "token": lease.token},
-                {"$set": {"available_at": 0.0, "token": None}},
+                {"$set": {"available_at": self._clock(), "token": None}},
             )
         else:
             self._locks.delete_one({"_id": lease.group_id, "token": lease.token})

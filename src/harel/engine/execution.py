@@ -68,6 +68,10 @@ class Execution(pydantic.BaseModel):
     version: int = 0  # optimistic-concurrency token: a save commits version+1 iff the
     #                   stored row is still at `version` (single-writer per Execution)
 
+    priority: int = pydantic.Field(
+        default=0, ge=0, le=4
+    )  # 0=normal … 4=highest; controls worker claim weighting
+
     # --- orthogonal (model (i)) ---------------------------------------------
     parent_id: Optional[str] = None  # set on a child: the parent Execution to notify
     child_id: Optional[str] = None  # set on a child: its key in the parent's `children`

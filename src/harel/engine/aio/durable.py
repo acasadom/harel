@@ -60,6 +60,7 @@ class AsyncDurableRunner:
         definition_id: str,
         context: Optional[dict] = None,
         execution_id: Optional[str] = None,
+        priority: int = 0,
     ) -> Execution:
         if execution_id is not None and await self.store.load(execution_id) is not None:
             from harel.engine.store import ExecutionAlreadyExists
@@ -68,6 +69,7 @@ class AsyncDurableRunner:
         exe = Execution(
             definition_id=definition_id,
             context=dict(context or {}),
+            priority=priority,
             **({"id": execution_id} if execution_id is not None else {}),
         )
         await self._driver(definition_id).start(exe)

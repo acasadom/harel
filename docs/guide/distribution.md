@@ -172,6 +172,51 @@ this toy does. harel's per-event path is a lean claim → load → commit → ac
 the problem: a **statechart engine** when the domain *is* a machine of named states with hierarchy and
 guards; a **durable-execution engine** when it's imperative code that must survive crashes.
 
+## Fair queuing and priority
+
+### Round-robin fairness
+
+By default workers use **round-robin** across active executions. After a group is processed
+(its message acked), its "last claimed" timestamp is set to `now`, so it moves to the back of
+the queue. Groups never yet claimed have timestamp 0 and are always preferred. This prevents a
+handful of high-traffic executions from monopolizing all worker capacity — the hot-partition
+problem that arises with pure FIFO queues.
+
+### Execution priority
+
+Assign a priority level at creation time (`0` = normal, up to `4`):
+
+```python
+urgent = runner.create(defn.id, priority=2)
+```
+
+The priority is stored in the transport on the first publish for that execution. It is
+**fixed at creation**: subsequent `send()` calls carry the same execution priority when
+publishing to a group that does not yet have messages in the transport, and `INSERT OR IGNORE`
+/ `$setOnInsert` / `HSETNX` semantics ensure the first-published value wins.
+
+### Worker priority routing — `high_ratio` + `priority_threshold`
+
+Workers decide which priority tier to serve on each claim step:
+
+```python
+worker = runner.worker(
+    high_ratio=0.8,        # 80 % of claim attempts target priority >= threshold first
+    priority_threshold=2,  # "high" means priority 2, 3, or 4
+)
+```
+
+On each `step()`:
+- With probability `high_ratio`, the worker tries `claim(min_priority=priority_threshold)`.
+  If nothing is available at that priority, it **falls back** to `claim(min_priority=0)` so
+  the worker never idles when only normal-priority work is present.
+- With probability `1 - high_ratio`, it goes directly to `claim(min_priority=0)`.
+
+The default is `high_ratio=0.0` — no priority routing, every claim considers all groups
+equally. A worker configured with `high_ratio=1.0` always attempts high-priority work first
+and falls back to any priority, effectively draining high-priority executions before touching
+normal ones whenever both are available.
+
 ## Orthogonal & fan-out, distributed
 
 The same machinery carries [orthogonal regions](../tutorial/08-orthogonal) and

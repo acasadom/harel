@@ -45,7 +45,8 @@ class AsyncPostgresTransport:
                 )
                 await cur.execute(
                     "CREATE TABLE IF NOT EXISTS transport_groups "
-                    "(group_id TEXT PRIMARY KEY, locked_by TEXT, lock_expiry DOUBLE PRECISION)"
+                    "(group_id TEXT PRIMARY KEY, locked_by TEXT, lock_expiry DOUBLE PRECISION, "
+                    "priority INT NOT NULL DEFAULT 0)"
                 )
                 await cur.execute(
                     "CREATE INDEX IF NOT EXISTS transport_groups_claimable ON transport_groups (lock_expiry)"
@@ -55,7 +56,7 @@ class AsyncPostgresTransport:
             await conn.commit()
         return cls(pool, prefix, clock)
 
-    async def publish(self, group_id: str, event: Event) -> None:
+    async def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
         async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
@@ -63,13 +64,13 @@ class AsyncPostgresTransport:
                     (group_id, event.model_dump_json()),
                 )
                 await cur.execute(
-                    "INSERT INTO transport_groups (group_id, locked_by, lock_expiry) VALUES (%s, NULL, NULL) "
-                    "ON CONFLICT (group_id) DO NOTHING",
-                    (group_id,),
+                    "INSERT INTO transport_groups (group_id, locked_by, lock_expiry, priority) "
+                    "VALUES (%s, NULL, NULL, %s) ON CONFLICT (group_id) DO NOTHING",
+                    (group_id, priority),
                 )
             await conn.commit()
 
-    async def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
+    async def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
         now = self._clock()
         token = f"{worker_id}:{uuid.uuid4().hex}"
         # one round-trip: the function leases the lowest claimable group (FOR UPDATE SKIP LOCKED,
@@ -78,8 +79,8 @@ class AsyncPostgresTransport:
             try:
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        "SELECT group_id, seq, event FROM harel_claim(%s, %s, %s)",
-                        (now, now + visibility, token),
+                        "SELECT group_id, seq, event FROM harel_claim(%s, %s, %s, %s)",
+                        (now, now + visibility, token, min_priority),
                     )
                     row = await cur.fetchone()
                 await conn.commit()
@@ -94,7 +95,10 @@ class AsyncPostgresTransport:
         # one round-trip: the function fences on the token, deletes the head, frees the lock
         async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("SELECT harel_ack(%s, %s, %s)", (lease.group_id, lease.seq, lease.token))
+                await cur.execute(
+                    "SELECT harel_ack(%s, %s, %s, %s)",
+                    (lease.group_id, lease.seq, lease.token, self._clock()),
+                )
             await conn.commit()
 
     async def nack(self, lease: Lease, delay: float = 0.0) -> None:

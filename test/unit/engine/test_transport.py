@@ -180,6 +180,63 @@ def test_memory_concurrency_preserves_group_exclusivity():
     assert processed == expected  # every message processed exactly once
 
 
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+def test_round_robin_fairness(backend, tmp_path):
+    """A group that was just processed should yield to groups that haven't been claimed yet.
+    Group A publishes N messages first; group B publishes 1 message after.
+    With round-robin, B must be served before A exhausts its queue."""
+    clock = [0.0]
+    if backend == "memory":
+        t = InMemoryTransport(clock=lambda: clock[0])
+    else:
+        t = SqliteTransport(tmp_path / "q.db", clock=lambda: clock[0])
+
+    for i in range(5):
+        t.publish("A", _event(f"a{i}"))
+    t.publish("B", _event("b0"))
+
+    # claim A's first message, then ack it — A's last_claimed_at is now > B's (0)
+    clock[0] = 1.0
+    lease_a = t.claim("w", visibility=30)
+    assert lease_a is not None and lease_a.group_id == "A"
+    clock[0] = 2.0
+    t.ack(lease_a)
+
+    # next claim must prefer B (last_claimed_at=0) over A (last_claimed_at=1.0)
+    clock[0] = 3.0
+    lease_b = t.claim("w", visibility=30)
+    assert lease_b is not None and lease_b.group_id == "B"
+
+    if backend == "sqlite":
+        t.close()
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+def test_min_priority_filters_low_priority_groups(backend, tmp_path):
+    """claim(min_priority=N) skips groups whose priority < N; fallback to min_priority=0 picks them."""
+    if backend == "memory":
+        t = InMemoryTransport()
+    else:
+        t = SqliteTransport(tmp_path / "q.db")
+
+    t.publish("lo", _event("e1"), priority=0)
+    t.publish("hi", _event("e2"), priority=2)
+
+    lease = t.claim("w", visibility=30, min_priority=2)
+    assert lease is not None and lease.group_id == "hi"
+    t.ack(lease)
+
+    # low group is invisible at min_priority=2
+    assert t.claim("w", visibility=30, min_priority=2) is None
+
+    # falls back to any priority
+    lo = t.claim("w", visibility=30)
+    assert lo is not None and lo.group_id == "lo"
+
+    if backend == "sqlite":
+        t.close()
+
+
 def test_sqlite_concurrency_preserves_group_exclusivity(tmp_path):
     db = tmp_path / "q.db"  # workers open separate connections to the same file
     processed, expected, violations, errors = _drain_concurrently(

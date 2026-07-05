@@ -66,7 +66,7 @@ class AsyncSqsTransport:
         await stack.aclose()
         raise last if last is not None else RuntimeError("sqs connect failed")
 
-    async def publish(self, group_id: str, event: Event) -> None:
+    async def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
         await self._sqs.send_message(
             QueueUrl=self._queue_url,
             MessageBody=event.model_dump_json(),
@@ -74,7 +74,7 @@ class AsyncSqsTransport:
             MessageDeduplicationId=uuid.uuid4().hex,  # unique per send (fan-out reuses event ids)
         )
 
-    async def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
+    async def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
         resp = await self._sqs.receive_message(
             QueueUrl=self._queue_url,
             MaxNumberOfMessages=1,

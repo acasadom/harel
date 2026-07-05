@@ -122,6 +122,64 @@ def test_many_ready_groups_all_get_claimed(transport):
     assert len(claimed) == n
 
 
+def test_round_robin_fairness(client):
+    """After processing group A, group B (available_at=0.0) must be preferred over
+    A (available_at=recent_epoch) on the next claim."""
+    clock = [0.0]
+    t = MongoTransport(client, clock=lambda: clock[0])
+
+    for i in range(5):
+        t.publish("A", _event(f"a{i}"))
+
+    clock[0] = 1.0
+    lease_a = t.claim("w", visibility=30)
+    assert lease_a is not None and lease_a.group_id == "A"
+
+    clock[0] = 2.0
+    t.ack(lease_a)  # A's available_at is now 2.0
+
+    # B is fresh (available_at=0.0 < A's 2.0) — claim must prefer B
+    t.publish("B", _event("b0"))
+
+    clock[0] = 3.0
+    lease_b = t.claim("w", visibility=30)
+    assert lease_b is not None and lease_b.group_id == "B"
+
+
+def test_min_priority_filters_low_priority_groups(client):
+    """claim(min_priority=N) skips groups whose priority < N; fallback to 0 picks them."""
+    t = MongoTransport(client)
+
+    t.publish("lo", _event("e1"), priority=0)
+    t.publish("hi", _event("e2"), priority=2)
+
+    lease = t.claim("w", visibility=30, min_priority=2)
+    assert lease is not None and lease.group_id == "hi"
+    t.ack(lease)
+
+    assert t.claim("w", visibility=30, min_priority=2) is None
+
+    lo = t.claim("w", visibility=30)
+    assert lo is not None and lo.group_id == "lo"
+
+
+def test_priority_reset_on_drain(client):
+    """When a group drains, its lock document is deleted so a re-publish can set
+    a new (higher) priority.  Without the delete, the stale priority=0 would
+    persist and claim(min_priority=2) would return None."""
+    t = MongoTransport(client)
+
+    t.publish("G", _event("e1"), priority=0)
+    lease = t.claim("w", visibility=30)
+    assert lease is not None
+    t.ack(lease)  # group drains → lock document deleted
+
+    t.publish("G", _event("e2"), priority=2)
+
+    hi = t.claim("w", visibility=30, min_priority=2)
+    assert hi is not None and hi.group_id == "G"
+
+
 def test_ack_removes_the_message(transport):
     transport.publish("G", _event("only"))
     transport.ack(transport.claim("w", visibility=30))

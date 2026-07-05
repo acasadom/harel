@@ -124,3 +124,48 @@ def test_duplicate_send_is_processed_once(backend):
     final = store.load(exe.id)
     assert final.active_path == "C"
     assert final.context["trace"] == ["A.enter", "B.enter", "C.enter"]  # not C.enter twice
+
+
+def test_send_publishes_with_execution_priority():
+    """runner.send() must publish the event with the execution's own priority so
+    that a transport claim filtered at that priority level can pick it up."""
+    store = DictStore()
+    transport = InMemoryTransport()
+    defn = definition_from_dsl(FLAT, "M")
+    runner = DistributedRunner(store, transport, {defn.id: defn})
+
+    exe = runner.create(defn.id, priority=3)
+    runner.send(exe.id, Event(kind="Go"))
+
+    # the event must be visible at min_priority=3; if send() published at 0 this returns None
+    lease = transport.claim("w", visibility=30, min_priority=3)
+    assert lease is not None and lease.event.kind == "Go"
+
+
+def test_worker_high_ratio_drains_high_priority_first():
+    """Worker with high_ratio=1.0 processes the high-priority execution before low-priority ones.
+    With high_ratio=1.0, random() < 1.0 always, so the first claim attempt always uses
+    min_priority=threshold; falls back only if there's no high-priority work."""
+    store = DictStore()
+    transport = InMemoryTransport()
+    defn = definition_from_dsl(FLAT, "M")
+    runner = DistributedRunner(store, transport, {defn.id: defn})
+
+    # create 3 low-priority executions and send Go to each
+    low_ids = [runner.create(defn.id, priority=0).id for _ in range(3)]
+    for eid in low_ids:
+        runner.send(eid, Event(kind="Go"))
+
+    # create one high-priority execution and send Go
+    high_id = runner.create(defn.id, priority=2).id
+    runner.send(high_id, Event(kind="Go"))
+
+    worker = runner.worker(high_ratio=1.0, priority_threshold=2)
+    worker.step()  # must pick the high-priority execution
+
+    high_final = store.load(high_id)
+    assert high_final.status is Status.DONE  # fully processed (C → terminal)
+
+    # low-priority executions untouched (still at B)
+    for eid in low_ids:
+        assert store.load(eid).active_path == "B"

@@ -43,6 +43,9 @@ class AsyncRedisTransport:
     def _k_lock(self, group_id: str) -> str:
         return f"{self._prefix}:lock:{group_id}"
 
+    def _k_prio(self) -> str:
+        return f"{self._prefix}:prio"
+
     @staticmethod
     def _decode(value: Any) -> Optional[str]:
         if value is None:
@@ -52,19 +55,20 @@ class AsyncRedisTransport:
     def _now_ms(self) -> int:
         return int(self._clock() * 1000)
 
-    async def publish(self, group_id: str, event: Event) -> None:
+    async def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
         async with self._r.pipeline() as pipe:
             pipe.rpush(self._k_q(group_id), event.model_dump_json())
             pipe.zadd(self._k_ready(), {group_id: 0}, nx=True)
+            pipe.hsetnx(self._k_prio(), group_id, priority)
             await pipe.execute()
 
-    async def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
+    async def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
         px = max(1, int(visibility * 1000))
         now = self._now_ms()
         token = f"{worker_id}:{uuid.uuid4().hex}"
         # one atomic round-trip: lock a distinct due group + return its head (no SET NX race)
         res = await self._claim_script(
-            keys=[self._k_ready()], args=[self._prefix, now, px, token, self._CANDIDATES]
+            keys=[self._k_ready()], args=[self._prefix, now, px, token, self._CANDIDATES, min_priority]
         )
         if not res:
             return None
@@ -78,7 +82,9 @@ class AsyncRedisTransport:
 
     async def ack(self, lease: Lease) -> None:
         # one atomic round-trip: fence on the token, pop the head, re-ready or drop, free the lock
-        await self._ack_script(keys=[self._k_ready()], args=[self._prefix, lease.group_id, lease.token])
+        await self._ack_script(
+            keys=[self._k_ready()], args=[self._prefix, lease.group_id, lease.token, self._now_ms()]
+        )
 
     async def nack(self, lease: Lease, delay: float = 0.0) -> None:
         if not await self._owns(lease.group_id, lease.token):

@@ -13,27 +13,31 @@ tests; a real Redis runs Lua natively.)
 ## Key space
 
 ```text
-{prefix}:q:{group_id}   list   — the per-group FIFO (RPUSH to enqueue; index 0 = oldest)
-{prefix}:lock:{group_id} string — the group lock AND the fencing token; its PX TTL = the lease
-{prefix}:ready          ZSET   — groups that have messages, scored by epoch-ms when next claimable (0 = now)
+{prefix}:q:{group_id}    list   — the per-group FIFO (RPUSH to enqueue; index 0 = oldest)
+{prefix}:lock:{group_id} string — the group lock AND fencing token; PX TTL = the lease
+{prefix}:ready           ZSET   — groups that have messages, scored by epoch-ms when next claimable
+{prefix}:prio            hash   — group_id → priority (int 0–4); set on first publish
 ```
 
 - **`q:{G}`** is the FIFO: `RPUSH` appends, the head (`LINDEX 0`) is the oldest message.
 - **`lock:{G}`** is the group lock *and* the fencing token: only one worker can hold it, and its
   `PX` TTL — the visibility window — **auto-releases it if the worker dies**, so the head becomes
-  claimable again with no separate sweep. Its value is a unique `worker_id:uuid` **fencing token**
-  (so only the current holder may ack/nack). It is now `SET` **inside the atomic `claim` Lua
-  script**, not a client-side `SET NX` — so two workers never race for the same group.
+  claimable again with no separate sweep. It is `SET` **inside the atomic `claim` Lua script**,
+  not a client-side `SET NX` — so two workers never race for the same group.
 - **`ready`** is the index: a sorted set of group ids scored by the epoch-ms at which each group
   is next claimable. `claim` reads only the few lowest-scored due groups
-  (`ZRANGEBYSCORE -inf now LIMIT 0 K`, `_CANDIDATES = 8`), so its cost is `O(log N + K)` — not the
-  old `SMEMBERS` over every group, which collapsed throughput under a large backlog.
+  (`ZRANGEBYSCORE -inf now LIMIT 0 K`, `_CANDIDATES = 8`), so its cost is `O(log N + K)`.
+  New groups start at score 0 (claimable now); after `ack`, the score is set to `now_ms` —
+  the **round-robin mechanism** that ensures a just-processed group yields to others.
+- **`prio`** is a hash of `group_id → priority`. `HSETNX` sets it on first publish only (first
+  publish wins; subsequent publishes do not overwrite).
 
 ## publish
 
 ```text
 RPUSH q:{G} event_json
 ZADD ready {G: 0} NX        # NX: never reset the score of an already-scheduled group
+HSETNX prio {G} priority    # set priority iff the key does not yet exist (first publish wins)
 ```
 
 The `NX` is important: a publish into a group that is **in flight or parked** must not pull its
@@ -43,17 +47,21 @@ gets score 0 (claimable now).
 ## claim — one atomic Lua: lock a due group, return its head
 
 `claim` is a single server-side Lua script (`_CLAIM_LUA`) run in ONE round-trip. It scans the
-lowest-scored due groups, locks the first whose lock is free and whose queue has a head, bumps that
-group's `ready` score out of the visibility window, and returns its head — all atomically:
+lowest-scored due groups, optionally filters by priority, locks the first whose lock is free and
+whose queue has a head, bumps that group's `ready` score out of the visibility window, and returns
+its head — all atomically:
 
 ```text
-claim(token, visibility):           # ONE atomic Lua round-trip, KEYS=[ready], ARGV=[prefix, now, px, token, K]
-    cands = ZRANGEBYSCORE ready -inf now LIMIT 0 K       # only the few due groups (K = _CANDIDATES = 8)
+claim(token, visibility, min_priority=0):
+    # ONE atomic Lua round-trip, KEYS=[ready], ARGV=[prefix, now, px, token, K, min_prio]
+    cands = ZRANGEBYSCORE ready -inf now LIMIT 0 K       # only the few due groups (K = 8)
     for G in cands:
         if EXISTS lock:{G} == 0:                         # lock free?
+            prio = HGET prio {G} or 0
+            if prio < min_prio:  continue                # below priority floor — skip
             payload = LINDEX q:{G} 0                     # the head, NOT removed
             if payload:
-                SET lock:{G} token PX=visibility         # take the lease (inside the script, no SET NX race)
+                SET lock:{G} token PX=visibility         # take the lease (atomic, no SET NX race)
                 ZADD ready {G: now + visibility}         # bump out of the due window
                 return {G, payload}
             else:
@@ -62,45 +70,40 @@ claim(token, visibility):           # ONE atomic Lua round-trip, KEYS=[ready], A
 ```
 
 Because the whole scan-lock-bump is **one atomic script**, concurrent claimers each get a
-**distinct** group — there is no client-side `SET NX` loop and so no lost-lock races (the old
-client-side version had workers race for the same candidate head and burn round-trips on lost
-`SET NX` locks, plateauing throughput around 8 workers and regressing beyond). The lock still
-expires on its own (the lease) if the worker dies; bumping the `ready` score out by `visibility`
-means other claimers skip the group **and** it reappears as a candidate once the lease expires —
-recovery without a sweeper. The head is returned but **not removed** (it's removed on `ack`).
+**distinct** group. The ready ZSET is ordered by when each group next becomes claimable — score 0
+for new groups, `now_ms` after ack (round-robin) — so least-recently-claimed groups bubble to the
+front of the candidate window.
 
 ## ack — one atomic Lua; nack — fenced by the token
 
 `ack` is also a single server-side Lua script (`_ACK_LUA`) in ONE round-trip: it fences on the lock
-token, pops the delivered head, re-readies the group (or drops it if now empty), and frees the
-lock. `nack` stays a small client-side pair of writes, fenced on the token:
+token, pops the delivered head, re-readies the group at `now_ms` (round-robin) or drops it, and
+frees the lock. `nack` stays a small client-side pair of writes, fenced on the token:
 
 ```text
-ack(lease):           # ONE atomic Lua round-trip, KEYS=[ready], ARGV=[prefix, G, token]
-    if GET lock:{G} != token: return 0                # fencing: only the current holder proceeds
-    LPOP q:{G}                                         # remove the head
-    if LLEN q:{G} == 0:  ZREM ready {G}                # group drained -> drop it
-    else:                ZADD ready {G: 0}             # next message claimable now (FIFO)
-    DEL lock:{G}                                       # free the group
+ack(lease):    # ONE atomic Lua round-trip, KEYS=[ready], ARGV=[prefix, G, token, now_ms]
+    if GET lock:{G} != token: return 0                 # fencing: only the current holder proceeds
+    LPOP q:{G}                                          # remove the head
+    if LLEN q:{G} == 0:  ZREM ready {G}                 # group drained -> drop it from ready
+                         HDEL prio {G}                  # clean up priority (allows correct priority on recycle)
+    else:                ZADD ready {G: now_ms}          # round-robin: score = now (not 0)
+    DEL lock:{G}                                        # free the group
 
 nack(lease, delay):  if GET lock:{G} != token: return
               if delay>0:   ZADD ready {G: now+delay};  SET lock:{G} token PX=delay   # park (keep lock)
               else:         ZADD ready {G: 0};          DEL lock:{G}                  # retry now
 ```
 
-Folding `ack` into one Lua replaces the old GET+LPOP+LLEN+ZADD/ZREM+DEL (~5 round-trips) **and**
-closes the lock-expires-mid-ack window the multi-command version had. Every mutation is **fenced**
-on still owning the lock: a worker whose lease expired mid-handling can't corrupt a group another
-worker has since taken (the store's version/CAS is the deeper backstop). `nack(delay>0)` **parks**:
-it pushes the `ready` score into the future *and* keeps the lock for the same window, so the
-still-present head isn't re-claimed until the park elapses — the control-plane's suspended-group
-park.
+Setting the ack score to `now_ms` (not 0) is the round-robin mechanism: a group that was just
+processed sits behind newly-arriving groups (score 0) until those are all claimed. Folding `ack`
+into one Lua replaces the old GET+LPOP+LLEN+ZADD/ZREM+DEL (~5 round-trips) **and** closes the
+lock-expires-mid-ack window. `nack(delay>0)` **parks**: pushes the score into the future *and*
+keeps the lock so the still-present head isn't re-claimed until the park elapses.
 
 ## FIFO
 
 Within a group, `q:{G}` is a list consumed head-first and only one worker holds the lock at a
-time, so order is preserved; on `ack` the group is re-readied at score 0 so its next message is
-immediately claimable.
+time, so order is preserved.
 
 ## Async twin
 

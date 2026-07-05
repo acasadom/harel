@@ -16,7 +16,11 @@ class SqliteTransport:
     SQLite's global write-lock serializes claims across processes — the per-group
     exclusivity selection is then race-free with plain SQL (no row/advisory
     locks). One connection per thread/process on the same file (WAL mode); the
-    lease (`lock_expiry`) recovers a message a crashed worker was holding."""
+    lease (`lock_expiry`) recovers a message a crashed worker was holding.
+
+    Round-robin fairness: a `groups` table tracks `last_claimed_at` per group.
+    `claim` picks the group with the oldest `last_claimed_at` (0 = never claimed),
+    updating it immediately so the group moves to the back of the queue."""
 
     def __init__(self, path: Union[str, Path] = ":memory:", clock: Callable[[], float] = time.time) -> None:
         # isolation_level=None -> autocommit; we drive BEGIN IMMEDIATE/COMMIT by hand in claim.
@@ -28,30 +32,44 @@ class SqliteTransport:
             "(seq INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT NOT NULL, event TEXT NOT NULL, "
             "locked_by TEXT, lock_expiry REAL)"
         )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS groups "
+            "(group_id TEXT PRIMARY KEY, last_claimed_at REAL NOT NULL DEFAULT 0.0, "
+            "priority INT NOT NULL DEFAULT 0)"
+        )
+        # backfill: messages published before this version have no groups row; without it the
+        # claim() INNER JOIN would make them invisible forever after an upgrade.
+        self._conn.execute("INSERT OR IGNORE INTO groups (group_id) SELECT DISTINCT group_id FROM messages")
         self._clock = clock
 
-    def publish(self, group_id: str, event: Event) -> None:
+    def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
         self._conn.execute(
             "INSERT INTO messages (group_id, event) VALUES (?, ?)",
             (group_id, event.model_dump_json()),
         )
+        self._conn.execute(
+            "INSERT OR IGNORE INTO groups (group_id, priority) VALUES (?, ?)", (group_id, priority)
+        )
 
-    def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
+    def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
         now = self._clock()
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             row = self._conn.execute(
-                "SELECT seq, group_id, event FROM messages m "
+                "SELECT m.seq, m.group_id, m.event FROM messages m "
+                "JOIN groups g ON g.group_id = m.group_id "
                 "WHERE (m.locked_by IS NULL OR m.lock_expiry < ?) "
                 "AND m.group_id NOT IN ("
                 "  SELECT group_id FROM messages WHERE locked_by IS NOT NULL AND lock_expiry >= ?"
-                ") ORDER BY m.seq LIMIT 1",
-                (now, now),
+                ") AND g.priority >= ?"
+                " ORDER BY g.last_claimed_at ASC, m.seq ASC LIMIT 1",
+                (now, now, min_priority),
             ).fetchone()
             if row is None:
                 self._conn.execute("COMMIT")
                 return None
             seq, group_id, event = row
+            self._conn.execute("UPDATE groups SET last_claimed_at = ? WHERE group_id = ?", (now, group_id))
             self._conn.execute(
                 "UPDATE messages SET locked_by = ?, lock_expiry = ? WHERE seq = ?",
                 (worker_id, now + visibility, seq),
@@ -63,7 +81,18 @@ class SqliteTransport:
             raise
 
     def ack(self, lease: Lease) -> None:
-        self._conn.execute("DELETE FROM messages WHERE seq = ?", (lease.seq,))
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            self._conn.execute("DELETE FROM messages WHERE seq = ?", (lease.seq,))
+            self._conn.execute(
+                "DELETE FROM groups WHERE group_id = ? AND NOT EXISTS "
+                "(SELECT 1 FROM messages WHERE group_id = ?)",
+                (lease.group_id, lease.group_id),
+            )
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
 
     def nack(self, lease: Lease, delay: float = 0.0) -> None:
         if delay > 0:

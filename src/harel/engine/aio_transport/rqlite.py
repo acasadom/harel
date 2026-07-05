@@ -44,7 +44,11 @@ class AsyncRqliteTransport:
                     [
                         "CREATE TABLE IF NOT EXISTS messages "
                         "(seq INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT NOT NULL, "
-                        "event TEXT NOT NULL, locked_by TEXT, lock_expiry REAL)"
+                        "event TEXT NOT NULL, locked_by TEXT, lock_expiry REAL)",
+                        "CREATE TABLE IF NOT EXISTS groups "
+                        "(group_id TEXT PRIMARY KEY, last_claimed_at REAL NOT NULL DEFAULT 0.0, "
+                        "priority INT NOT NULL DEFAULT 0)",
+                        "INSERT OR IGNORE INTO groups (group_id) SELECT DISTINCT group_id FROM messages",
                     ]
                 )
                 return transport
@@ -54,8 +58,9 @@ class AsyncRqliteTransport:
                 await anyio.sleep(retry_delay)
         raise last if last is not None else RuntimeError("rqlite connect failed")
 
-    async def _execute(self, statements: list) -> list:
-        resp = await self._client.post(f"{self._base}/db/execute", json=statements, timeout=self._timeout)
+    async def _execute(self, statements: list, transaction: bool = False) -> list:
+        url = f"{self._base}/db/execute" + ("?transaction" if transaction else "")
+        resp = await self._client.post(url, json=statements, timeout=self._timeout)
         resp.raise_for_status()
         results = resp.json()["results"]
         for res in results:
@@ -76,26 +81,34 @@ class AsyncRqliteTransport:
             raise RuntimeError(f"rqlite query error: {result['error']}")
         return result.get("values") or []
 
-    async def publish(self, group_id: str, event: Event) -> None:
+    async def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
         await self._execute(
-            [["INSERT INTO messages (group_id, event) VALUES (?, ?)", group_id, event.model_dump_json()]]
+            [
+                ["INSERT INTO messages (group_id, event) VALUES (?, ?)", group_id, event.model_dump_json()],
+                ["INSERT OR IGNORE INTO groups (group_id, priority) VALUES (?, ?)", group_id, priority],
+            ],
+            transaction=True,
         )
 
-    async def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
+    async def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
         now = self._clock()
         token = f"{worker_id}:{uuid.uuid4().hex}"
         results = await self._execute(
             [
                 [
                     "UPDATE messages SET locked_by = ?, lock_expiry = ? WHERE seq = ("
-                    "  SELECT seq FROM messages m WHERE (m.locked_by IS NULL OR m.lock_expiry < ?) "
+                    "  SELECT m.seq FROM messages m "
+                    "  JOIN groups g ON g.group_id = m.group_id "
+                    "  WHERE (m.locked_by IS NULL OR m.lock_expiry < ?) "
                     "    AND m.group_id NOT IN ("
                     "      SELECT group_id FROM messages WHERE locked_by IS NOT NULL AND lock_expiry >= ?"
-                    "    ) ORDER BY m.seq LIMIT 1)",
+                    "    ) AND g.priority >= ?"
+                    "  ORDER BY g.last_claimed_at ASC, m.seq ASC LIMIT 1)",
                     token,
                     now + visibility,
                     now,
                     now,
+                    min_priority,
                 ]
             ]
         )
@@ -103,10 +116,22 @@ class AsyncRqliteTransport:
             return None
         rows = await self._query("SELECT seq, group_id, event FROM messages WHERE locked_by = ?", (token,))
         seq, group_id, event = rows[0]
+        await self._execute([["UPDATE groups SET last_claimed_at = ? WHERE group_id = ?", now, group_id]])
         return Lease(seq, group_id, Event.model_validate_json(event), token=token)
 
     async def ack(self, lease: Lease) -> None:
-        await self._execute([["DELETE FROM messages WHERE seq = ?", lease.seq]])
+        await self._execute(
+            [
+                ["DELETE FROM messages WHERE seq = ?", lease.seq],
+                [
+                    "DELETE FROM groups WHERE group_id = ? AND NOT EXISTS "
+                    "(SELECT 1 FROM messages WHERE group_id = ?)",
+                    lease.group_id,
+                    lease.group_id,
+                ],
+            ],
+            transaction=True,
+        )
 
     async def nack(self, lease: Lease, delay: float = 0.0) -> None:
         if delay > 0:

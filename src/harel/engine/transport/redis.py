@@ -67,6 +67,9 @@ class RedisTransport:
     def _k_lock(self, group_id: str) -> str:
         return f"{self._prefix}:lock:{group_id}"
 
+    def _k_prio(self) -> str:
+        return f"{self._prefix}:prio"
+
     @staticmethod
     def _decode(value: Any) -> Optional[str]:
         if value is None:
@@ -76,23 +79,25 @@ class RedisTransport:
     def _now_ms(self) -> int:
         return int(self._clock() * 1000)
 
-    def publish(self, group_id: str, event: Event) -> None:
+    def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
         pipe = self._r.pipeline()
         pipe.rpush(self._k_q(group_id), event.model_dump_json())
         # NX: never reset the score of a group that is already scheduled — a publish
         # into an in-flight or parked group must not make it claimable before its
         # lease/park elapses. A brand-new group gets score 0 (claimable now).
         pipe.zadd(self._k_ready(), {group_id: 0}, nx=True)
+        # HSETNX: first publish sets the priority; subsequent ones leave it unchanged.
+        pipe.hsetnx(self._k_prio(), group_id, priority)
         pipe.execute()
 
-    def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
+    def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
         px = max(1, int(visibility * 1000))
         now = self._now_ms()
         token = f"{worker_id}:{uuid.uuid4().hex}"
         # one atomic round-trip: the script locks a distinct due group (scoring it out of
         # the window) and returns its head — no client-side SET NX race between workers.
         res = self._claim_script(
-            keys=[self._k_ready()], args=[self._prefix, now, px, token, self._CANDIDATES]
+            keys=[self._k_ready()], args=[self._prefix, now, px, token, self._CANDIDATES, min_priority]
         )
         if not res:
             return None
@@ -107,7 +112,9 @@ class RedisTransport:
     def ack(self, lease: Lease) -> None:
         # one atomic round-trip: fence on the token, pop the head, re-ready or drop, free the lock
         # (replaces GET+LPOP+LLEN+ZADD/ZREM+DEL and closes the lock-expires-mid-ack window)
-        self._ack_script(keys=[self._k_ready()], args=[self._prefix, lease.group_id, lease.token])
+        self._ack_script(
+            keys=[self._k_ready()], args=[self._prefix, lease.group_id, lease.token, self._now_ms()]
+        )
 
     def nack(self, lease: Lease, delay: float = 0.0) -> None:
         if not self._owns(lease.group_id, lease.token):

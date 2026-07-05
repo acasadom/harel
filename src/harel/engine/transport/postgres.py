@@ -44,7 +44,8 @@ class PostgresTransport:
             )
             cur.execute(
                 "CREATE TABLE IF NOT EXISTS transport_groups "
-                "(group_id TEXT PRIMARY KEY, locked_by TEXT, lock_expiry DOUBLE PRECISION)"
+                "(group_id TEXT PRIMARY KEY, locked_by TEXT, lock_expiry DOUBLE PRECISION, "
+                "priority INT NOT NULL DEFAULT 0)"
             )
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS transport_groups_claimable ON transport_groups (lock_expiry)"
@@ -68,22 +69,22 @@ class PostgresTransport:
                 _time.sleep(retry_delay)
         raise last if last is not None else RuntimeError("postgres connect failed")
 
-    def publish(self, group_id: str, event: Event) -> None:
+    def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
         with self._conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO transport_messages (group_id, event) VALUES (%s, %s)",
                 (group_id, event.model_dump_json()),
             )
             # ready the group iff new (ON CONFLICT DO NOTHING) — a publish into an in-flight or
-            # parked group must not reset its lease
+            # parked group must not reset its lease or priority
             cur.execute(
-                "INSERT INTO transport_groups (group_id, locked_by, lock_expiry) VALUES (%s, NULL, NULL) "
-                "ON CONFLICT (group_id) DO NOTHING",
-                (group_id,),
+                "INSERT INTO transport_groups (group_id, locked_by, lock_expiry, priority) "
+                "VALUES (%s, NULL, NULL, %s) ON CONFLICT (group_id) DO NOTHING",
+                (group_id, priority),
             )
         self._conn.commit()
 
-    def claim(self, worker_id: str, visibility: float) -> Optional[Lease]:
+    def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
         now = self._clock()
         token = f"{worker_id}:{uuid.uuid4().hex}"
         # one round-trip: the function leases the lowest claimable group (FOR UPDATE SKIP LOCKED,
@@ -91,8 +92,8 @@ class PostgresTransport:
         try:
             with self._conn.cursor() as cur:
                 cur.execute(
-                    "SELECT group_id, seq, event FROM harel_claim(%s, %s, %s)",
-                    (now, now + visibility, token),
+                    "SELECT group_id, seq, event FROM harel_claim(%s, %s, %s, %s)",
+                    (now, now + visibility, token, min_priority),
                 )
                 row = cur.fetchone()
             self._conn.commit()
@@ -106,7 +107,9 @@ class PostgresTransport:
     def ack(self, lease: Lease) -> None:
         # one round-trip: the function fences on the token, deletes the head, frees the lock
         with self._conn.cursor() as cur:
-            cur.execute("SELECT harel_ack(%s, %s, %s)", (lease.group_id, lease.seq, lease.token))
+            cur.execute(
+                "SELECT harel_ack(%s, %s, %s, %s)", (lease.group_id, lease.seq, lease.token, self._clock())
+            )
         self._conn.commit()
 
     def nack(self, lease: Lease, delay: float = 0.0) -> None:
