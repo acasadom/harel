@@ -273,7 +273,7 @@ def test_claim_does_not_scan_all_groups(transport):
     assert RedisTransport._CANDIDATES in claim_script.call_args.kwargs["args"]
     # exactly one group was leased (its score bumped into the future); the rest stay at 0
     now_ms = int(time.time() * 1000)
-    assert transport._r.zcount(transport._k_ready(), now_ms + 1, "+inf") == 1
+    assert transport._r.zcount(transport._k_ready(0), now_ms + 1, "+inf") == 1
 
 
 def test_round_robin_fairness(server):
@@ -333,6 +333,22 @@ def test_prio_hash_cleaned_up_on_drain(server):
     # must be claimable at min_priority=2 (returns None if stale prio=0 persisted)
     hi = t.claim("w", visibility=30, min_priority=2)
     assert hi is not None and hi.group_id == "G"
+
+
+def test_high_priority_group_reachable_behind_a_large_low_priority_backlog(transport):
+    """The reason for per-priority tiers: a high-priority group behind MANY more than the
+    candidate-window (`_CANDIDATES`) of low-priority groups must still be found by
+    claim(min_priority>0). With the old single ZSET + filter-inside-the-window, the high
+    group sat outside the lowest-scored window and was starved until ~all the low ones drained."""
+    n = RedisTransport._CANDIDATES * 12  # far more low-priority groups than the window
+    for i in range(n):
+        transport.publish(f"lo{i:04d}", _event("e"), priority=0)
+    # id sorts AFTER every low group (all share score 0, so ties break lexically): on the old
+    # single-ZSET design it fell outside the lowest-scored candidate window and was invisible.
+    transport.publish("zzzz-hi", _event("e"), priority=3)
+
+    lease = transport.claim("w", visibility=30, min_priority=1)
+    assert lease is not None and lease.group_id == "zzzz-hi"  # found now, not after n drains
 
 
 def test_concurrent_claims_get_distinct_groups(server):

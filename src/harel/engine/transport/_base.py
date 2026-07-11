@@ -13,53 +13,84 @@ from harel.spec.states import Event
 # claim's "available"/in-flight checks skip it) until its `lock_expiry` passes.
 _PARKED = "__parked__"
 
-# The Redis `claim`, server-side and atomic (shared by the sync + async backends).
-# Scan the lowest-due groups, lock the first whose lock is free and whose queue has a
-# head, bump its ready-score out of the visibility window, and return (group, head). All
-# in ONE round-trip that Redis runs atomically — so concurrent claimers each get a
-# DISTINCT group with ZERO lost races. It replaces a client-side ZRANGEBYSCORE-then-loop-
-# of-`SET NX`, where workers raced for the same candidate head and burned round-trips on
-# lost locks (throughput plateaued ~8 workers and *regressed* beyond). KEYS[1]=ready zset;
-# ARGV = prefix, now_ms, lease_px_ms, fencing_token, candidate_limit. The lock:/q: keys are
-# computed from the prefix, so this targets a single Redis instance (not Redis Cluster —
-# the transport never was). A stale empty group found in the window is dropped (ZREM).
+# The Redis `publish`, server-side and atomic (shared by the sync + async backends). Pushes
+# the payload onto the group's FIFO, fixes the group's priority on the FIRST publish (HSETNX,
+# clamped to 0..4), and readies it (score 0) in the ZSET of ITS priority tier (`ready:{prio}`)
+# — one per priority level, so `claim` can find a high-priority group without scanning past a
+# backlog of low-priority ones. NX on the ZADD: a publish into an in-flight/parked group must
+# not reset its score. ARGV = prefix, group, payload, priority. Single Redis instance (keys
+# computed from prefix — never was Cluster).
+_PUBLISH_LUA = """
+local prefix = ARGV[1]
+local g = ARGV[2]
+local payload = ARGV[3]
+local priority = tonumber(ARGV[4])
+if priority < 0 then priority = 0 end
+if priority > 4 then priority = 4 end
+redis.call('RPUSH', prefix .. ':q:' .. g, payload)
+redis.call('HSETNX', prefix .. ':prio', g, priority)
+local eff = tonumber(redis.call('HGET', prefix .. ':prio', g))
+redis.call('ZADD', prefix .. ':ready:' .. eff, 'NX', 0, g)
+return 1
+"""
+
+# The Redis `claim`, server-side and atomic (shared by the sync + async backends). There is one
+# `ready:{prio}` ZSET per priority level (0..4), each scored by the epoch-ms at which its groups
+# are next claimable (0 = now; round-robin re-scores to now_ms on ack). `claim(min_priority=m)`
+# takes the OLDEST-serviced (lowest-scored) lockable due group across the tiers `t >= m`: it reads
+# each tier's lowest-scored due window, and picks the globally lowest-scored lockable head. So a
+# high-priority group is served even behind a large backlog of lower-priority ones (the previous
+# single-ZSET design filtered priority *inside* a fixed candidate window, so a high-priority group
+# outside the window was starved). m=0 spans all tiers → plain round-robin, every group equal.
+# One round-trip, atomic → concurrent claimers each get a DISTINCT group with zero lost races.
+# ARGV = prefix, now_ms, lease_px_ms, fencing_token, per_tier_candidate_limit, min_priority.
+# The candidate window still bounds work WITHIN a tier, where all groups share a priority so
+# truncating is pure round-robin. A stale empty group found in the window is dropped (ZREM).
 _CLAIM_LUA = """
-local ready = KEYS[1]
 local prefix = ARGV[1]
 local now = tonumber(ARGV[2])
 local px = tonumber(ARGV[3])
 local token = ARGV[4]
 local limit = tonumber(ARGV[5])
 local min_prio = tonumber(ARGV[6])
-local prio_key = prefix .. ':prio'
-local cands = redis.call('ZRANGEBYSCORE', ready, '-inf', now, 'LIMIT', 0, limit)
-for i = 1, #cands do
-  local g = cands[i]
-  local lockkey = prefix .. ':lock:' .. g
-  if redis.call('EXISTS', lockkey) == 0 then
-    local prio = tonumber(redis.call('HGET', prio_key, g)) or 0
-    if prio >= min_prio then
+local best_g, best_payload, best_score, best_ready
+for t = min_prio, 4 do
+  local ready = prefix .. ':ready:' .. t
+  local cands = redis.call('ZRANGEBYSCORE', ready, '-inf', now, 'LIMIT', 0, limit)
+  for i = 1, #cands do
+    local g = cands[i]
+    local lockkey = prefix .. ':lock:' .. g
+    if redis.call('EXISTS', lockkey) == 0 then
       local payload = redis.call('LINDEX', prefix .. ':q:' .. g, 0)
       if payload then
-        redis.call('SET', lockkey, token, 'PX', px)
-        redis.call('ZADD', ready, now + px, g)
-        return {g, payload}
+        local score = tonumber(redis.call('ZSCORE', ready, g))
+        if (best_g == nil) or (score < best_score) then
+          best_g = g
+          best_payload = payload
+          best_score = score
+          best_ready = ready
+        end
+        break  -- this tier's oldest lockable head; compare it across tiers
       else
         redis.call('ZREM', ready, g)
       end
     end
   end
 end
+if best_g then
+  redis.call('SET', prefix .. ':lock:' .. best_g, token, 'PX', px)
+  redis.call('ZADD', best_ready, now + px, best_g)
+  return {best_g, best_payload}
+end
 return nil
 """
 
-# The Redis `ack`, server-side and atomic (shared by the sync + async backends). Fences on
-# the lock token (only the current holder mutates), pops the delivered head, re-readies the
-# group if more remain (else drops it from `ready`), and frees the lock — in ONE round-trip
-# instead of GET+LPOP+LLEN+ZADD/ZREM+DEL (~5). Atomicity also closes the lock-expires-mid-ack
-# window the multi-command version had. KEYS[1]=ready zset; ARGV = prefix, group, token.
+# The Redis `ack`, server-side and atomic (shared by the sync + async backends). Fences on the
+# lock token (only the current holder mutates), pops the delivered head, then re-readies the
+# group in ITS priority tier if more remain (score now_ms → back of the round-robin) or drops
+# it (and its priority entry) if drained, and frees the lock — one round-trip. The tier is read
+# from the priority hash (before it may be deleted). ARGV = prefix, group, token, now_ms.
 _ACK_LUA = """
-local ready = KEYS[1]
 local prefix = ARGV[1]
 local g = ARGV[2]
 local token = ARGV[3]
@@ -70,12 +101,15 @@ if redis.call('GET', lockkey) ~= token then
 end
 local qkey = prefix .. ':q:' .. g
 redis.call('LPOP', qkey)
+local prio_key = prefix .. ':prio'
+local eff = tonumber(redis.call('HGET', prio_key, g)) or 0
+local ready = prefix .. ':ready:' .. eff
 if redis.call('LLEN', qkey) == 0 then
   redis.call('ZREM', ready, g)
   -- clean up the priority entry so a recycled group_id gets its new priority on next publish
-  redis.call('HDEL', prefix .. ':prio', g)
+  redis.call('HDEL', prio_key, g)
 else
-  -- score = now_ms so this group goes to the back of the ready queue (round-robin)
+  -- score = now_ms so this group goes to the back of its tier's queue (round-robin)
   redis.call('ZADD', ready, now_ms, g)
 end
 redis.call('DEL', lockkey)

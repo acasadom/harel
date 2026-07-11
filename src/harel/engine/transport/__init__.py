@@ -11,6 +11,7 @@ from harel.engine.transport._base import (
     _PARKED,
     _PG_ACK_FN,
     _PG_CLAIM_FN,
+    _PUBLISH_LUA,
     Lease,
     Transport,
 )
@@ -29,6 +30,7 @@ __all__ = [
     "_PARKED",
     "_CLAIM_LUA",
     "_ACK_LUA",
+    "_PUBLISH_LUA",
     "_PG_CLAIM_FN",
     "_PG_ACK_FN",
     "InMemoryTransport",
