@@ -45,11 +45,19 @@ Three mechanisms recur across the backends, which each per-backend page then spe
 - **Parking (`nack` with delay).** The control plane parks a suspended group's message rather than
   spinning a worker on it — see [control plane](control-plane). The `_PARKED` sentinel marks a
   message that is non-claimable until its delay elapses.
-- **Round-robin fairness.** After `ack`, a group's claimability timestamp is set to `now` (not to
-  0/earliest) so it yields to groups that haven't been claimed recently. Groups that have never been
-  claimed have timestamp 0 and always go first. This prevents a handful of high-traffic executions
-  from monopolizing worker capacity — the hot-partition problem — while still processing every group
-  fairly.
+- **Round-robin fairness.** When a group is serviced, its claimability timestamp is set to `now`
+  (on **claim** for the SQL / in-memory backends, on **ack** for postgres / mongo / redis) — not to
+  0/earliest — so it yields to groups that haven't been serviced recently. Groups that have never
+  been claimed have timestamp 0 and always go first. This prevents a handful of high-traffic
+  executions from monopolizing worker capacity — the hot-partition problem — while still processing
+  every group fairly.
+- **Priority (`min_priority`).** A group's priority (0-4, fixed at the execution's `create`) lets a
+  worker configured with `high_ratio>0` prefer high-priority groups (see
+  [distribution](distribution)). Backends that keep their own group index honour it exactly —
+  including finding a high-priority group behind a large backlog of low-priority ones (Redis does
+  this with **one ready set per priority level**). **SQS is the exception:** FIFO has no per-group
+  priority, so `SqsTransport` **rejects** `priority>0` / `min_priority>0` (fail-fast) rather than
+  silently ignoring them; its cross-`MessageGroupId` delivery still gives round-robin fairness.
 
 Backends differ only in *how* they enforce per-group exclusivity: a database that has a cheap
 serialization primitive (SQLite's write-lock, Postgres's row-lock, SQS's native `MessageGroupId`)
@@ -79,7 +87,7 @@ transports/sqs
 | [InMemoryTransport](transports/inmemory) | in-process list + lock (tests, single process) |
 | [SqliteTransport](transports/sqlite) | `BEGIN IMMEDIATE` (global write-lock) + lease |
 | [LibsqlTransport](transports/libsql) | `BEGIN IMMEDIATE` + lease over libSQL *(experimental)* |
-| [RedisTransport](transports/redis) | `ready` ZSET index + per-group lock; `claim`/`ack` are atomic Lua (one round-trip each) |
+| [RedisTransport](transports/redis) | per-priority `ready:{prio}` ZSETs + per-group lock; `publish`/`claim`/`ack` are atomic Lua (one round-trip each) |
 | [PostgresTransport](transports/postgres) | per-group row, `FOR UPDATE SKIP LOCKED`; `claim`/`ack` are `plpgsql` functions (one round-trip each) |
 | [RqliteTransport](transports/rqlite) | one serialized `UPDATE` (Raft orders it) |
 | [MongoTransport](transports/mongo) | per-group ready-index/lock doc; `claim` is one atomic sorted `find_one_and_update` |

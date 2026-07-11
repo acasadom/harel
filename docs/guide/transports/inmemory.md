@@ -47,8 +47,8 @@ for m in messages sorted by (groups[m.group_id].last_claimed_at ASC, seq ASC):  
 return None
 ```
 
-Sorting by `last_claimed_at` (ascending) means groups never yet claimed (`0`) come first; after
-each ack that value is set to `now`, so a just-processed group yields to others. The
+Sorting by `last_claimed_at` (ascending) means groups never yet claimed (`0`) come first; that
+value is set to `now` **on claim**, so a just-serviced group yields to others. The
 `lock_expiry < now` test is the **crash recovery** path (expired lease → treated as free).
 
 ## Operations

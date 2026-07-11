@@ -119,6 +119,33 @@ parcels, deploy to N regions) — that is a data-parallel **fan-out invoke**, co
 mis-modelling.
 ```
 
+## Region hooks and timeouts
+
+A region composite (`Fraud`, `Stock`) is a first-class state and supports the same hooks as any
+other state. Its `on enter` fires when the region starts (before descending to its initial child);
+its `on exit` fires when the region finishes (before the parent's join resolves). A `timeout`
+declared on the region composite arms a timer for the whole region:
+
+```text
+orthogonal Verifying {
+  state Fraud {
+    on enter start_fraud_check
+    on exit  record_fraud_result
+    timeout 30                       # the whole Fraud region must finish within 30 s
+    initial Screening
+    state Screening {}
+    final Cleared success {}
+    final TimedOut failed {}
+    from Screening to Cleared  on FraudCleared
+    from Screening to TimedOut on Timeout
+  }
+  …
+}
+```
+
+The hook order follows UML: the region's own `on enter` runs first, then its initial child's.
+On completion the region's own `on exit` runs after its terminal child's.
+
 What each region *produced* — and how the join can route on it (all succeeded? any failed?) —
 is the subject of [payloads](13-payloads). First, let's tackle reuse: the retry pattern from
 [step 5](05-selectors) keeps reappearing. [Fragments](09-fragments) let us write it once.

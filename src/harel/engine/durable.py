@@ -59,7 +59,9 @@ class DurableRunner:
 
         Pass `execution_id` to use an externally-supplied id (e.g. a Stripe PaymentIntent
         id) instead of a generated one.  Raises `ExecutionAlreadyExists` if that id is
-        already in the store.  Pass `priority` (0–4) to control claim weighting.
+        already in the store.  `priority` (0–4) is stored on the Execution but has no effect
+        here — it controls transport claim weighting only under `DistributedRunner` (this
+        single-process runner has no transport to weight).
         """
         return facade.run(self._async.create, definition_id, context, execution_id, priority)
 
