@@ -49,6 +49,7 @@ class ChildState(pydantic.BaseModel):
     outcome: Optional[str] = None  # the region's terminal outcome, carried on its `Finished`
     result: dict = {}  # the region's `carry`-projected context, carried on its `Finished`
     submachine: bool = False  # True for an `invoke` child (a different Definition; not broadcast to)
+    key: str = ""  # stable region key for `region_results` (decoupled from the seq'd child id)
 
 
 class Execution(pydantic.BaseModel):
@@ -76,8 +77,9 @@ class Execution(pydantic.BaseModel):
     parent_id: Optional[str] = None  # set on a child: the parent Execution to notify
     child_id: Optional[str] = None  # set on a child: its key in the parent's `children`
     children: dict[str, ChildState] = {}  # parent: child_id -> ChildState (join counter)
-    invoke_seq: dict[str, int] = {}  # invoke-state path -> times entered (deterministic child ids,
-    #                                  so re-invoking the same state in a loop spawns a fresh child)
+    invoke_seq: dict[str, int] = {}  # spawn-site path -> times entered (invoke / orthogonal /
+    #                                  fan-out): the per-entry seq in the deterministic child ids,
+    #                                  so re-entering the same state in a loop spawns fresh children
 
 
 class ExecutionSummary(pydantic.BaseModel):
