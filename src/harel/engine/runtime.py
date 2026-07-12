@@ -222,6 +222,9 @@ class _SyncDriver:
             child_defn = self.resolve_machine(fqn)
         else:
             child_defn = self.defn
+        # a child inherits the parent's priority (regions/invoke carry the work) — mirror
+        # of the async driver; without it the child defaulted to 0.
+        parent = self.store.load(entry.parent_id) if entry.parent_id is not None else None
         child = Execution(
             id=entry.child_id,
             definition_id=child_defn.id,
@@ -230,6 +233,7 @@ class _SyncDriver:
             context=context,
             parent_id=entry.parent_id,
             child_id=entry.child_id,
+            priority=parent.priority if parent is not None else 0,
         )
         self._run(child, engine.start(child_defn, child))
 

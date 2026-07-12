@@ -158,6 +158,10 @@ class AsyncDriver:
             child_defn = self.resolve_machine(fqn)
         else:
             child_defn = self.defn
+        # a child (orthogonal region / invoke / fan-out instance) inherits the parent's
+        # priority — a high-priority workflow's regions carry the actual work, so they must
+        # be claimed at that priority too. Without this they defaulted to 0.
+        parent = await self.store.load(entry.parent_id) if entry.parent_id is not None else None
         child = Execution(
             id=entry.child_id,
             definition_id=child_defn.id,
@@ -166,6 +170,7 @@ class AsyncDriver:
             context=context,
             parent_id=entry.parent_id,
             child_id=entry.child_id,
+            priority=parent.priority if parent is not None else 0,
         )
         await self._run(child, engine.start(child_defn, child))
 

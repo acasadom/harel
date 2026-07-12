@@ -69,7 +69,13 @@ class AsyncTransportDriver(_AsyncRuntimeDriver):
                 progressed = True
             for entry in await self.store.pending_outbox():
                 if entry.target_id is not None:
-                    prio = (primary_priority or {}).get(entry.target_id, 0)
+                    # self-targeted re-publish uses this exe's priority (primary_priority);
+                    # a cross-execution emit (e.g. a region's Finished -> parent) uses the
+                    # TARGET's own priority, not 0, so it doesn't pin the target's group.
+                    prio = (primary_priority or {}).get(entry.target_id)
+                    if prio is None:
+                        target = await self.store.load(entry.target_id)
+                        prio = target.priority if target is not None else 0
                     await self.transport.publish(entry.target_id, entry.event, priority=prio)
                 await self.store.ack_outbox(entry.seq)
                 progressed = True
@@ -193,7 +199,14 @@ class AsyncWorker:
     async def fire_due_timers(self) -> int:
         fired = 0
         for execution_id, path, fire_at in await self.store.due_timers(self._clock()):
-            await self.transport.publish(execution_id, engine.timeout_event(execution_id, path, fire_at))
+            # publish at the execution's own priority: for a machine that parks on a
+            # `timeout:` state, this Timeout is the FIRST publish to its group, so it
+            # sets the group's priority — dropping it here would pin the group to 0.
+            exe = await self.store.load(execution_id)
+            priority = exe.priority if exe is not None else 0
+            await self.transport.publish(
+                execution_id, engine.timeout_event(execution_id, path, fire_at), priority=priority
+            )
             await self.store.delete_timer(execution_id, path, fire_at)
             fired += 1
         return fired
