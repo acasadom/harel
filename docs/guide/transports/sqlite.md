@@ -49,7 +49,7 @@ COMMIT                                              -- (ROLLBACK on any error)
 ```
 
 Sorting by `g.last_claimed_at ASC` makes groups that have never been claimed (`0`) always go
-first; after each ack, `last_claimed_at` is set to `now` so a just-processed group yields to
+first; `last_claimed_at` is set to `now` **on claim** so a just-serviced group yields to
 others. `AND g.priority >= ?` skips groups below the priority floor (pass `min_priority=0` for
 normal operation). Returns `Lease(seq, group_id, event)` or `None` when nothing is deliverable.
 

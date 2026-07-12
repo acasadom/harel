@@ -45,7 +45,7 @@ See [static validation](../tutorial/14-validation).
 
 ```text
 DurableRunner(store, definitions, clock=time.time, resolver=None, trace=False)
-    .create(definition_id, context=None) -> Execution
+    .create(definition_id, context=None, execution_id=None, priority=0) -> Execution
     .process(execution_id, event) -> Execution
     .fire_due_timers() -> int
     .cancel(execution_id, *, reason=None) -> Execution
@@ -66,11 +66,17 @@ from harel.engine.distributed import DistributedRunner
 from harel.engine.transport import InMemoryTransport   # + Sqlite/Libsql/Redis/Postgres/Rqlite/Mongo/Sqs
 
 DistributedRunner(store, transport, definitions, clock=time.time, resolver=None, trace=False)
-    .create(definition_id, context=None) -> Execution
+    .create(definition_id, context=None, execution_id=None, priority=0) -> Execution
     .send(execution_id, event) -> None
     .worker(...) -> Worker        # .step() one message; .run(stop_event) loops
     .cancel / .terminate / .suspend / .resume
 ```
+
+- `create` accepts an optional `execution_id` (use an externally-supplied id, e.g. a Stripe
+  PaymentIntent id, instead of a generated one; raises `ExecutionAlreadyExists` if that id already
+  exists — the create-or-find primitive) and a `priority` (0-4). Priority controls worker claim
+  weighting under `DistributedRunner` (see [distribution](distribution)); on the single-process
+  `DurableRunner` it is stored on the Execution but has no effect (no transport to weight).
 
 See [distribution](distribution).
 

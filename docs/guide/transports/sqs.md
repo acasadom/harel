@@ -46,6 +46,11 @@ close():              the boto3 client
 - **nack / park** maps to `change_message_visibility`: `delay>0` re-hides the message for `delay`
   seconds (the park the [control plane](../control-plane) uses for a suspended group); `delay=0`
   makes it available immediately (retry).
+- **No priority.** SQS FIFO has no per-group priority and `receive_message` can't filter by one, so
+  `SqsTransport` **rejects** `publish(..., priority>0)` and `claim(..., min_priority>0)` with a
+  clear error (fail-fast) rather than silently dropping them — a priority-routed worker
+  (`high_ratio>0`) would otherwise be a no-op on SQS. Round-robin fairness across groups is still
+  provided natively by `MessageGroupId` delivery. Use another transport for priority routing.
 
 ## Async twin
 

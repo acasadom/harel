@@ -14,7 +14,7 @@ running. Backends:
 | --------- | --------------------- |
 | `InMemoryTransport` | in-process (tests, single process) |
 | `SqliteTransport` | `BEGIN IMMEDIATE` (global write-lock) + lease |
-| `RedisTransport` | `SET lock NX PX` group-lock-as-lease + FIFO list; a `ready` ZSET scored by available-at indexes claimable groups so `claim` is O(log N + K), not a scan of every group |
+| `RedisTransport` | `SET lock NX PX` group-lock-as-lease + FIFO list; one `ready:{prio}` ZSET per priority level, scored by available-at, so `claim` is O(log N + K) per tier and a high-priority group isn't starved behind a low-priority backlog |
 | `PostgresTransport` | per-group row claimed with `SELECT … FOR UPDATE SKIP LOCKED` — concurrent workers lease *different* groups in parallel (no global lock) |
 | `RqliteTransport` | queue table on Raft-replicated SQLite |
 | `MongoTransport` | per-group ready-index/lock document (`available_at` + token; `find_one_and_update` lease) |
@@ -223,4 +223,5 @@ The same machinery carries [orthogonal regions](../tutorial/08-orthogonal) and
 [fan-out](../tutorial/12-fanout): each region or addressed child is its own execution with its
 own group, so they genuinely run on different workers, and their `Finished` events travel back
 through the transport to the parent's join. The model you wrote in the tutorial distributes
-without change.
+without change. Region and fan-out children **inherit the parent's priority**, so a
+high-priority workflow's parallel work is claimed at that priority too (not demoted to 0).
