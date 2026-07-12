@@ -6,7 +6,7 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 
-from harel.engine.transport import _ACK_LUA, _CLAIM_LUA, Lease
+from harel.engine.transport import _ACK_LUA, _CLAIM_LUA, _PUBLISH_LUA, Lease
 from harel.spec.states import Event
 
 
@@ -27,6 +27,7 @@ class AsyncRedisTransport:
         self._clock = clock
         self._claim_script = client.register_script(_CLAIM_LUA)
         self._ack_script = client.register_script(_ACK_LUA)
+        self._publish_script = client.register_script(_PUBLISH_LUA)
 
     @classmethod
     def from_url(cls, url: str, prefix: str = "stm") -> "AsyncRedisTransport":
@@ -34,8 +35,8 @@ class AsyncRedisTransport:
 
         return cls(aioredis.Redis.from_url(url), prefix)
 
-    def _k_ready(self) -> str:
-        return f"{self._prefix}:ready"
+    def _k_ready(self, priority: int) -> str:
+        return f"{self._prefix}:ready:{priority}"
 
     def _k_q(self, group_id: str) -> str:
         return f"{self._prefix}:q:{group_id}"
@@ -56,11 +57,8 @@ class AsyncRedisTransport:
         return int(self._clock() * 1000)
 
     async def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
-        async with self._r.pipeline() as pipe:
-            pipe.rpush(self._k_q(group_id), event.model_dump_json())
-            pipe.zadd(self._k_ready(), {group_id: 0}, nx=True)
-            pipe.hsetnx(self._k_prio(), group_id, priority)
-            await pipe.execute()
+        # one atomic round-trip: push + fix priority on first publish + ready in its tier's ZSET
+        await self._publish_script(keys=[], args=[self._prefix, group_id, event.model_dump_json(), priority])
 
     async def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
         px = max(1, int(visibility * 1000))
@@ -68,7 +66,7 @@ class AsyncRedisTransport:
         token = f"{worker_id}:{uuid.uuid4().hex}"
         # one atomic round-trip: lock a distinct due group + return its head (no SET NX race)
         res = await self._claim_script(
-            keys=[self._k_ready()], args=[self._prefix, now, px, token, self._CANDIDATES, min_priority]
+            keys=[], args=[self._prefix, now, px, token, self._CANDIDATES, min_priority]
         )
         if not res:
             return None
@@ -82,18 +80,21 @@ class AsyncRedisTransport:
 
     async def ack(self, lease: Lease) -> None:
         # one atomic round-trip: fence on the token, pop the head, re-ready or drop, free the lock
-        await self._ack_script(
-            keys=[self._k_ready()], args=[self._prefix, lease.group_id, lease.token, self._now_ms()]
-        )
+        await self._ack_script(keys=[], args=[self._prefix, lease.group_id, lease.token, self._now_ms()])
+
+    async def _tier(self, group_id: str) -> int:
+        """The group's priority tier (its `ready:{prio}` ZSET), read from the prio hash."""
+        return int(self._decode(await self._r.hget(self._k_prio(), group_id)) or 0)
 
     async def nack(self, lease: Lease, delay: float = 0.0) -> None:
         if not await self._owns(lease.group_id, lease.token):
             return
+        ready = self._k_ready(await self._tier(lease.group_id))
         if delay > 0:
-            await self._r.zadd(self._k_ready(), {lease.group_id: self._now_ms() + int(delay * 1000)})
+            await self._r.zadd(ready, {lease.group_id: self._now_ms() + int(delay * 1000)})
             await self._r.set(self._k_lock(lease.group_id), lease.token, px=max(1, int(delay * 1000)))
         else:
-            await self._r.zadd(self._k_ready(), {lease.group_id: 0})
+            await self._r.zadd(ready, {lease.group_id: 0})
             await self._r.delete(self._k_lock(lease.group_id))
 
     async def close(self) -> None:

@@ -6,7 +6,7 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 
-from harel.engine.transport._base import _ACK_LUA, _CLAIM_LUA, Lease
+from harel.engine.transport._base import _ACK_LUA, _CLAIM_LUA, _PUBLISH_LUA, Lease
 from harel.spec.states import Event
 
 
@@ -50,6 +50,7 @@ class RedisTransport:
         self._clock = clock  # injectable so the ready-score clock is deterministic in tests
         self._claim_script = client.register_script(_CLAIM_LUA)  # atomic server-side claim
         self._ack_script = client.register_script(_ACK_LUA)  # atomic server-side ack
+        self._publish_script = client.register_script(_PUBLISH_LUA)  # atomic tier-routed publish
 
     @classmethod
     def from_url(cls, url: str, prefix: str = "stm") -> "RedisTransport":
@@ -58,8 +59,8 @@ class RedisTransport:
 
         return cls(redis.Redis.from_url(url), prefix)
 
-    def _k_ready(self) -> str:
-        return f"{self._prefix}:ready"
+    def _k_ready(self, priority: int) -> str:
+        return f"{self._prefix}:ready:{priority}"
 
     def _k_q(self, group_id: str) -> str:
         return f"{self._prefix}:q:{group_id}"
@@ -80,15 +81,9 @@ class RedisTransport:
         return int(self._clock() * 1000)
 
     def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
-        pipe = self._r.pipeline()
-        pipe.rpush(self._k_q(group_id), event.model_dump_json())
-        # NX: never reset the score of a group that is already scheduled — a publish
-        # into an in-flight or parked group must not make it claimable before its
-        # lease/park elapses. A brand-new group gets score 0 (claimable now).
-        pipe.zadd(self._k_ready(), {group_id: 0}, nx=True)
-        # HSETNX: first publish sets the priority; subsequent ones leave it unchanged.
-        pipe.hsetnx(self._k_prio(), group_id, priority)
-        pipe.execute()
+        # one atomic round-trip: push the payload, fix the group's priority on first publish,
+        # and ready it (score 0, NX) in its priority tier's ZSET (`ready:{priority}`).
+        self._publish_script(keys=[], args=[self._prefix, group_id, event.model_dump_json(), priority])
 
     def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
         px = max(1, int(visibility * 1000))
@@ -96,9 +91,7 @@ class RedisTransport:
         token = f"{worker_id}:{uuid.uuid4().hex}"
         # one atomic round-trip: the script locks a distinct due group (scoring it out of
         # the window) and returns its head — no client-side SET NX race between workers.
-        res = self._claim_script(
-            keys=[self._k_ready()], args=[self._prefix, now, px, token, self._CANDIDATES, min_priority]
-        )
+        res = self._claim_script(keys=[], args=[self._prefix, now, px, token, self._CANDIDATES, min_priority])
         if not res:
             return None
         group_id = self._decode(res[0])
@@ -112,21 +105,24 @@ class RedisTransport:
     def ack(self, lease: Lease) -> None:
         # one atomic round-trip: fence on the token, pop the head, re-ready or drop, free the lock
         # (replaces GET+LPOP+LLEN+ZADD/ZREM+DEL and closes the lock-expires-mid-ack window)
-        self._ack_script(
-            keys=[self._k_ready()], args=[self._prefix, lease.group_id, lease.token, self._now_ms()]
-        )
+        self._ack_script(keys=[], args=[self._prefix, lease.group_id, lease.token, self._now_ms()])
+
+    def _tier(self, group_id: str) -> int:
+        """The group's priority tier (its `ready:{prio}` ZSET), read from the prio hash."""
+        return int(self._decode(self._r.hget(self._k_prio(), group_id)) or 0)
 
     def nack(self, lease: Lease, delay: float = 0.0) -> None:
         if not self._owns(lease.group_id, lease.token):
             return
+        ready = self._k_ready(self._tier(lease.group_id))
         if delay > 0:
             # park: not claimable until `delay` passes (score in the future), and keep
             # the lock for the same window so the still-present head isn't re-claimed.
-            self._r.zadd(self._k_ready(), {lease.group_id: self._now_ms() + int(delay * 1000)})
+            self._r.zadd(ready, {lease.group_id: self._now_ms() + int(delay * 1000)})
             self._r.set(self._k_lock(lease.group_id), lease.token, px=max(1, int(delay * 1000)))
         else:
             # release: re-ready now and drop the lock so the head can be re-claimed
-            self._r.zadd(self._k_ready(), {lease.group_id: 0})
+            self._r.zadd(ready, {lease.group_id: 0})
             self._r.delete(self._k_lock(lease.group_id))
 
     def close(self) -> None:
