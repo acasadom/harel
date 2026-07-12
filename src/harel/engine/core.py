@@ -303,7 +303,8 @@ def _expose_region_results(exe: Execution) -> None:
     keyed by region/instance — only when a child reported something, so a plain
     join leaves the parent's context untouched."""
     results = {
-        _region_key(exe, cid): {"outcome": cs.outcome, **cs.result} for cid, cs in exe.children.items()
+        (cs.key or _region_key(exe, cid)): {"outcome": cs.outcome, **cs.result}
+        for cid, cs in exe.children.items()
     }
     if any(r["outcome"] is not None or len(r) > 1 for r in results.values()):
         exe.context["region_results"] = results
@@ -315,14 +316,18 @@ def _fan_out(exe: Execution, node: Node) -> Step:
     its own slice; the parent joins on completion. The actor/data-parallel sibling
     of the orthogonal fork — instances are addressed (no domain broadcast)."""
     loop_var, coll_key = node.invoke_each  # type: ignore[misc]
+    seq = exe.invoke_seq.get(node.full_path, 0)  # per-entry seq: a re-entry spawns fresh child ids
+    owned = f"{exe.id}:{node.full_path}:"
+    for cid in [c for c in exe.children if c.startswith(owned)]:
+        exe.children.pop(cid, None)  # a re-entry: drop the previous entry's (finished) instances
     specs: list[ChildSpec] = []
     for i, item in enumerate(exe.context.get(coll_key, [])):
-        cid = f"{exe.id}:{node.full_path}:{i}"
+        cid = f"{exe.id}:{node.full_path}:{seq}:{i}"
         child_ctx = {
             ck: (item if src == loop_var else exe.context.get(src)) for ck, src in node.invoke_with.items()
         }
         child_ctx["__invoke_fqn__"] = node.invoke
-        exe.children[cid] = ChildState(root_path="", submachine=True)
+        exe.children[cid] = ChildState(root_path="", submachine=True, key=f"{node.full_path}:{i}")
         specs.append(ChildSpec(child_id=cid, root_path="", context=child_ctx))
     yield SpawnChildren(specs)
 
@@ -333,13 +338,26 @@ def _fork(exe: Execution, node: Node) -> Step:
     finish (`_joined`). Regions share the parent's Definition and SEE the parent's
     domain events (broadcast — UML semantics). Data-parallel fan-out (N independent,
     addressed workers) is a `fan-out invoke`, not this."""
+    seq = exe.invoke_seq.get(node.full_path, 0)  # per-entry seq: a re-entry spawns fresh child ids
     exe.children = {}
     specs: list[ChildSpec] = []
     for child in node.children:
-        cid = f"{exe.id}:{child.full_path}"
+        cid = f"{exe.id}:{child.full_path}:{seq}"
         specs.append(ChildSpec(child_id=cid, root_path=child.full_path))
-        exe.children[cid] = ChildState(root_path=child.full_path)
+        exe.children[cid] = ChildState(root_path=child.full_path, key=child.full_path)
     yield SpawnChildren(specs)
+
+
+def _leave_regions(exe: Execution, node: Node) -> None:
+    """Leaving an orthogonal / fan-out node: bump its per-entry counter so a later
+    re-entry spawns FRESH child Executions (distinct ids) instead of colliding with
+    the already-completed ones from the previous entry — the relay's create-is-
+    idempotent skip would otherwise never re-run them and the join would deadlock.
+    Mirrors the single `invoke` path, which bumps `invoke_seq` on completion. We do
+    NOT drop the finished ChildStates here: they persist for post-join inspection
+    (`region_results` / outcomes); a re-entry replaces them (`_fork` wipes the dict,
+    `_fan_out` drops this node's stale entries)."""
+    exe.invoke_seq[node.full_path] = exe.invoke_seq.get(node.full_path, 0) + 1
 
 
 def _descend(defn: Definition, exe: Execution, node: Node, event: Optional[Event]) -> Step:
@@ -393,6 +411,8 @@ def _take(defn: Definition, exe: Execution, target: Node, event: Optional[Event]
         yield from _run(node, Hook.EXIT, event)
         if node.parent is not None:
             exe.history[node.parent.full_path] = node.full_path
+        if node.kind in _ORTHOGONAL or node.invoke_each is not None:
+            _leave_regions(exe, node)  # bump invoke_seq so re-entry spawns fresh child ids
     exe.active_path = pivot.full_path
     for node in chain(pivot, target)[1:]:  # entered levels, outermost-first
         yield from _run(node, Hook.ENTER, event)
@@ -424,9 +444,12 @@ def _drain(defn: Definition, exe: Execution) -> Step:
                 yield SpawnChildren([ChildSpec(child_id=cid, root_path="", context=child_ctx)])
             return
         if active.invoke is not None:
-            # fan-out invoke: spawn N addressed children (once), then join like an
-            # AND-state — but the instances run a target Definition and are addressed.
-            if not any(c.startswith(f"{exe.id}:{active.full_path}:") for c in exe.children):
+            # fan-out invoke: spawn N addressed children (once per entry), then join
+            # like an AND-state — but the instances run a target Definition and are
+            # addressed. The guard is scoped to THIS entry's seq so a re-entry (seq
+            # bumped on leave) fans out afresh instead of seeing the prior instances.
+            seq = exe.invoke_seq.get(active.full_path, 0)
+            if not any(c.startswith(f"{exe.id}:{active.full_path}:{seq}:") for c in exe.children):
                 yield from _fan_out(exe, active)
             if not _joined(exe):
                 return
