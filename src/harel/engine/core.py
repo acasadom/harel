@@ -522,6 +522,18 @@ def set_state(defn: Definition, exe: Execution, path: str) -> Step:
 
 def process(defn: Definition, exe: Execution, event: Event) -> Step:
     if event.kind == "Reset":
+        # if parked on a spawn site (orthogonal / invoke / fan-out), abandon its live
+        # children by bumping the site's entry seq — a restart must spawn FRESH children.
+        # The pre-Reset child Executions still exist in the store; reusing their ids would
+        # let the relay's idempotent create skip them (they never re-run / re-emit
+        # `Finished`) and the join would deadlock. Mirrors `_leave_regions` on a normal exit.
+        if exe.active_path is not None:
+            site = defn.index.get(exe.active_path)
+            if site is not None and (
+                site.kind in _ORTHOGONAL or site.invoke is not None or site.invoke_each is not None
+            ):
+                exe.invoke_seq[site.full_path] = exe.invoke_seq.get(site.full_path, 0) + 1
+        exe.children.clear()
         exe.context.clear()
         exe.history.clear()
         exe.active_path = None
