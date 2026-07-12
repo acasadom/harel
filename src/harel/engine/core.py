@@ -479,6 +479,11 @@ def _drain(defn: Definition, exe: Execution) -> Step:
             exe.history.pop(active.parent.full_path, None)
             exe.active_path = active.parent.full_path
             continue
+        # reached a direct child of root and the execution is ending: a region / invoke
+        # child runs the root's OWN EXIT here (fire on_exit, cancel the region timer) —
+        # symmetric with the root ENTER in start(); a top-level machine root has neither.
+        if exe.parent_id is not None:
+            yield from _run(root, Hook.EXIT, None)
         if exe.status is Status.RUNNING:
             # the outcome is whatever terminal the model reached (set by the sink
             # rule above); the engine does NOT guess an aggregate. A parent routes
@@ -506,6 +511,12 @@ def start(defn: Definition, exe: Execution) -> Step:
     assert root.start_state is not None
     start_node = root.child(root.start_state)
     assert start_node is not None
+    # a region / invoke child runs a composite (its root_path) that can carry its OWN
+    # on_enter / on_exit / timeout: run the root's own ENTER before descending, so its
+    # hook fires and its timer is armed. A top-level machine root has neither, so this
+    # is a no-op there. UML: outermost enter first.
+    if exe.parent_id is not None:
+        yield from _run(root, Hook.ENTER, None)
     exe.active_path = start_node.full_path
     yield from _run(start_node, Hook.ENTER, None)
     yield from _descend(defn, exe, start_node, None)
