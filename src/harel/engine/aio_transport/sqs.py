@@ -7,6 +7,7 @@ from contextlib import AsyncExitStack
 from typing import Any, Optional
 
 from harel.engine.transport import Lease
+from harel.engine.transport.sqs import _NO_MIN_PRIORITY, _NO_PRIORITY  # shared reject messages
 from harel.spec.states import Event
 
 
@@ -67,6 +68,8 @@ class AsyncSqsTransport:
         raise last if last is not None else RuntimeError("sqs connect failed")
 
     async def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
+        if priority:
+            raise ValueError(_NO_PRIORITY)
         await self._sqs.send_message(
             QueueUrl=self._queue_url,
             MessageBody=event.model_dump_json(),
@@ -75,6 +78,8 @@ class AsyncSqsTransport:
         )
 
     async def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
+        if min_priority:
+            raise ValueError(_NO_MIN_PRIORITY)
         resp = await self._sqs.receive_message(
             QueueUrl=self._queue_url,
             MaxNumberOfMessages=1,

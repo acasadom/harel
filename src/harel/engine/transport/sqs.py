@@ -8,6 +8,18 @@ from typing import Any, Optional
 from harel.engine.transport._base import Lease
 from harel.spec.states import Event
 
+# SQS FIFO has no per-group priority and receive() can't filter by it, so priority /
+# min_priority cannot be honoured. Reject them explicitly (fail-fast) rather than
+# silently ignoring them, which would make a priority-routed worker a no-op on SQS.
+_NO_PRIORITY = (
+    "SqsTransport has no message priority (SQS FIFO has no per-group priority): "
+    "publish with priority=0, or use another transport for priority routing."
+)
+_NO_MIN_PRIORITY = (
+    "SqsTransport has no min_priority filtering (SQS FIFO): run the worker with the "
+    "default high_ratio=0, or use another transport for priority routing."
+)
+
 
 class SqsTransport:
     """`Transport` over AWS SQS **FIFO** — the native fit: SQS's `MessageGroupId`
@@ -61,6 +73,8 @@ class SqsTransport:
         raise last if last is not None else RuntimeError("sqs connect failed")
 
     def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
+        if priority:
+            raise ValueError(_NO_PRIORITY)
         self._sqs.send_message(
             QueueUrl=self._queue_url,
             MessageBody=event.model_dump_json(),
@@ -69,6 +83,8 @@ class SqsTransport:
         )
 
     def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
+        if min_priority:
+            raise ValueError(_NO_MIN_PRIORITY)
         resp = self._sqs.receive_message(
             QueueUrl=self._queue_url,
             MaxNumberOfMessages=1,
