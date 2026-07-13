@@ -62,12 +62,17 @@ class AsyncTransportDriver(_AsyncRuntimeDriver):
 
     async def _flush(self, primary_priority: Optional[dict[str, int]] = None) -> None:
         while True:
-            progressed = False
-            for spawn in await self.store.pending_spawns():
-                await self._create_spawn(spawn)
-                await self.store.ack_spawn(spawn.seq)
-                progressed = True
-            for entry in await self.store.pending_outbox():
+            spawns = await self.store.pending_spawns()
+            outbox = await self.store.pending_outbox()
+            if not spawns and not outbox:
+                return
+            if spawns:
+                # Each spawn targets a different child_id → independent store rows → safe to
+                # run concurrently. For the transport driver, _create_spawn only writes the
+                # child record; the initial event is published via the outbox in the next pass.
+                await asyncio.gather(*[self._create_spawn(s) for s in spawns])
+                await asyncio.gather(*[self.store.ack_spawn(s.seq) for s in spawns])
+            for entry in outbox:
                 if entry.target_id is not None:
                     # self-targeted re-publish uses this exe's priority (primary_priority);
                     # a cross-execution emit (e.g. a region's Finished -> parent) uses the
@@ -78,9 +83,6 @@ class AsyncTransportDriver(_AsyncRuntimeDriver):
                         prio = target.priority if target is not None else 0
                     await self.transport.publish(entry.target_id, entry.event, priority=prio)
                 await self.store.ack_outbox(entry.seq)
-                progressed = True
-            if not progressed:
-                return
 
     async def route(self, exe: Execution, event: Event) -> None:
         live = [

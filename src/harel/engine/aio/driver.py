@@ -176,12 +176,17 @@ class AsyncDriver:
 
     async def _flush(self) -> None:
         while True:
-            progressed = False
-            for spawn in await self.store.pending_spawns():
-                await self._create_spawn(spawn)
-                await self.store.ack_spawn(spawn.seq)
-                progressed = True
-            for entry in await self.store.pending_outbox():
+            spawns = await self.store.pending_spawns()
+            outbox = await self.store.pending_outbox()
+            if not spawns and not outbox:
+                return
+            if spawns:
+                # Each spawn targets a different child_id → independent store rows → safe to
+                # run concurrently. Async actions (e.g. LLM calls) overlap on the event loop;
+                # sync actions each get a thread-pool slot via run_in_executor.
+                await asyncio.gather(*[self._create_spawn(s) for s in spawns])
+                await asyncio.gather(*[self.store.ack_spawn(s.seq) for s in spawns])
+            for entry in outbox:
                 target = await self.store.load(entry.target_id) if entry.target_id is not None else None
                 if target is not None and not await self.store.is_processed(target.id, entry.event.id):
                     await self._run(
@@ -191,9 +196,6 @@ class AsyncDriver:
                         event=entry.event,
                     )
                 await self.store.ack_outbox(entry.seq)
-                progressed = True
-            if not progressed:
-                return
 
     async def _deliver_timeout(self, execution_id: str, event: Event) -> None:
         """Deliver a fired timer's `Timeout` event inline (like the outbox relay). The
