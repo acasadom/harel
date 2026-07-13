@@ -199,8 +199,11 @@ class AsyncWorker:
         return await self._handle(lease)
 
     async def fire_due_timers(self) -> int:
-        fired = 0
-        for execution_id, path, fire_at in await self.store.due_timers(self._clock()):
+        due = await self.store.due_timers(self._clock())
+        if not due:
+            return 0
+
+        async def _fire_one(execution_id: str, path: str, fire_at: float) -> None:
             # publish at the execution's own priority: for a machine that parks on a
             # `timeout:` state, this Timeout is the FIRST publish to its group, so it
             # sets the group's priority — dropping it here would pin the group to 0.
@@ -210,8 +213,9 @@ class AsyncWorker:
                 execution_id, engine.timeout_event(execution_id, path, fire_at), priority=priority
             )
             await self.store.delete_timer(execution_id, path, fire_at)
-            fired += 1
-        return fired
+
+        await asyncio.gather(*[_fire_one(eid, p, fa) for eid, p, fa in due])
+        return len(due)
 
     async def run(self, stop: asyncio.Event, idle_sleep: float = 0.005) -> None:
         """Loop until `stop` is set, driving up to `concurrency` events in flight at once.
