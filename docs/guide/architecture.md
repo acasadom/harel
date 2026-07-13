@@ -227,8 +227,12 @@ exception in one is caught by the production driver and fails the Execution term
 
 Entering an AND-state doesn't create the regions inline. The engine yields `SpawnChildren`; the
 runner records the intents, and they commit **atomically with the parent's advance and its join
-expectations** (`children`). The relay then creates each child idempotently. So a crash mid-fork
-neither double-spawns nor loses a region that finished on start.
+expectations** (`children`). The relay (`_flush`) then creates all pending children
+**concurrently** via `asyncio.gather` — their `on enter` actions (LLM calls, HTTP requests, …)
+overlap on the event loop rather than running one after another. Each spawn targets a distinct
+`child_id` so their store commits are independent rows; no CAS conflict is possible between
+siblings. The idempotency guard (skip if the child already exists) makes a crash-and-restart
+safe: a re-run of `_flush` skips any region that was already created before the crash.
 
 ```{mermaid}
 sequenceDiagram
@@ -240,14 +244,14 @@ sequenceDiagram
   D->>S: commit(parent, spawns=[A,B], children={A,B})   %% atomic: advance + join + spawns
   Note over D,S: parent is parked on the AND-state, waiting for the join
   D->>D: _flush()
-  loop each pending spawn
+  par asyncio.gather — all spawns concurrently
     D->>S: load(child_id)  (skip if exists — idempotent)
     D->>E: start(defn, child)   %% region runs the same Definition, different root_path
-    D->>S: commit(child v1)
+    D->>S: commit(child v1)     %% independent rows: no CAS conflict between siblings
     D->>S: ack_spawn(seq)
   end
   Note over E: each region, on its global sink, Emits Finished → parent_id
-  D->>S: (later) deliver Finished → process(parent) → join when all children finished
+  D->>S: (later, sequential) deliver Finished → process(parent) → join when all children finished
 ```
 
 Regions share the parent's event stream (a domain event is broadcast to all live regions — UML

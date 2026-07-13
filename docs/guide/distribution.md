@@ -225,3 +225,8 @@ own group, so they genuinely run on different workers, and their `Finished` even
 through the transport to the parent's join. The model you wrote in the tutorial distributes
 without change. Region and fan-out children **inherit the parent's priority**, so a
 high-priority workflow's parallel work is claimed at that priority too (not demoted to 0).
+
+The `_flush` relay creates all pending children **concurrently** (`asyncio.gather`) before
+publishing their events to the transport. In the headless `DurableRunner` this means the children's
+`on enter` actions (LLM calls, HTTP requests, …) start simultaneously rather than sequentially,
+giving true fan-out parallelism even in a single-process deployment.
