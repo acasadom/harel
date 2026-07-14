@@ -212,18 +212,20 @@ class AsyncDriver:
 
     async def fire_due_timers(self) -> int:
         """Deliver every timer due now (a `Timeout` to its execution) and remove it.
-        Returns how many fired. Mirror of the sync `Driver.fire_due_timers`."""
-        due = await self.store.due_timers(self._clock())
-        if not due:
-            return 0
+        Returns how many fired. Mirror of the sync `Driver.fire_due_timers`.
 
-        async def _fire_one(execution_id: str, path: str, fire_at: float) -> None:
+        Sequential, not gathered: _deliver_timeout commits a CAS write on the execution.
+        Two timers for the same execution (nested composites with independent timeouts) must
+        not race — the second would load a stale version and raise StoreConflict uncaught.
+        The distributed path (AsyncWorker.fire_due_timers) is safe to gather because it only
+        publishes to the transport; the CAS happens later inside the worker's route()."""
+        fired = 0
+        for execution_id, path, fire_at in await self.store.due_timers(self._clock()):
             # deliver before delete: a crash between the two is safe — dedup prevents re-delivery
             await self._deliver_timeout(execution_id, engine.timeout_event(execution_id, path, fire_at))
             await self.store.delete_timer(execution_id, path, fire_at)
-
-        await asyncio.gather(*[_fire_one(eid, p, fa) for eid, p, fa in due])
-        return len(due)
+            fired += 1
+        return fired
 
     # --- public API --------------------------------------------------------
     async def recover(self) -> None:
