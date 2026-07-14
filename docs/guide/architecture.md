@@ -312,31 +312,31 @@ sequenceDiagram
 
   C->>DR: create(definition_id, context)
   DR->>TD: start(exe)
-  TD->>E: start(defn, exe)  (generator — runs on_enter, collects effects)
+  TD->>E: start(defn, exe)
   TD->>S: commit(exe v1, emits, timers, spawns)
-  TD->>TD: _flush() — publish outbox to transport, create children concurrently
+  TD->>TD: _flush() publish outbox to transport, create children
   DR->>S: load(exe.id)
-  DR-->>C: Execution (initial state committed; worker not yet involved)
+  DR-->>C: Execution (committed; worker not yet involved)
 
   C->>DR: send(exe.id, event)
-  DR->>S: load(exe.id)   %% read priority for the publish
+  DR->>S: load(exe.id)   %% read priority
   DR->>T: publish(exe.id, event, priority)
-  DR-->>C: (returns immediately)
+  DR-->>C: returns immediately
 
-  Note over W,T: worker runs continuously on its own loop
+  Note over W,T: worker loops independently
 
   W->>T: claim(worker_id, visibility)
   T-->>W: Lease(group_id=exe.id, event)
   W->>S: load(exe.id)
   W->>TD: route(exe, event)
-  alt domain event & live regions
-    TD->>T: publish(event) to each region's group (concurrent)
+  alt domain event with live regions
+    TD->>T: publish event to each region group
     TD->>S: commit(exe, processed=event.id)
-  else control event or no live regions
+  else control event or no regions
     TD->>E: process(defn, exe, event)
-    E-->>TD: effects (run actions, collect)
+    E-->>TD: effects
     TD->>S: commit(exe v+1, emits, processed, timers, spawns)
-    TD->>TD: _flush() — publish outbox to transport, create children concurrently
+    TD->>TD: _flush() publish outbox, create children
   end
   W->>T: ack(lease)
 ```
