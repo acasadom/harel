@@ -81,4 +81,5 @@ In a distributed deployment the same commands work portably: a paused group park
 (`nack` with delay) rather than spinning a worker, and a cooperative `cancel` makes the worker
 drain the backlog as no-ops until the injected `Cancel` arrives — the queue-jump semantics
 without needing transport-level priority or purge (which SQS FIFO, for one, can't do). Commands
-also propagate from an orthogonal parent to its regions.
+also propagate from an orthogonal parent to its regions — all children at each level of the tree
+are updated concurrently via `asyncio.gather`.

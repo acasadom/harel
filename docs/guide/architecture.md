@@ -255,8 +255,11 @@ sequenceDiagram
 ```
 
 Regions share the parent's event stream (a domain event is broadcast to all live regions — UML
-semantics). Data-parallel work (N independent workers) is **not** an orthogonal state but a
-fan-out `invoke`, which reuses the same child-Execution machinery.
+semantics). In the headless host (`inject`) the delivery to each live region runs
+**concurrently** via `asyncio.gather`, so a broadcast that triggers async actions in multiple
+regions (LLM calls, HTTP requests…) overlaps them on the event loop rather than serialising
+them. Data-parallel work (N independent workers) is **not** an orthogonal state but a fan-out
+`invoke`, which reuses the same child-Execution machinery.
 
 ## Durable timers
 
@@ -342,7 +345,9 @@ they land at the next event boundary instead of behind the FIFO backlog — port
 transport priority/purge.
 
 Timers in the distributed host: `Worker.fire_due_timers` runs on the idle path of the loop and
-*publishes* the `Timeout` to the transport (vs. the synchronous host delivering it inline).
+*publishes* the `Timeout` to the transport (vs. the synchronous host delivering it inline). All
+due timers are fired **concurrently** via `asyncio.gather` — a batch of expired timers is swept
+in one round instead of sequentially.
 
 ## Where state is persisted (checkpoint points)
 
