@@ -281,6 +281,75 @@ The same engine and the same `commit` run in two hosts:
   `Transport` (a queue) instead of delivering inline; workers claim and process them. Same code,
   many processes.
 
+The table below shows the key behavioural differences:
+
+| | Headless (`DurableRunner`) | Distributed (`DistributedRunner`) |
+|---|---|---|
+| **Outbox delivery** | `_flush` calls `_run` on the target inline | `_flush` publishes to transport; worker claims |
+| **Broadcast to regions** | `inject` calls `_run` on each region (gather) | `route` publishes to each region's group; workers claim independently |
+| **Timers** | `_deliver_timeout` calls `_run` inline | publishes `Timeout` to transport; worker claims it like any event |
+| **`process()` returns** | after all cascades settle (fully quiescent) | after publishing the event; worker runs asynchronously |
+| **Who calls `_run`** | the driver, inline | always the worker, after claim |
+| **Processes** | one | N workers in parallel |
+
+## Walkthrough — distributed flow
+
+`DistributedRunner` ([distributed.py](https://github.com/acasadom/harel/blob/main/src/harel/engine/distributed.py)) splits the lifecycle across
+two roles: the **sender** (your application code calling `create`/`send`) and the **worker**
+(a long-running loop that claims and processes). Unlike the headless runner, `send` returns as
+soon as the event is on the queue — the machine advances asynchronously.
+
+```{mermaid}
+sequenceDiagram
+  autonumber
+  actor C as Caller
+  participant DR as DistributedRunner
+  participant T as Transport
+  participant S as Store
+  participant W as Worker
+  participant TD as TransportDriver
+  participant E as Engine (core)
+
+  C->>DR: create(definition_id, context)
+  DR->>TD: start(exe)
+  TD->>E: start(defn, exe)  (generator — runs on_enter, collects effects)
+  TD->>S: commit(exe v1, emits, timers, spawns)
+  TD->>TD: _flush() — publish outbox to transport, create children concurrently
+  DR->>S: load(exe.id)
+  DR-->>C: Execution (initial state committed; worker not yet involved)
+
+  C->>DR: send(exe.id, event)
+  DR->>S: load(exe.id)   %% read priority for the publish
+  DR->>T: publish(exe.id, event, priority)
+  DR-->>C: (returns immediately)
+
+  Note over W,T: worker runs continuously on its own loop
+
+  W->>T: claim(worker_id, visibility)
+  T-->>W: Lease(group_id=exe.id, event)
+  W->>S: load(exe.id)
+  W->>TD: route(exe, event)
+  alt domain event & live regions
+    TD->>T: publish(event) to each region's group (concurrent)
+    TD->>S: commit(exe, processed=event.id)
+  else control event or no live regions
+    TD->>E: process(defn, exe, event)
+    E-->>TD: effects (run actions, collect)
+    TD->>S: commit(exe v+1, emits, processed, timers, spawns)
+    TD->>TD: _flush() — publish outbox to transport, create children concurrently
+  end
+  W->>T: ack(lease)
+```
+
+The critical difference from the headless path: **`send` does not wait for the machine to
+advance**. The event is durable on the transport the moment `send` returns; if every worker
+dies at that instant, the event is redelivered when one restarts. The worker's `ack` only fires
+*after* `commit` succeeds — so the at-least-once guarantee is upheld end-to-end.
+
+The `StoreConflict` path (not shown above) is the backstop: if two workers somehow claim the
+same group concurrently (lease expired, clock skew), the CAS in `commit` rejects the slower
+one, which `nack`s and lets the transport redeliver to a fresh worker with the correct version.
+
 ### Async core, sync façade
 
 The engine in `core.py` is a **synchronous generator that does no IO** — it only `yield`s
