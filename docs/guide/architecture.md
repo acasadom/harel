@@ -227,8 +227,12 @@ exception in one is caught by the production driver and fails the Execution term
 
 Entering an AND-state doesn't create the regions inline. The engine yields `SpawnChildren`; the
 runner records the intents, and they commit **atomically with the parent's advance and its join
-expectations** (`children`). The relay then creates each child idempotently. So a crash mid-fork
-neither double-spawns nor loses a region that finished on start.
+expectations** (`children`). The relay (`_flush`) then creates all pending children
+**concurrently** via `asyncio.gather` — their `on enter` actions (LLM calls, HTTP requests, …)
+overlap on the event loop rather than running one after another. Each spawn targets a distinct
+`child_id` so their store commits are independent rows; no CAS conflict is possible between
+siblings. The idempotency guard (skip if the child already exists) makes a crash-and-restart
+safe: a re-run of `_flush` skips any region that was already created before the crash.
 
 ```{mermaid}
 sequenceDiagram
@@ -240,19 +244,22 @@ sequenceDiagram
   D->>S: commit(parent, spawns=[A,B], children={A,B})   %% atomic: advance + join + spawns
   Note over D,S: parent is parked on the AND-state, waiting for the join
   D->>D: _flush()
-  loop each pending spawn
+  par asyncio.gather — all spawns concurrently
     D->>S: load(child_id)  (skip if exists — idempotent)
     D->>E: start(defn, child)   %% region runs the same Definition, different root_path
-    D->>S: commit(child v1)
+    D->>S: commit(child v1)     %% independent rows: no CAS conflict between siblings
     D->>S: ack_spawn(seq)
   end
   Note over E: each region, on its global sink, Emits Finished → parent_id
-  D->>S: (later) deliver Finished → process(parent) → join when all children finished
+  D->>S: (later, sequential) deliver Finished → process(parent) → join when all children finished
 ```
 
 Regions share the parent's event stream (a domain event is broadcast to all live regions — UML
-semantics). Data-parallel work (N independent workers) is **not** an orthogonal state but a
-fan-out `invoke`, which reuses the same child-Execution machinery.
+semantics). In the headless host (`inject`) the delivery to each live region runs
+**concurrently** via `asyncio.gather`, so a broadcast that triggers async actions in multiple
+regions (LLM calls, HTTP requests…) overlaps them on the event loop rather than serialising
+them. Data-parallel work (N independent workers) is **not** an orthogonal state but a fan-out
+`invoke`, which reuses the same child-Execution machinery.
 
 ## Durable timers
 
@@ -273,6 +280,75 @@ The same engine and the same `commit` run in two hosts:
 - **Distributed** (`TransportDriver` + `Worker` + `Transport`, [distributed.py](https://github.com/acasadom/harel/blob/main/src/harel/engine/distributed.py)): the relay **publishes** emitted events to a
   `Transport` (a queue) instead of delivering inline; workers claim and process them. Same code,
   many processes.
+
+The table below shows the key behavioural differences:
+
+| | Headless (`DurableRunner`) | Distributed (`DistributedRunner`) |
+|---|---|---|
+| **Outbox delivery** | `_flush` calls `_run` on the target inline | `_flush` publishes to transport; worker claims |
+| **Broadcast to regions** | `inject` calls `_run` on each region (gather) | `route` publishes to each region's group; workers claim independently |
+| **Timers** | `_deliver_timeout` calls `_run` inline | publishes `Timeout` to transport; worker claims it like any event |
+| **`process()` returns** | after all cascades settle (fully quiescent) | after publishing the event; worker runs asynchronously |
+| **Who calls `_run`** | the driver, inline | always the worker, after claim |
+| **Processes** | one | N workers in parallel |
+
+## Walkthrough — distributed flow
+
+`DistributedRunner` ([distributed.py](https://github.com/acasadom/harel/blob/main/src/harel/engine/distributed.py)) splits the lifecycle across
+two roles: the **sender** (your application code calling `create`/`send`) and the **worker**
+(a long-running loop that claims and processes). Unlike the headless runner, `send` returns as
+soon as the event is on the queue — the machine advances asynchronously.
+
+```{mermaid}
+sequenceDiagram
+  autonumber
+  actor C as Caller
+  participant DR as DistributedRunner
+  participant T as Transport
+  participant S as Store
+  participant W as Worker
+  participant TD as TransportDriver
+  participant E as Engine (core)
+
+  C->>DR: create(definition_id, context)
+  DR->>TD: start(exe)
+  TD->>E: start(defn, exe)
+  TD->>S: commit(exe v1, emits, timers, spawns)
+  TD->>TD: _flush() publish outbox to transport, create children
+  DR->>S: load(exe.id)
+  DR-->>C: Execution committed, worker not yet involved
+
+  C->>DR: send(exe.id, event)
+  DR->>S: load(exe.id)   %% read priority
+  DR->>T: publish(exe.id, event, priority)
+  DR-->>C: returns immediately
+
+  Note over W,T: worker loops independently
+
+  W->>T: claim(worker_id, visibility)
+  T-->>W: Lease(group_id=exe.id, event)
+  W->>S: load(exe.id)
+  W->>TD: route(exe, event)
+  alt domain event with live regions
+    TD->>T: publish event to each region group
+    TD->>S: commit(exe, processed=event.id)
+  else control event or no regions
+    TD->>E: process(defn, exe, event)
+    E-->>TD: effects
+    TD->>S: commit(exe v+1, emits, processed, timers, spawns)
+    TD->>TD: _flush() publish outbox, create children
+  end
+  W->>T: ack(lease)
+```
+
+The critical difference from the headless path: **`send` does not wait for the machine to
+advance**. The event is durable on the transport the moment `send` returns; if every worker
+dies at that instant, the event is redelivered when one restarts. The worker's `ack` only fires
+*after* `commit` succeeds — so the at-least-once guarantee is upheld end-to-end.
+
+The `StoreConflict` path (not shown above) is the backstop: if two workers somehow claim the
+same group concurrently (lease expired, clock skew), the CAS in `commit` rejects the slower
+one, which `nack`s and lets the transport redeliver to a fresh worker with the correct version.
 
 ### Async core, sync façade
 
@@ -338,7 +414,9 @@ they land at the next event boundary instead of behind the FIFO backlog — port
 transport priority/purge.
 
 Timers in the distributed host: `Worker.fire_due_timers` runs on the idle path of the loop and
-*publishes* the `Timeout` to the transport (vs. the synchronous host delivering it inline).
+*publishes* the `Timeout` to the transport (vs. the synchronous host delivering it inline). All
+due timers are fired **concurrently** via `asyncio.gather` — a batch of expired timers is swept
+in one round instead of sequentially.
 
 ## Where state is persisted (checkpoint points)
 

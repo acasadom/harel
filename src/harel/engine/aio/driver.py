@@ -176,12 +176,17 @@ class AsyncDriver:
 
     async def _flush(self) -> None:
         while True:
-            progressed = False
-            for spawn in await self.store.pending_spawns():
-                await self._create_spawn(spawn)
-                await self.store.ack_spawn(spawn.seq)
-                progressed = True
-            for entry in await self.store.pending_outbox():
+            spawns = await self.store.pending_spawns()
+            outbox = await self.store.pending_outbox()
+            if not spawns and not outbox:
+                return
+            if spawns:
+                # Each spawn targets a different child_id → independent store rows → safe to
+                # run concurrently. Async actions (e.g. LLM calls) overlap on the event loop;
+                # sync actions each get a thread-pool slot via run_in_executor.
+                await asyncio.gather(*[self._create_spawn(s) for s in spawns])
+                await asyncio.gather(*[self.store.ack_spawn(s.seq) for s in spawns])
+            for entry in outbox:
                 target = await self.store.load(entry.target_id) if entry.target_id is not None else None
                 if target is not None and not await self.store.is_processed(target.id, entry.event.id):
                     await self._run(
@@ -191,9 +196,6 @@ class AsyncDriver:
                         event=entry.event,
                     )
                 await self.store.ack_outbox(entry.seq)
-                progressed = True
-            if not progressed:
-                return
 
     async def _deliver_timeout(self, execution_id: str, event: Event) -> None:
         """Deliver a fired timer's `Timeout` event inline (like the outbox relay). The
@@ -211,12 +213,17 @@ class AsyncDriver:
     async def fire_due_timers(self) -> int:
         """Deliver every timer due now (a `Timeout` to its execution) and remove it.
         Returns how many fired. Mirror of the sync `Driver.fire_due_timers`."""
-        fired = 0
-        for execution_id, path, fire_at in await self.store.due_timers(self._clock()):
+        due = await self.store.due_timers(self._clock())
+        if not due:
+            return 0
+
+        async def _fire_one(execution_id: str, path: str, fire_at: float) -> None:
+            # deliver before delete: a crash between the two is safe — dedup prevents re-delivery
             await self._deliver_timeout(execution_id, engine.timeout_event(execution_id, path, fire_at))
             await self.store.delete_timer(execution_id, path, fire_at)
-            fired += 1
-        return fired
+
+        await asyncio.gather(*[_fire_one(eid, p, fa) for eid, p, fa in due])
+        return len(due)
 
     # --- public API --------------------------------------------------------
     async def recover(self) -> None:
@@ -227,21 +234,24 @@ class AsyncDriver:
         await self._flush()
 
     async def inject(self, exe: Execution, event: Event) -> None:
-        live = [
-            child
-            for cid, cs in exe.children.items()
-            if not cs.finished and not cs.submachine and (child := await self.store.load(cid)) is not None
-        ]
+        candidate_ids = [cid for cid, cs in exe.children.items() if not cs.finished and not cs.submachine]
+        loaded = await asyncio.gather(*[self.store.load(cid) for cid in candidate_ids])
+        live = [child for child in loaded if child is not None]
         targets = live if (event.kind not in _CONTROL and live) else [exe]
-        for target in targets:
+
+        async def _deliver_one(target: Execution) -> None:
             if await self.store.is_processed(target.id, event.id):
-                continue
+                return
             await self._run(
                 target,
                 engine.process(self._definition_for(target), target, event),
                 event_id=event.id,
                 event=event,
             )
+
+        # Each target is a distinct execution → independent CAS rows → safe to run concurrently.
+        # Broadcast events (e.g. an external trigger to all live regions) now overlap on the loop.
+        await asyncio.gather(*[_deliver_one(t) for t in targets])
         await self._flush()
 
 

@@ -7,6 +7,7 @@ propagated to orthogonal regions, with optimistic-concurrency retry), awaited ag
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Optional
 
 from harel import engine
@@ -20,12 +21,8 @@ _TERMINAL = (Status.CANCELLED, Status.DONE)
 
 
 async def _children(store: Any, exe: Execution) -> list[Execution]:
-    out: list[Execution] = []
-    for cid in exe.children:
-        child = await store.load(cid)
-        if child is not None:
-            out.append(child)
-    return out
+    loaded = await asyncio.gather(*[store.load(cid) for cid in exe.children])
+    return [c for c in loaded if c is not None]
 
 
 async def _commit_status(
@@ -57,9 +54,12 @@ async def _propagate(store: Any, parent_id: str, new_status: Status) -> None:
     parent = await store.load(parent_id)
     if parent is None:
         return
-    for child in await _children(store, parent):
+
+    async def _propagate_one(child: Execution) -> None:
         await _commit_status(store, child.id, new_status)
         await _propagate(store, child.id, new_status)
+
+    await asyncio.gather(*[_propagate_one(c) for c in await _children(store, parent)])
 
 
 async def terminate(store: Any, execution_id: str) -> None:
