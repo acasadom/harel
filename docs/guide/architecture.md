@@ -316,7 +316,7 @@ sequenceDiagram
   TD->>S: commit(exe v1, emits, timers, spawns)
   TD->>TD: _flush() publish outbox to transport, create children
   DR->>S: load(exe.id)
-  DR-->>C: Execution (committed; worker not yet involved)
+  DR-->>C: Execution committed, worker not yet involved
 
   C->>DR: send(exe.id, event)
   DR->>S: load(exe.id)   %% read priority
