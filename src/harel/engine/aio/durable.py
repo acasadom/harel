@@ -7,7 +7,6 @@ public method `async def`. The sync `DurableRunner` is a thin anyio facade over 
 
 from __future__ import annotations
 
-import asyncio
 import time
 from typing import Any, Callable, Optional
 
@@ -91,19 +90,18 @@ class AsyncDurableRunner:
         await self._driver(definition_id).recover()
 
     async def fire_due_timers(self) -> int:
-        due = await self.store.due_timers(self._clock())
-        if not due:
-            return 0
-
-        async def _fire_one(execution_id: str, path: str, fire_at: float) -> None:
+        # Sequential: _deliver_timeout → _run → commit (CAS on execution version).
+        # Two timers for the same execution must not race (nested composites with independent
+        # timeouts). See AsyncDriver.fire_due_timers for the full explanation.
+        fired = 0
+        for execution_id, path, fire_at in await self.store.due_timers(self._clock()):
             exe = await self.store.load(execution_id)
             if exe is not None and exe.definition_id in self.definitions:
                 event = engine.timeout_event(execution_id, path, fire_at)
                 await self._driver(exe.definition_id)._deliver_timeout(execution_id, event)
             await self.store.delete_timer(execution_id, path, fire_at)
-
-        await asyncio.gather(*[_fire_one(eid, p, fa) for eid, p, fa in due])
-        return len(due)
+            fired += 1
+        return fired
 
     # --- control plane ------------------------------------------------------
     async def cancel(self, execution_id: str, *, reason: Optional[dict] = None) -> Execution:
