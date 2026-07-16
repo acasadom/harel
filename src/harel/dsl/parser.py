@@ -350,6 +350,9 @@ class _ToProgram(Transformer):
     def nohistory(self):
         return ("allow_history", False)
 
+    def cancel_on_failure(self):
+        return ("cancel_on_failure", True)
+
     # --- composition ---
     # a use arg is tagged by syntactic form; the loader interprets it per the
     # parameter's declared kind (action / state / guard / value)

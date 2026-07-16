@@ -305,6 +305,13 @@ def _joined(exe: Execution) -> bool:
     return all(child.finished for child in exe.children.values())
 
 
+def _any_region_failed(exe: Execution) -> bool:
+    """A region has finished with a declared non-success verdict (a `final failed`/other
+    non-`success` outcome) — the `cancel_on_failure` trigger. A plain sink (outcome None)
+    does not count."""
+    return any(c.finished and c.outcome is not None and c.outcome != "success" for c in exe.children.values())
+
+
 def _region_key(exe: Execution, child_id: str) -> str:
     """A stable, friendly key for a region in `region_results`: the child_id with
     the parent's `id:` prefix stripped (`Fork.A` for a static region, `Process:0`
@@ -363,16 +370,31 @@ def _fork(exe: Execution, node: Node) -> Step:
     yield SpawnChildren(specs)
 
 
-def _leave_regions(exe: Execution, node: Node) -> None:
-    """Leaving an orthogonal / fan-out node: bump its per-entry counter so a later
-    re-entry spawns FRESH child Executions (distinct ids) instead of colliding with
-    the already-completed ones from the previous entry — the relay's create-is-
-    idempotent skip would otherwise never re-run them and the join would deadlock.
-    Mirrors the single `invoke` path, which bumps `invoke_seq` on completion. We do
-    NOT drop the finished ChildStates here: they persist for post-join inspection
-    (`region_results` / outcomes); a re-entry replaces them (`_fork` wipes the dict,
-    `_fan_out` drops this node's stale entries)."""
+def _region_of(exe: Execution, node: Node, cid: str) -> bool:
+    """Whether `cid` is a child spawned by `node` (orthogonal region `id:node.child…` or
+    fan-out instance `id:node:seq:i`)."""
+    owned = f"{exe.id}:{node.full_path}"
+    return cid.startswith(owned + ".") or cid.startswith(owned + ":")
+
+
+def _leave_regions(exe: Execution, node: Node) -> Step:
+    """Leaving an orthogonal / fan-out node. Two things:
+
+    (1) Bump its per-entry counter so a later re-entry spawns FRESH child Executions
+    (distinct ids) instead of colliding with the already-completed ones — the relay's
+    create-is-idempotent skip would otherwise never re-run them and the join would
+    deadlock. (Finished ChildStates are kept for post-join inspection; a re-entry
+    replaces them: `_fork` wipes the dict, `_fan_out` drops this node's stale entries.)
+
+    (2) Cancel any region still running: an early exit (a `cancel_on_failure` join, a
+    `timeout` on the node, or an event that leaves the node) emits a `Cancel` to each
+    unfinished child — fire-and-forget, the parent does not wait (cooperative if the
+    region models `on Cancel`, else forceful terminate). A clean join leaves nothing
+    unfinished, so this is a no-op there."""
     exe.invoke_seq[node.full_path] = exe.invoke_seq.get(node.full_path, 0) + 1
+    for cid, cs in exe.children.items():
+        if not cs.finished and _region_of(exe, node, cid):
+            yield Emit(Event(kind="Cancel"), to=cid)
 
 
 def _descend(defn: Definition, exe: Execution, node: Node, event: Optional[Event]) -> Step:
@@ -427,7 +449,8 @@ def _take(defn: Definition, exe: Execution, target: Node, event: Optional[Event]
         if node.parent is not None:
             exe.history[node.parent.full_path] = node.full_path
         if node.kind in _ORTHOGONAL or node.invoke_each is not None:
-            _leave_regions(exe, node)  # bump invoke_seq so re-entry spawns fresh child ids
+            # bump invoke_seq (re-entry spawns fresh ids) + cancel any region still running
+            yield from _leave_regions(exe, node)
     exe.active_path = pivot.full_path
     for node in chain(pivot, target)[1:]:  # entered levels, outermost-first
         yield from _run(node, Hook.ENTER, event)
@@ -495,7 +518,10 @@ def _drain(defn: Definition, exe: Execution) -> Step:
             _expose_region_results(exe)
         elif active.kind in _ORTHOGONAL:
             if not _joined(exe):
-                return  # AND-state: wait for every region to report Finished
+                # normally wait for every region; with `cancel_on_failure`, a single region's
+                # non-success terminal resolves the join now (leaving cancels the rest)
+                if not (active.cancel_on_failure and _any_region_failed(exe)):
+                    return
             _expose_region_results(exe)  # surface region results for the join transition
 
         auto = _resolve(defn, exe, _auto_pred, allow_parent=False)

@@ -175,6 +175,7 @@ def _build_node(
         invoke_each=tuple(norm["invoke_each"]) if norm.get("invoke_each") else None,
         start_state=norm.get("start"),
         allow_history=norm.get("allow_history", True),
+        cancel_on_failure=norm.get("cancel_on_failure", False),
     )
     index[full_path] = node
 

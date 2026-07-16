@@ -111,6 +111,7 @@ class Node:
     #                                                collection entry (addressed; join on completion)
     start_state: Optional[str] = None  # initial child name (composites)
     allow_history: bool = True
+    cancel_on_failure: bool = False  # orthogonal: a region's non-success terminal cancels the rest + joins
     transitions: list[Transition] = field(default_factory=list)  # scope = this node
 
     @property
