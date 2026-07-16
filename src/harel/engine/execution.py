@@ -22,6 +22,8 @@ from typing import Optional
 
 import pydantic
 
+from harel.spec.states import Event
+
 
 class Status(str, Enum):
     PENDING = "PENDING"
@@ -76,6 +78,7 @@ class Execution(pydantic.BaseModel):
     # --- orthogonal (model (i)) ---------------------------------------------
     parent_id: Optional[str] = None  # set on a child: the parent Execution to notify
     child_id: Optional[str] = None  # set on a child: its key in the parent's `children`
+    deferred: list[Event] = []  # events held by a `defer` state, re-delivered on entering a handler
     children: dict[str, ChildState] = {}  # parent: child_id -> ChildState (join counter)
     invoke_seq: dict[str, int] = {}  # spawn-site path -> times entered (invoke / orthogonal /
     #                                  fan-out): the per-entry seq in the deterministic child ids,

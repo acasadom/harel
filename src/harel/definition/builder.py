@@ -169,6 +169,7 @@ def _build_node(
         timeout=norm.get("timeout"),
         outcome=norm.get("outcome"),
         carry=tuple(norm.get("carry", ())),
+        defer=frozenset(norm.get("defer", ())),
         invoke=norm.get("invoke"),
         invoke_with=dict(norm.get("invoke_with", {})),
         invoke_each=tuple(norm["invoke_each"]) if norm.get("invoke_each") else None,

@@ -38,7 +38,7 @@ param_list: "(" param ("," param)* ")"
 param:      NAME ":" PARAM_KIND
 PARAM_KIND: "action" | "state" | "guard" | "value" | "event"
 
-?item: initial | on_enter | on_exit | on_activity | timeout | outcome | carry | nohistory
+?item: initial | on_enter | on_exit | on_activity | timeout | outcome | carry | defer | nohistory
      | invoke | invoke_with
      | use_stmt | state_decl | final_decl | selector_trans | join_trans | transition
 
@@ -54,6 +54,8 @@ timeout_spec: INT             -> timeout_literal
 outcome:     "outcome" ref
 // context keys this (region) state propagates on its `Finished` (besides `outcome`)
 carry:       "carry" ref ("," ref)*
+// event kinds to hold (not drop) while unhandled here, and re-deliver on entering a state that handles them
+defer:       "defer" ref ("," ref)*
 nohistory:   "no" "history"
 // invoke a submachine (black-box): by FQN, or an inline machine body (QML-style).
 // `for V in COLL` fans out ONE child per entry of the context list COLL (V = the entry).
