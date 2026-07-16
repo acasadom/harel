@@ -63,6 +63,7 @@ from A to B                       # automatic (no trigger)
 from A to B on Event              # event-triggered
 from A to B on E1 | E2            # multiple event kinds
 from A to B on Event where <pred> # guarded (where only after `on`)
+from A to B on error              # action of A raised: route here (else the runner fails the exe)
 
 from A select fn on Event {       # computed branch (a selector)
   "x" to B
@@ -76,7 +77,7 @@ from Fork join any to X else to Y          # …at least one
 ```
 
 See: [guards](../tutorial/04-guards), [selectors](../tutorial/05-selectors),
-[payloads](../tutorial/13-payloads).
+[payloads](../tutorial/13-payloads), [on error](../tutorial/16-on-error).
 
 ## Predicates
 
@@ -130,6 +131,16 @@ See: [fragments](../tutorial/09-fragments), [imports](../tutorial/10-imports),
 
 ## Reserved events
 
-`Start`, `Finished`, `Timeout`, `Cancel`, `Reset`, `SetState`, `Returned` are the engine's own
-events — don't use these names for your domain events. (`CancelOrder`, not `Cancel`, for a
-domain "cancel".)
+`Start`, `Finished`, `Timeout`, `Cancel`, `Reset`, `SetState`, `Returned`, `error` are the
+engine's own events — don't use these names for your domain events. (`CancelOrder`, not `Cancel`,
+for a domain "cancel".)
+
+`on error` fires when a state's action **raises**: the engine synthesises an `error` event
+carrying the exception's `type` and `message` (so `on error where type == "TimeoutError"` routes
+by kind) and also stashes it in `context["_error"]`. Guards are evaluated in declaration order;
+the first match wins. If no guard matches — or there is no `on error` in scope at all — the
+runner's default policy applies: the execution is failed terminally (`status=FAILED`, dead-letter).
+Model *expected* failures as action results routed by a [selector](../tutorial/05-selectors); use
+`on error` for genuine exceptions you want to recover from in the model.
+
+See: [on error tutorial](../tutorial/16-on-error).

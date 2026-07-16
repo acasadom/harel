@@ -96,7 +96,7 @@ class AsyncDriver:
         return await loop.run_in_executor(None, functools.partial(fn, proxy, event, **inputs))
 
     async def _drive(
-        self, exe: Execution, gen
+        self, exe: Execution, gen, in_error: bool = False
     ) -> tuple[list[tuple[Optional[str], Event]], list[TimerOp], list[tuple[str, str, dict]], list[str]]:
         emits: list[tuple[Optional[str], Event]] = []
         timer_ops: list[TimerOp] = []
@@ -120,8 +120,17 @@ class AsyncDriver:
                             _resolve(action), proxy, effect.event, dict(action.inputs)
                         )
                     except Exception as exc:
-                        self._on_action_error(exe, exc)  # base: re-raises; runtime: fails the exe
                         gen.close()
+                        # if the model has an `on error` transition for the current config, route
+                        # to it (exception in context._error + the error event data); else fall
+                        # back to the runner's policy (fail the exe / re-raise). `in_error` guards
+                        # against a loop if the error handler's own action raises.
+                        defn = self._definition_for(exe)
+                        ev = engine.error_event(exc)
+                        if not in_error and engine.has_error_handler(defn, exe, ev):
+                            exe.context["_error"] = dict(ev.data)
+                            return await self._drive(exe, engine.process(defn, exe, ev), in_error=True)
+                        self._on_action_error(exe, exc)  # base: re-raises; runtime: fails the exe
                         return [], [], [], []
                     effect = gen.send(engine.ActionResult(value=ret))
                 elif isinstance(effect, engine.SpawnChildren):

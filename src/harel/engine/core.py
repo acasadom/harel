@@ -273,6 +273,21 @@ def _is_active(defn: Definition, exe: Execution, path: str) -> bool:
     return any(n.full_path == path for n in chain(root, active))
 
 
+def error_event(exc: Exception) -> Event:
+    """The synthetic `error` event a driver injects when an action raises, carrying the
+    exception's `type` and `message` in its data (so a guard can match on `type`)."""
+    return Event(kind="error", data={"type": type(exc).__name__, "message": str(exc)})
+
+
+def has_error_handler(defn: Definition, exe: Execution, event: Event) -> bool:
+    """Whether the active configuration has an `on error` transition for `event` (in scope,
+    parent fallback, honouring its guard). A driver uses it to choose modelled error handling
+    over failing the execution."""
+    if exe.active_path is None or exe.status is not Status.RUNNING:
+        return False
+    return _resolve(defn, exe, _event_pred(event), allow_parent=True) is not None
+
+
 def has_cancel_handler(defn: Definition, exe: Execution) -> bool:
     """Whether the active configuration has its own `Cancel` transition (in scope,
     with parent fallback). The control plane uses this to choose cooperative
