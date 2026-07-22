@@ -313,6 +313,9 @@ class _ToProgram(Transformer):
     def carry(self, *keys):
         return ("carry", tuple(str(k) for k in keys))
 
+    def defer(self, *events):
+        return ("defer", tuple(str(e) for e in events))
+
     def invoke_for(self, var, coll):
         return (str(var), str(coll))
 

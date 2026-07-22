@@ -422,6 +422,30 @@ def _take(defn: Definition, exe: Execution, target: Node, event: Optional[Event]
     yield from _descend(defn, exe, target, event)
 
 
+def _deferred_kinds(defn: Definition, exe: Execution) -> set[str]:
+    """Event kinds deferred in the current configuration: union of `defer` on the active
+    node and all its Definition ancestors. Walking to the Definition root (not exe.root_path)
+    means parent composite states' defer sets are visible to orthogonal region children that
+    share the same Definition."""
+    kinds: set[str] = set()
+    node = defn.index.get(exe.active_path) if exe.active_path is not None else None
+    while node is not None:
+        kinds |= node.defer
+        node = node.parent
+    return kinds
+
+
+def _next_deferred(defn: Definition, exe: Execution) -> Optional[tuple[Event, tuple]]:
+    """Pop the first deferred event (FIFO) that has a matching transition in the current
+    configuration. Returns (event, (scope, transition)) so the caller can route without a
+    second resolve; None if no deferred event is handleable yet."""
+    for i, ev in enumerate(exe.deferred):
+        found = _resolve(defn, exe, _event_pred(ev), allow_parent=True)
+        if found is not None:
+            return exe.deferred.pop(i), found
+    return None
+
+
 def _drain(defn: Definition, exe: Execution) -> Step:
     """Follow automatic transitions; bubble finished composites up; settle/sink."""
     root = defn.index[exe.root_path]
@@ -467,6 +491,12 @@ def _drain(defn: Definition, exe: Execution) -> Step:
             continue
 
         if _resolve(defn, exe, _any_pred, allow_parent=False) is not None:
+            found = _next_deferred(defn, exe)
+            if found is not None:
+                ev, (scope, t) = found
+                target = yield from _target_of(defn, exe, scope, t, ev)
+                yield from _take(defn, exe, target, ev)
+                continue
             return  # has a transition at its own scope (waiting for an event)
 
         # sink at its immediate scope: run on_exit, then bubble up or finish. The
@@ -495,13 +525,11 @@ def _drain(defn: Definition, exe: Execution) -> Step:
                 # carrying its outcome + the `carry`-projected context (the region's
                 # "return value"). `Finished` is a system event with an opaque payload.
                 carried = {k: exe.context[k] for k in root.carry if k in exe.context}
-                yield Emit(
-                    Event(
-                        kind="Finished",
-                        data={"child_id": exe.child_id, "outcome": exe.outcome, **carried},
-                    ),
-                    to=exe.parent_id,
-                )
+                data: dict = {"child_id": exe.child_id, "outcome": exe.outcome, **carried}
+                if exe.deferred:
+                    data["__deferred__"] = [e.model_dump() for e in exe.deferred]
+                    exe.deferred.clear()
+                yield Emit(Event(kind="Finished", data=data), to=exe.parent_id)
         return
 
 
@@ -526,6 +554,7 @@ def start(defn: Definition, exe: Execution) -> Step:
 def set_state(defn: Definition, exe: Execution, path: str) -> Step:
     """Restore a position by address (SetState): does not run the state's enter,
     just positions and drains automatic transitions."""
+    exe.deferred.clear()
     exe.active_path = path
     exe.status = Status.RUNNING
     yield from _drain(defn, exe)
@@ -547,6 +576,7 @@ def process(defn: Definition, exe: Execution, event: Event) -> Step:
         exe.children.clear()
         exe.context.clear()
         exe.history.clear()
+        exe.deferred.clear()
         exe.active_path = None
         exe.outcome = None
         exe.error = None
@@ -591,9 +621,10 @@ def process(defn: Definition, exe: Execution, event: Event) -> Step:
             exe.children[cid].finished = True
             exe.children[cid].outcome = event.data.get("outcome")
             # everything past the reserved keys is the child's carried context
-            exe.children[cid].result = {
-                k: v for k, v in event.data.items() if k not in ("child_id", "outcome")
-            }
+            _reserved = ("child_id", "outcome", "__deferred__")
+            exe.children[cid].result = {k: v for k, v in event.data.items() if k not in _reserved}
+        for raw_ev in event.data.get("__deferred__", ()):
+            exe.deferred.append(Event.model_validate(raw_ev))
         active_node = defn.index[exe.active_path] if exe.active_path is not None else None
         if (
             active_node is not None
@@ -654,8 +685,13 @@ def process(defn: Definition, exe: Execution, event: Event) -> Step:
         target = yield from _target_of(defn, exe, scope, t, event)
         yield from _take(defn, exe, target, event)
     else:
-        # no transition: run the active leaf's own activity (no inheritance)
         assert exe.active_path is not None
-        yield from _run(defn.index[exe.active_path], Hook.ACTIVITY, event)
+        if event.kind in _deferred_kinds(defn, exe):
+            # a `defer` in scope names this kind: hold it (re-delivered on entering a
+            # handling state) instead of dropping it
+            exe.deferred.append(event)
+        else:
+            # no transition: run the active leaf's own activity (no inheritance)
+            yield from _run(defn.index[exe.active_path], Hook.ACTIVITY, event)
     yield from _drain(defn, exe)
     exe.processed_events += 1

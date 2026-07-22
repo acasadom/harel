@@ -34,12 +34,27 @@ timeout 900                 # arm a durable timer (seconds)
 timeout context key         # …with the delay read from context[key]
 outcome <label>             # this terminal's verdict (final is sugar over this)
 carry k1, k2                # context keys a region propagates on Finished
+defer EventA, EventB        # hold these events while unhandled here; re-deliver on a state that handles them
 no history                  # don't restore history on re-entry
 ```
 
-See: [actions](../tutorial/02-actions), [outcomes](../tutorial/03-outcomes),
-[hierarchy](../tutorial/06-hierarchy), [timers](../tutorial/07-timers),
-[orthogonal](../tutorial/08-orthogonal), [payloads](../tutorial/13-payloads).
+`defer` makes an event that has no transition in the current state **wait** instead of being
+dropped: it goes onto a per-execution FIFO (persisted on the `Execution`) and is re-delivered as
+soon as the machine enters a state that has a matching transition. Declared on a state it applies
+there and in its substates; declared at the machine level it applies everywhere a state doesn't
+handle the event. Use it for out-of-order async events — a webhook or callback that can arrive
+before the machine reaches the state that consumes it.
+
+`defer` applies only to **domain events**. System events (`Timeout`, `Cancel`, `Finished`, `Reset`,
+`Start`, `SetState`) are routed by the engine before the defer check and cannot be held this way.
+
+Declared on a parent composite or at the machine root, `defer` is visible to orthogonal region
+children that share the same Definition — they inherit the full ancestor chain of defer sets.
+
+See: [deferred events](../tutorial/15-deferred-events), [actions](../tutorial/02-actions),
+[outcomes](../tutorial/03-outcomes), [hierarchy](../tutorial/06-hierarchy),
+[timers](../tutorial/07-timers), [orthogonal](../tutorial/08-orthogonal),
+[payloads](../tutorial/13-payloads).
 
 ## Transitions
 

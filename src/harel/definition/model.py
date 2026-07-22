@@ -104,6 +104,7 @@ class Node:
     timeout: Optional[Union[int, dict]] = None  # literal seconds, or {context: key} (dynamic/backoff)
     outcome: Optional[str] = None  # result label recorded on the Execution when this state is a terminal
     carry: tuple[str, ...] = ()  # context keys a region propagates on its `Finished` (besides `outcome`)
+    defer: frozenset[str] = frozenset()  # event kinds held (not dropped) while unhandled in this node's scope
     invoke: Optional[str] = None  # submachine FQN: entering this state runs that machine as a child
     invoke_with: dict[str, str] = field(default_factory=dict)  # child-ctx-key -> parent-ctx-key (input)
     invoke_each: Optional[tuple[str, str]] = None  # (loop_var, collection_key): fan out ONE child per
