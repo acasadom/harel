@@ -39,6 +39,7 @@ tutorial/12-fanout
 tutorial/13-payloads
 tutorial/14-validation
 tutorial/15-deferred-events
+tutorial/16-on-error
 ```
 
 ## Operations & reference
