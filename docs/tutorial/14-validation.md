@@ -95,9 +95,14 @@ gap between "it parsed" and "it's a sound machine".
 
 ## That's the model
 
-You now have the whole authoring surface: states and transitions, actions, outcomes, guards,
+You now have most of the authoring surface: states and transitions, actions, outcomes, guards,
 selectors, hierarchy, timers, orthogonal regions, fragments, imports, submachine `invoke`,
-fan-out, payloads, and validation.
+fan-out, payloads, and validation. Two more DSL features complete the picture:
+
+- [Deferred events](15-deferred-events) (`defer`) — hold an event the machine isn't ready for
+  yet and re-deliver it automatically when it enters a state that handles it.
+- [Action errors](16-on-error) (`on error`) — route to a recovery state when a state's action
+  raises, instead of failing the execution terminally.
 
 The rest of the documentation is the **operations** side — how these machines run for real:
 
