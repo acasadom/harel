@@ -103,7 +103,7 @@ Coin     -> Unlocked  (RUNNING)
   the state it is currently in — `Locked`, the `initial` state.
 - **`runner.process(exe.id, Event(kind=...))`** delivers one event and returns the updated
   execution. An event is just a `kind` (its name) plus optional `data` — more on data in
-  [payloads](../guide/durability).
+  [payloads](13-payloads).
 - **`exe.status`** is the lifecycle status. It is `RUNNING` the whole time here, because the
   turnstile never *finishes* — it just toggles forever.
 
