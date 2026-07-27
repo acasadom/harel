@@ -140,4 +140,4 @@ Deferred events are held in a **FIFO queue** on the `Execution` and persisted wi
 survive crashes and worker restarts. If the machine terminates (reaches a `final` state) while
 events are still deferred, those events are discarded.
 
-Next: [catching mistakes early with static validation](14-validation).
+Next: [catching action errors with `on error`](16-on-error).

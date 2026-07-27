@@ -72,7 +72,9 @@ DSL and never mutated. Actions/guards are referenced (`ActionRef.function` is a 
 
 An `Execution` is the running instance: `status`, `active_path` (the active leaf's `full_path`),
 `history` (composite → last active child), `context` (your data), `outcome`, `version` (the
-optimistic-concurrency token), `children` (the orthogonal join counter), `parent_id`/`child_id`.
+optimistic-concurrency token), `children` (the orthogonal join counter), `parent_id`/`child_id`,
+`deferred` (FIFO of domain events held by `defer` while the machine is in a state that has no
+matching transition — persisted with the Execution and re-delivered on the next matching state).
 It is **pure data** — round-trips to/from JSON, holds no references into the Definition. The
 engine reads a Definition + an Execution and mutates the Execution in place.
 
@@ -219,9 +221,10 @@ sequenceDiagram
 
 The key points: **state is rehydrated from the store on every event** (the runner is stateless —
 a fresh `Driver` per call, a pure function of Definition + store), and **persisted exactly once
-per event boundary**, in the atomic `commit`. Your functions run during `_drive`; an unhandled
-exception in one is caught by the production driver and fails the Execution terminally
-(`status=FAILED`, the dead-letter) rather than crashing the worker.
+per event boundary**, in the atomic `commit`. Your functions run during `_drive`; if an action raises, the driver first checks whether the
+current configuration has an `on error` transition — if so it synthesises an `error` event and
+routes to the handler state; if not (or the guard doesn't match), the production driver fails
+the Execution terminally (`status=FAILED`, the dead-letter) rather than crashing the worker.
 
 ## Orthogonal fork — crash-safe spawn via the outbox
 

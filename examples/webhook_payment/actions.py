@@ -9,6 +9,10 @@ def _log(stm, msg: str) -> None:
     stm.execution_ctx.setdefault("log", []).append(msg)
 
 
+def setup_order(stm, event, **kw):
+    _log(stm, "order registered — awaiting payment")
+
+
 def start_fulfillment(stm, event, **kw):
     payment_id = event.data.get("payment_id", "")
     amount = event.data.get("amount", 0)
@@ -26,3 +30,8 @@ def on_failed(stm, event, **kw):
 
 def on_expired(stm, event, **kw):
     _log(stm, "timed out — no payment received within the window")
+
+
+def on_svc_error(stm, event, **kw):
+    err = stm.execution_ctx.get("_error", {})
+    _log(stm, f"service error: {err.get('type')} — {err.get('message')}")

@@ -146,6 +146,41 @@ orthogonal Verifying {
 The hook order follows UML: the region's own `on enter` runs first, then its initial child's.
 On completion the region's own `on exit` runs after its terminal child's.
 
+## Ending the block early
+
+By default the orthogonal state is a **join**: it waits for *every* region to finish before it
+leaves. Two declarations on the orthogonal node itself let it end before that:
+
+- **`cancel_on_failure`** — as soon as *one* region finishes with a non-`success` outcome, the
+  engine cancels the regions still running and resolves the join immediately. Use it when a single
+  region's failure already decides the block (a fraud rejection makes the stock check moot):
+
+  ```text
+  orthogonal Verifying {
+    cancel_on_failure                 # first failing region ends the block
+    state Fraud { … }
+    state Stock { … }
+  }
+  from Verifying join all to Approved else to Rejected
+  ```
+
+- **`timeout`** on the orthogonal node — a budget for the *whole* block. If it fires before the
+  regions join, the still-running regions are cancelled and the node's own `on Timeout` transition
+  fires:
+
+  ```text
+  orthogonal Verifying {
+    timeout 60                        # the block as a whole must finish within 60 s
+    state Fraud { … }
+    state Stock { … }
+    from Verifying to TimedOut on Timeout
+  }
+  ```
+
+A cancelled region receives a `Cancel` event, so a region that models its own `on Cancel` cleanup
+gets to run it before it stops. Without either declaration the block waits for all regions — the
+plain join.
+
 What each region *produced* — and how the join can route on it (all succeeded? any failed?) —
 is the subject of [payloads](13-payloads). First, let's tackle reuse: the retry pattern from
 [step 5](05-selectors) keeps reappearing. [Fragments](09-fragments) let us write it once.

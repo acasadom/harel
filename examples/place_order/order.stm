@@ -41,8 +41,13 @@ machine order {
   }
 
   state Shipped { on enter examples.place_order.actions.ship }
-  final Delivered success { on enter examples.place_order.actions.deliver }
-  final Cancelled cancelled { on enter examples.place_order.actions.cancel_order }
+  final Delivered     success   { on enter examples.place_order.actions.deliver }
+  final Cancelled     cancelled { on enter examples.place_order.actions.cancel_order }
+  # Unexpected exception from capture_payment (network error, gateway down, …).
+  # Distinguished from a modelled decline (PaymentDeclined → selector → Cancelled).
+  final PaymentError  failed    { on enter examples.place_order.actions.on_payment_error }
+  # Unexpected exception from any action inside Fulfilling (warehouse API down, …).
+  final FulfilmentError failed  { on enter examples.place_order.actions.on_fulfilment_error }
 
   from Cart to AwaitingPayment on PlaceOrder
   from AwaitingPayment to Paid on PaymentAuthorized
@@ -57,4 +62,8 @@ machine order {
   from Retrying to AwaitingPayment
   from Paid to Fulfilling
   from Shipped to Delivered on Delivered
+  # on error transitions: unexpected exceptions route to a failed terminal instead of
+  # crashing the execution. Contrast with PaymentDeclined (expected, modelled via selector).
+  from Paid to PaymentError on error
+  from Fulfilling to FulfilmentError on error
 }
