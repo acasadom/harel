@@ -195,6 +195,25 @@ def main() -> None:
             },
         )
     )
+    # --- cancel_on_failure: Picking failed, Billing was cancelled mid-run ----------
+    store.save(
+        Execution(
+            id="fulfillment-cancel-on-failure",
+            definition_id="Fulfillment",
+            status=Status.DONE,
+            outcome="failed",
+            active_path=_path(fulfillment, "Failed"),
+            context={"order": "order-running-cart", "warehouse": "MAD-1"},
+            children={
+                "Fork.Picking": ChildState(
+                    root_path=_path(fulfillment, "Picking"), finished=True, outcome="failed"
+                ),
+                # Billing was cancelled when Picking failed (cancel_on_failure); it never
+                # finished, so finished=False and outcome=None.
+                "Fork.Billing": ChildState(root_path=_path(fulfillment, "Billing"), finished=False),
+            },
+        )
+    )
     # an unknown-definition execution (definition not in the machines dir) -> the
     # monitor shows it data-only, proving graceful degradation
     store.save(

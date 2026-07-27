@@ -38,6 +38,8 @@ def on_retry(stm, event, **kw):
 
 
 def capture_payment(stm, event, **kw):
+    if stm.execution_ctx.get("simulate_payment_error"):
+        raise RuntimeError("gateway timeout — payment processor unreachable")
     _record(stm, "payment captured")
 
 
@@ -46,6 +48,8 @@ def start_fulfilment(stm, event, **kw):
 
 
 def pick(stm, event, **kw):
+    if stm.execution_ctx.get("simulate_fulfilment_error"):
+        raise OSError("warehouse API unavailable")
     _record(stm, "items picked")
 
 
@@ -67,3 +71,13 @@ def deliver(stm, event, **kw):
 
 def cancel_order(stm, event, **kw):
     _record(stm, "order cancelled")
+
+
+def on_payment_error(stm, event, **kw):
+    err = stm.execution_ctx.get("_error", {})
+    _record(stm, f"payment error: {err.get('type')} — {err.get('message')}")
+
+
+def on_fulfilment_error(stm, event, **kw):
+    err = stm.execution_ctx.get("_error", {})
+    _record(stm, f"fulfilment error: {err.get('type')} — {err.get('message')}")

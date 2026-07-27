@@ -1,16 +1,22 @@
 # Demo machine for the monitor TUI: an orthogonal (AND-state) fulfillment with two
-# concurrent regions, so the tree shows region annotations (finished/outcome) at the join.
+# concurrent regions and cancel_on_failure — so the tree shows region annotations
+# (finished/outcome) and the cancelled-sibling case at the join.
 
 event Picked {}
 event Billed {}
+event PickFailed {}
+
 machine Fulfillment {
   initial Fork
   orthogonal Fork {
+    cancel_on_failure          # Picking failure cancels Billing and resolves the join now
     state Picking {
       initial P1
       state P1 {}
       final P2 success
+      final P3 failed          # Picking can fail (e.g. item out of stock)
       from P1 to P2 on Picked
+      from P1 to P3 on PickFailed
     }
     state Billing {
       initial B1
@@ -19,6 +25,7 @@ machine Fulfillment {
       from B1 to B2 on Billed
     }
   }
-  final Done success
-  from Fork to Done
+  final Done   success
+  final Failed failed
+  from Fork join all to Done else to Failed
 }
