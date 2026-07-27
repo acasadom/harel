@@ -35,6 +35,7 @@ timeout context key         # …with the delay read from context[key]
 outcome <label>             # this terminal's verdict (final is sugar over this)
 carry k1, k2                # context keys a region propagates on Finished
 defer EventA, EventB        # hold these events while unhandled here; re-deliver on a state that handles them
+cancel_on_failure           # orthogonal: a region's non-success terminal cancels the rest + joins now
 no history                  # don't restore history on re-entry
 ```
 
@@ -50,6 +51,11 @@ before the machine reaches the state that consumes it.
 
 Declared on a parent composite or at the machine root, `defer` is visible to orthogonal region
 children that share the same Definition — they inherit the full ancestor chain of defer sets.
+
+On an `orthogonal` node, `cancel_on_failure` ends the block as soon as any region reaches a
+non-success terminal (the join resolves via its `else`), and a `timeout` on the node bounds the
+whole parallel block. Both **cancel** the regions still running (fire-and-forget); a clean join
+cancels nothing.
 
 See: [deferred events](../tutorial/15-deferred-events), [actions](../tutorial/02-actions),
 [outcomes](../tutorial/03-outcomes), [hierarchy](../tutorial/06-hierarchy),
