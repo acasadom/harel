@@ -149,7 +149,7 @@ class _SyncDriver:
         )
 
     def _drive(
-        self, exe: Execution, gen, in_error: bool = False
+        self, exe: Execution, gen, original_exc: Optional[Exception] = None
     ) -> tuple[list[tuple[Optional[str], Event]], list[TimerOp], list[tuple[str, str, dict]], list[str]]:
         emits: list[tuple[Optional[str], Event]] = []
         timer_ops: list[TimerOp] = []
@@ -174,15 +174,23 @@ class _SyncDriver:
                         ret = _resolve(action)(proxy, effect.event, **dict(action.inputs))
                     except Exception as exc:
                         gen.close()
-                        # if the model has an `on error` transition for the current config, route to
-                        # it (exception in context._error + the error event data); else fall back to
-                        # the runner's policy (fail the exe / re-raise). `in_error` guards a loop if
-                        # the error handler's own action raises. Partial effects are dropped either way.
+                        if original_exc is not None:
+                            # already recovering (an `on error` handler's own action just
+                            # raised): no second attempt — chain explicitly (`__cause__`),
+                            # mirroring `AsyncDriver._drive` (the async engine actions run in
+                            # a thread pool, where Python's implicit context isn't reliable).
+                            exc.__cause__ = original_exc
+                            self._on_action_error(exe, exc)
+                            return [], [], [], []
+                        # if the model has an `on error` transition for the current config,
+                        # route to it (exception in context._error + the error event data);
+                        # else fall back to the runner's policy (fail the exe / re-raise).
+                        # Partial effects are dropped either way.
                         defn = self._definition_for(exe)
                         ev = engine.error_event(exc)
-                        if not in_error and engine.has_error_handler(defn, exe, ev):
+                        if engine.has_error_handler(defn, exe, ev):
                             exe.context["_error"] = dict(ev.data)
-                            return self._drive(exe, engine.process(defn, exe, ev), in_error=True)
+                            return self._drive(exe, engine.process(defn, exe, ev), original_exc=exc)
                         self._on_action_error(exe, exc)  # base: re-raises; runtime: fails the exe
                         return [], [], [], []
                     effect = gen.send(engine.ActionResult(value=ret))

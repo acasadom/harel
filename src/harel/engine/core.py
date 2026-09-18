@@ -412,8 +412,11 @@ def _descend(defn: Definition, exe: Execution, node: Node, event: Optional[Event
         if child_path is None:
             return
         child = defn.index[child_path]
-        yield from _run(child, Hook.ENTER, event)
+        # position on `child` before running its own enter: if the action raises, error
+        # routing (has_error_handler/process) must see `child` as active, not the node
+        # we're descending from — mirrors `start()`, which positions before entering too.
         exe.active_path = child_path
+        yield from _run(child, Hook.ENTER, event)
         exe.history[node.full_path] = child_path
         node = child
 
@@ -453,8 +456,11 @@ def _take(defn: Definition, exe: Execution, target: Node, event: Optional[Event]
             yield from _leave_regions(exe, node)
     exe.active_path = pivot.full_path
     for node in chain(pivot, target)[1:]:  # entered levels, outermost-first
-        yield from _run(node, Hook.ENTER, event)
+        # position on `node` before running its own enter (see `_descend`): otherwise
+        # a raise here leaves `exe.active_path` at the pivot, which `has_error_handler`
+        # can't scope an `on error` to (and `_resolve` refuses to resolve from root at all).
         exe.active_path = node.full_path
+        yield from _run(node, Hook.ENTER, event)
         if node.parent is not None:
             exe.history[node.parent.full_path] = node.full_path
     yield from _descend(defn, exe, target, event)

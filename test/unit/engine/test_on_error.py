@@ -11,6 +11,7 @@ from harel.dsl import definition_from_dsl
 from harel.engine.durable import DurableRunner
 from harel.engine.execution import Execution, Status
 from harel.engine.store import DictStore
+from harel.spec.states import Event
 
 # `boom` (stm_actions) raises RuntimeError("boom") on enter.
 ROUTE = """
@@ -56,6 +57,61 @@ machine m {
 }
 """
 
+# `boom` raises on entering Calling as the TARGET of an ordinary transition (not the
+# initial state, unlike ROUTE). Regression for a bug where `exe.active_path` was
+# advanced to the transition's pivot (an ancestor, sometimes the root) before the
+# entered state's `on enter` ran, so `on error` scoped to Calling itself could never
+# be resolved and the exception always fell through to the runner policy.
+TARGET_ROUTE = """
+event Go {}
+machine api {
+  initial Idle
+  state Idle {}
+  state Calling { on enter stm_actions.boom }
+  state ApiError { on enter stm_actions.rec(at: "recovered") }
+  final Failed failed {}
+  from Idle to Calling on Go
+  from Calling to ApiError on error
+  from ApiError to Failed
+}
+"""
+
+# Same bug, but the failing `on enter` fires while descending into a composite's
+# initial child (`_descend`) rather than via the plain entry loop (`_take`).
+NESTED_ROUTE = """
+event Go {}
+machine api {
+  initial Idle
+  state Idle {}
+  state Calling {
+    initial Dialing
+    state Dialing { on enter stm_actions.boom }
+    from Dialing to ApiError on error
+  }
+  state ApiError { on enter stm_actions.rec(at: "recovered") }
+  final Failed failed {}
+  from Idle to Calling on Go
+  from ApiError to Failed
+}
+"""
+
+
+# `boom` raises on both Calling's and the handler's own `on enter` — regression for the
+# second failure silently replacing the first. `_on_action_error` must see the original
+# exception chained via `__cause__` (Python's *implicit* exception context isn't reliable
+# here since actions run in a thread pool — see `AsyncDriver._drive`), and the durable
+# runner's `error` field must mention both, not just the retry's.
+DOUBLE_FAILURE = """
+machine m {
+  initial Calling
+  state Calling { on enter stm_actions.boom }
+  state AlsoFails { on enter stm_actions.boom }
+  final Failed failed {}
+  from Calling to AlsoFails on error
+  from AlsoFails to Failed
+}
+"""
+
 
 def _run(dsl: str, name: str) -> Execution:
     defn = definition_from_dsl(dsl, name, validate=True)  # validate accepts `on error`
@@ -74,6 +130,32 @@ def test_on_error_routes_to_handler_state():
 def test_on_error_can_be_guarded_by_exception_type():
     exe = _run(TYPED, "m")
     assert exe.active_path == "OnRuntime"  # matched `where type == "RuntimeError"`
+
+
+def test_on_error_routes_when_the_failure_is_in_a_transition_target():
+    """Regression: `on error` must also catch a failure entering a state reached by an
+    ordinary transition, not just the machine's initial state (see TARGET_ROUTE)."""
+    defn = definition_from_dsl(TARGET_ROUTE, "api", validate=True)
+    exe = Execution(definition_id=defn.id)
+    runner = _Runner(defn)
+    runner.start(exe)
+    runner.inject(exe, Event(kind="Go"))
+    assert exe.active_path == "Failed" and exe.outcome == "failed"
+    assert exe.context["_error"] == {"type": "RuntimeError", "message": "boom"}
+    assert exe.context["trace"] == ["recovered"]
+
+
+def test_on_error_routes_during_composite_descent():
+    """Regression: same as above, for a failure entering a composite's initial child
+    (`_descend`) rather than a plain transition target (`_take`); see NESTED_ROUTE."""
+    defn = definition_from_dsl(NESTED_ROUTE, "api", validate=True)
+    exe = Execution(definition_id=defn.id)
+    runner = _Runner(defn)
+    runner.start(exe)
+    runner.inject(exe, Event(kind="Go"))
+    assert exe.active_path == "Failed" and exe.outcome == "failed"
+    assert exe.context["_error"] == {"type": "RuntimeError", "message": "boom"}
+    assert exe.context["trace"] == ["recovered"]
 
 
 def test_unhandled_action_error_reraises_in_the_base_driver():
@@ -112,3 +194,24 @@ def test_on_error_routes_under_the_durable_runner():
     final = store.load(exe.id)
     assert final.active_path == "Failed" and final.status is Status.DONE  # routed, not FAILED
     assert final.context["_error"]["type"] == "RuntimeError"
+
+
+def test_on_error_handler_failure_chains_the_original_exception():
+    """If the `on error` handler's own action also raises, `in_error` blocks a second
+    recovery attempt, but the original exception that triggered routing must not be
+    silently discarded — it's chained onto the retry's exception via `__cause__`."""
+    defn = definition_from_dsl(DOUBLE_FAILURE, "m")
+    with pytest.raises(RuntimeError) as excinfo:
+        _Runner(defn).start(Execution(definition_id=defn.id))
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    assert str(excinfo.value.__cause__) == "boom"
+
+
+def test_on_error_handler_failure_chain_reaches_the_durable_error_field():
+    store = DictStore()
+    defn = definition_from_dsl(DOUBLE_FAILURE, "m")
+    runner = DurableRunner(store, {defn.id: defn})
+    exe = runner.create(defn.id)
+    final = store.load(exe.id)
+    assert final.status is Status.FAILED
+    assert "while recovering from RuntimeError: boom" in (final.error or "")
