@@ -182,6 +182,15 @@ class _SyncDriver:
                             exc.__cause__ = original_exc
                             self._on_action_error(exe, exc)
                             return [], [], [], []
+                        if isinstance(effect, engine.RunAction) and effect.hook is engine.Hook.EXIT:
+                            # `on_exit` must always succeed (mirrors `AsyncDriver._drive`):
+                            # leaving a state applies real, un-undoable side effects, and
+                            # routing away from it would have to re-run this very hook to
+                            # reach anywhere outside the state's own subtree — re-triggering
+                            # the same failure. A raise here is always a bug: no `on error`
+                            # lookup, straight to the runner policy.
+                            self._on_action_error(exe, exc)
+                            return [], [], [], []
                         # if the model has an `on error` transition for the current config,
                         # route to it (exception in context._error + the error event data);
                         # else fall back to the runner's policy (fail the exe / re-raise).
