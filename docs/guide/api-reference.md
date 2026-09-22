@@ -50,6 +50,7 @@ DurableRunner(store, definitions, clock=time.time, resolver=None, trace=False)
     .fire_due_timers() -> int
     .cancel(execution_id, *, reason=None) -> Execution
     .terminate(execution_id) / .suspend(execution_id) / .resume(execution_id) -> Execution
+    .redrive(execution_id, target_path) -> Execution
 ```
 
 - `definitions` is a `{definition_id: Definition}` registry; inline `invoke` targets register
@@ -69,7 +70,7 @@ DistributedRunner(store, transport, definitions, clock=time.time, resolver=None,
     .create(definition_id, context=None, execution_id=None, priority=0) -> Execution
     .send(execution_id, event) -> None
     .worker(...) -> Worker        # .step() one message; .run(stop_event) loops
-    .cancel / .terminate / .suspend / .resume
+    .cancel / .terminate / .suspend / .resume / .redrive
 ```
 
 - `create` accepts an optional `execution_id` (use an externally-supplied id, e.g. a Stripe

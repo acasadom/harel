@@ -94,3 +94,9 @@ class DurableRunner:
     def resume(self, execution_id: str) -> Execution:
         """Resume a suspended `execution_id`, continuing where it stopped."""
         return facade.run(self._async.resume, execution_id)
+
+    def redrive(self, execution_id: str, target_path: str) -> Execution:
+        """Force a dead-lettered (FAILED) `execution_id` back to RUNNING at
+        `target_path` (a leaf state you choose). Use once the bug that failed it is
+        fixed; context is untouched. No-op if not FAILED."""
+        return facade.run(self._async.redrive, execution_id, target_path)
