@@ -164,6 +164,12 @@ state Checkout {
   runner's default policy applies — there is no second-level routing to avoid loops.
 - **Guards and selectors**: errors in guard functions or selector functions are not
   intercepted by `on error`.
+- **`on exit`**: an exception raised while *leaving* a state is never routed, regardless of
+  scope. Leaving a state runs real, un-undoable side effects (releasing a lock, cancelling
+  orthogonal regions, disarming a timer); recovering away from it would have to re-run that
+  very `on exit` to reach anywhere outside the state's own subtree, re-triggering the same
+  failure. So `on exit` is expected to always succeed — a raise there always falls straight
+  to the runner's default policy (fail the execution), the same as an unmatched `on error`.
 
 Model *expected* failures as action results routed by a [selector](05-selectors); use
 `on error` for genuine exceptions you want to recover from in the model.

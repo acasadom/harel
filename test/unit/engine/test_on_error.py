@@ -113,6 +113,53 @@ machine m {
 """
 
 
+# Regression: Outer's own `on_exit` raises; the `on error` handler is scoped to Leaf
+# (a child that already exited cleanly before Outer's `on_exit` ran). Without tracking
+# `exe.active_path` through the exit cascade, `has_error_handler` misattributes the
+# failure to Leaf's scope, and the recovery transition — reading that same stale path
+# — re-exits (and re-runs the side effect of) Leaf a second time.
+EXIT_MISATTRIBUTION = """
+event Go {}
+machine m {
+  initial Outer
+  state Outer {
+    initial Leaf
+    state Leaf { on exit stm_actions.rec(at: "exit_leaf") }
+    state Recovered { on enter stm_actions.rec(at: "enter_recovered") }
+    on exit stm_actions.boom
+    from Leaf to Elsewhere on Go
+    from Leaf to Recovered on error
+    from Recovered to Failed
+  }
+  final Elsewhere success {}
+  final Failed failed {}
+}
+"""
+
+# Regression: even a *structurally sound* recovery — a self-loop, `from M to M on
+# error`, which re-enters M via history without re-running its own `on_exit` — is
+# deliberately not attempted. `on_exit` failures never route, full stop: they're
+# always treated as a bug, regardless of whether some particular handler could have
+# recovered safely.
+EXIT_NEVER_ROUTES = """
+event Go {}
+machine m {
+  initial Grand
+  state Grand {
+    initial M
+    state M {
+      initial Leaf
+      state Leaf { on exit stm_actions.rec(at: "exit_leaf") }
+      on exit stm_actions.boom
+      from Leaf to Elsewhere on Go
+    }
+    from M to M on error
+  }
+  final Elsewhere success {}
+}
+"""
+
+
 def _run(dsl: str, name: str) -> Execution:
     defn = definition_from_dsl(dsl, name, validate=True)  # validate accepts `on error`
     exe = Execution(definition_id=defn.id)
@@ -215,3 +262,41 @@ def test_on_error_handler_failure_chain_reaches_the_durable_error_field():
     final = store.load(exe.id)
     assert final.status is Status.FAILED
     assert "while recovering from RuntimeError: boom" in (final.error or "")
+
+
+def test_on_error_does_not_misattribute_an_ancestors_exit_failure():
+    """Leaf already exited cleanly by the time Outer's own `on_exit` raises — a
+    handler scoped to Leaf must not fire (and, in particular, must not re-run
+    Leaf's `on_exit` a second time as a side effect of a bogus recovery attempt)."""
+    defn = definition_from_dsl(EXIT_MISATTRIBUTION, "m", validate=True)
+    exe = Execution(definition_id=defn.id)
+    runner = _Runner(defn)
+    runner.start(exe)
+    with pytest.raises(RuntimeError, match="boom"):
+        runner.inject(exe, Event(kind="Go"))
+    assert exe.context["trace"] == ["exit_leaf"]  # ran once, not twice
+
+
+def test_on_error_never_routes_an_exit_failure():
+    """Even a self-loop handler (`from M to M on error`) that would recover cleanly
+    without re-running M's own failing `on_exit` is not attempted: `on_exit` must
+    always succeed, so a raise there always falls straight to the runner policy."""
+    defn = definition_from_dsl(EXIT_NEVER_ROUTES, "m", validate=True)
+    exe = Execution(definition_id=defn.id)
+    runner = _Runner(defn)
+    runner.start(exe)
+    with pytest.raises(RuntimeError, match="boom"):
+        runner.inject(exe, Event(kind="Go"))
+    assert "_error" not in exe.context  # no routing was even attempted
+
+
+def test_on_error_never_routes_an_exit_failure_under_the_durable_runner():
+    store = DictStore()
+    defn = definition_from_dsl(EXIT_NEVER_ROUTES, "m", validate=True)
+    runner = DurableRunner(store, {defn.id: defn})
+    exe = runner.create(defn.id)
+    runner.process(exe.id, Event(kind="Go"))
+    final = store.load(exe.id)
+    assert final.status is Status.FAILED
+    assert "boom" in (final.error or "")
+    assert "_error" not in final.context

@@ -448,6 +448,12 @@ def _take(defn: Definition, exe: Execution, target: Node, event: Optional[Event]
     source = defn.index[exe.active_path]
     pivot = lca(source, target)
     for node in reversed(chain(pivot, source)[1:]):  # exited levels, innermost-first
+        # position on `node` before running its own exit (mirrors the entry loop below):
+        # otherwise `exe.active_path` stays on the leaf we started from for the whole
+        # cascade, so a raise here can make `has_error_handler` match a handler scoped
+        # to a level that already exited cleanly — and the recovery transition, reading
+        # that same stale path, re-exits (and re-runs the side effects of) that level.
+        exe.active_path = node.full_path
         yield from _run(node, Hook.EXIT, event)
         if node.parent is not None:
             exe.history[node.parent.full_path] = node.full_path
