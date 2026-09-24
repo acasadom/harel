@@ -195,10 +195,22 @@ class DistributedRunner:
         context: Optional[dict] = None,
         execution_id: Optional[str] = None,
         priority: int = 0,
+        start_on_create: bool = True,
     ) -> Execution:
+        """Create an Execution — never runs its actions on this caller (see
+        `AsyncDistributedRunner.create`). By default (`start_on_create=True`) this
+        also publishes `Start`, so a worker picks it up right away; pass `False`
+        to defer that and call `start(execution_id)` yourself later."""
         from harel.engine.aio import facade
 
-        return facade.run(self._async.create, definition_id, context, execution_id, priority)
+        return facade.run(self._async.create, definition_id, context, execution_id, priority, start_on_create)
+
+    def start(self, execution_id: str) -> None:
+        """Publish a `Start` for `execution_id` — a worker runs it, not this caller.
+        No-op (logged) if it's already been started."""
+        from harel.engine.aio import facade
+
+        facade.run(self._async.start, execution_id)
 
     def send(self, execution_id: str, event: Event) -> None:
         from harel.engine.aio import facade

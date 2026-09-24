@@ -6,6 +6,8 @@ Drives the full AsyncDistributedRunner + AsyncWorker loop (claim→route→ack) 
 fully async (single worker draining deterministically via `step()`).
 """
 
+import logging
+
 from harel.dsl import definition_from_dsl
 from harel.engine.aio.distributed import AsyncDistributedRunner
 from harel.engine.aio_store import AsyncDictStore
@@ -63,8 +65,7 @@ async def test_async_pipeline_flat():
     store = AsyncDictStore()
     runner = AsyncDistributedRunner(store, AsyncInMemoryTransport(), {defn.id: defn})
 
-    exe = await runner.create(defn.id)
-    assert exe.active_path == "B"
+    exe = await runner.create(defn.id)  # start_on_create=True (default)
     await runner.send(exe.id, Event(kind="Go"))
     await _drain(runner)
 
@@ -79,7 +80,9 @@ async def test_async_pipeline_orthogonal():
     store = AsyncDictStore()
     runner = AsyncDistributedRunner(store, AsyncInMemoryTransport(), {defn.id: defn})
 
-    exe = await runner.create(defn.id)
+    exe = await runner.create(defn.id)  # start_on_create=True (default)
+    await _drain(runner)  # fork happens on start: parent parks at Fork, two regions spawned
+    exe = await store.load(exe.id)
     assert exe.active_path == "Fork"
     child_ids = list(exe.children)
     await runner.send(exe.id, Event(kind="Go"))
@@ -90,3 +93,50 @@ async def test_async_pipeline_orthogonal():
     assert final.status is Status.DONE
     regions = [await store.load(cid) for cid in child_ids]
     assert sorted(r.context["trace"] for r in regions) == [["A1", "A2"], ["B1", "B2"]]
+
+
+class _FlakyOncePublish(AsyncInMemoryTransport):
+    """Fails the very next `publish()` once, then behaves normally — simulates a
+    transient transport outage between create()'s commit and its delivery attempt."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.armed = True
+
+    async def publish(self, *args, **kwargs):
+        if self.armed:
+            self.armed = False
+            raise RuntimeError("transient transport outage")
+        return await super().publish(*args, **kwargs)
+
+
+async def test_create_survives_a_transient_publish_failure(caplog):
+    """create() commits the Start into the durable outbox atomically with the
+    Execution's own first save, so a failed immediate delivery only delays it
+    (recoverable by any later flush, anywhere in the fleet) rather than losing it
+    — and create() must still return the Execution to the caller either way, with
+    its id, regardless of whether the immediate delivery attempt succeeded."""
+    defn = definition_from_dsl(FLAT, "M")
+    store = AsyncDictStore()
+    transport = _FlakyOncePublish()
+    runner = AsyncDistributedRunner(store, transport, {defn.id: defn})
+
+    with caplog.at_level(logging.WARNING):
+        exe = await runner.create(defn.id)  # the flaky publish() raises internally...
+    assert exe.id  # ...but create() still returns the Execution, id included
+    assert exe.status is Status.PENDING
+    assert "could not immediately publish the Start" in caplog.text
+
+    # nothing claimable yet — the one and only publish attempt failed
+    assert await runner.worker().step() is False
+
+    # the Start is durably queued: a later flush (here, triggered by an unrelated
+    # create() now that the transport works again) recovers it
+    other = await runner.create(defn.id)
+    assert other.id != exe.id
+
+    await _drain(runner)
+    final = await store.load(exe.id)
+    assert final.status is Status.RUNNING  # started, and parked at B awaiting Go
+    assert final.active_path == "B"
+    assert final.context["trace"] == ["A.enter", "B.enter"]

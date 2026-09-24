@@ -61,7 +61,10 @@ def test_spawned_regions_inherit_parent_priority():  # #6
     store, transport = DictStore(), InMemoryTransport()
     defn = definition_from_dsl(ORTHO, "M")
     runner = DistributedRunner(store, transport, {defn.id: defn})
-    exe = runner.create(defn.id, priority=PRIORITY)
+    exe = runner.create(defn.id, priority=PRIORITY)  # start_on_create=True (default)
+    worker = runner.worker()
+    while worker.step():
+        pass
 
     parent = store.load(exe.id)
     assert parent.children  # the regions were spawned
@@ -74,11 +77,13 @@ def test_region_finished_published_at_parent_priority():  # #5
     store, transport = DictStore(), InMemoryTransport(clock=lambda: clock[0])
     defn = definition_from_dsl(ORTHO_TIMED, "M")
     runner = DistributedRunner(store, transport, {defn.id: defn}, clock=lambda: clock[0])
-    exe = runner.create(defn.id, priority=PRIORITY)
+    exe = runner.create(defn.id, priority=PRIORITY)  # start_on_create=True (default)
+    worker = runner.worker(clock=lambda: clock[0])
+    while worker.step():  # processes Start: forks the regions, timers armed
+        pass
     assert exe.id not in transport._groups  # parent's own group has no publish yet
 
     clock[0] = 200.0  # past the regions' timeouts
-    worker = runner.worker(clock=lambda: clock[0])
     worker.fire_due_timers()  # Timeout -> each region's group (not the parent's)
 
     # step until the parent's group first appears: it is first published by a region's
@@ -98,10 +103,13 @@ def test_due_timer_published_at_execution_priority():  # #4
     store, transport = DictStore(), InMemoryTransport(clock=lambda: clock[0])
     defn = definition_from_dsl(TIMED, "T")
     runner = DistributedRunner(store, transport, {defn.id: defn}, clock=lambda: clock[0])
-    exe = runner.create(defn.id, priority=PRIORITY)
+    exe = runner.create(defn.id, priority=PRIORITY)  # start_on_create=True (default)
+    worker = runner.worker(clock=lambda: clock[0])
+    while worker.step():  # processes Start: timer armed
+        pass
 
     assert exe.id not in transport._groups  # nothing published to its own group yet
     clock[0] = 200.0  # past the timeout
-    assert runner.worker(clock=lambda: clock[0]).fire_due_timers() == 1
+    assert worker.fire_due_timers() == 1
     # the Timeout is the first publish to the group -> it sets the group priority
     assert transport._groups[exe.id]["priority"] == PRIORITY  # was 0 before the fix

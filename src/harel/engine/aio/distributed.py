@@ -14,6 +14,7 @@ Reuses the pure dict helpers from the sync module (`_defn_for`/`_register_submac
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 import time
 from typing import Any, Callable, Optional
@@ -29,6 +30,8 @@ from harel.engine.runtime import _CONTROL
 from harel.engine.store import StoreConflict
 from harel.engine.transport import Lease
 from harel.spec.states import Event
+
+logger = logging.getLogger(__name__)
 
 
 class AsyncTransportDriver(_AsyncRuntimeDriver):
@@ -55,10 +58,6 @@ class AsyncTransportDriver(_AsyncRuntimeDriver):
         exe = await self.store.load(execution_id)
         priority = exe.priority if exe is not None else 0
         await self.transport.publish(execution_id, event, priority=priority)
-
-    async def start(self, exe: Execution) -> None:
-        await self._run(exe, engine.core.start(self.defn, exe))
-        await self._flush(primary_priority={exe.id: exe.priority})
 
     async def _flush(self, primary_priority: Optional[dict[str, int]] = None) -> None:
         while True:
@@ -169,6 +168,18 @@ class AsyncWorker:
             return True
         if exe.status is Status.SUSPENDED:
             await self.transport.nack(lease, delay=self.suspend_recheck)
+            return True
+        if exe.status is Status.PENDING and lease.event.kind != "Start":
+            # not started yet. Only a RUNNING execution processes domain events —
+            # this is discarded, not parked: parking would hold this message's
+            # group "in flight" (the single-active-consumer lock), blocking the
+            # Start itself from ever being claimed behind it — a self-deadlock,
+            # not a fix. `create()` defaults to `start_on_create=True`, publishing
+            # Start immediately, so this is normally unreachable; it only fires for
+            # a caller that opted into `start_on_create=False` and got a domain
+            # event delivered before its own explicit `start()` call — a risk that
+            # choice already accepts (see `AsyncDistributedRunner.create`).
+            await self.transport.ack(lease)
             return True
         if exe.status is Status.CANCELLING and lease.event.kind != "Cancel":
             await self.transport.ack(lease)
@@ -292,21 +303,97 @@ class AsyncDistributedRunner:
         context: Optional[dict] = None,
         execution_id: Optional[str] = None,
         priority: int = 0,
+        start_on_create: bool = True,
     ) -> Execution:
+        """Create an Execution — never runs its actions on this caller. Creating is
+        not starting: unlike `AsyncDurableRunner.create` (a synchronous, single-
+        process host, where running the initial `on enter` inline is simply what
+        it's for), running a machine's actions inline here would defeat the entire
+        point of `DistributedRunner` — the work wouldn't be distributed to a worker
+        at all, it'd run on whoever called `create`. Either way its actions run on
+        whichever worker claims the published `Start`, never on this caller.
+
+        `start_on_create` (default `True`) publishes that `Start` immediately, in
+        this same call, so the returned Execution is `PENDING` only as a transient
+        detail — a worker picks it up right away. This also closes a genuine race:
+        with the record persisted but no `Start` published yet, a domain event
+        addressed to it can't be queued or deferred (only a `RUNNING` execution
+        processes domain events — see `AsyncWorker._handle`'s `PENDING` branch) and
+        a naive "park it and retry" would deadlock (parking holds the execution's
+        single-active-consumer group lock, blocking the `Start` behind it from ever
+        being claimed). Passing `start_on_create=False` reopens that window
+        deliberately — use it only if you have a reason to delay starting past
+        `create()`, and be aware that anything you send in the meantime is
+        discarded on arrival, not queued: call `start(execution_id)` yourself when
+        ready."""
         if execution_id is not None and await self.store.load(execution_id) is not None:
             from harel.engine.store import ExecutionAlreadyExists
 
             raise ExecutionAlreadyExists(execution_id)
+        if definition_id not in self.definitions:
+            # fail now, synchronously, in the caller's own stack: a bad id must not
+            # silently persist a PENDING record that later dies (or loops) on
+            # whichever worker eventually claims its Start. Checked after the
+            # execution_id collision so a caller retrying with a bad definition_id
+            # still learns about an id collision first, not masked by this check.
+            raise KeyError(f"unknown definition_id {definition_id!r}")
         exe = Execution(
             definition_id=definition_id,
             context=dict(context or {}),
             priority=priority,
             **({"id": execution_id} if execution_id is not None else {}),
         )
-        await self._transport_driver(self.definitions[definition_id]).start(exe)
-        loaded = await self.store.load(exe.id)
-        assert loaded is not None
-        return loaded
+        if start_on_create:
+            # commit (not save): the Start rides the SAME atomic write as the
+            # Execution's first persistence, in the durable outbox — exactly how
+            # every other emit in this engine reaches the transport (see `route`'s
+            # `_run`+`_flush` pairing, or `control.cancel`'s injected Cancel). A raw
+            # save()-then-publish() would leave a window where the record exists
+            # but nothing durable records that it needs a Start: a transient
+            # transport failure between the two would silently orphan a PENDING
+            # execution forever, with no id ever returned to the caller and no
+            # outbox entry for any later flush to retry.
+            await self.store.commit(exe, [(exe.id, Event(kind="Start"))])
+            driver = self._transport_driver(self.definitions[definition_id])
+            try:
+                # best-effort immediate delivery — most callers get it published in
+                # this same call. If it fails here, the Start stays durably queued
+                # (already committed above) for the next flush anywhere in the
+                # fleet to pick up (see `route`'s comment on orphan draining); it
+                # must not turn into an exception that costs the caller the very id
+                # they'd need to retry via `start(execution_id)`.
+                await driver._flush(primary_priority={exe.id: exe.priority})
+            except Exception:
+                logger.warning(
+                    "create() could not immediately publish the Start for execution "
+                    "%s; it is durably queued and will be delivered by a later flush",
+                    exe.id,
+                    exc_info=True,
+                )
+        else:
+            await self.store.save(exe)
+        return exe
+
+    async def start(self, execution_id: str) -> None:
+        """Publish a `Start` for `execution_id` through the transport — a worker
+        claims it and runs the actual start sequence (its actions run there, not on
+        this caller). No-op if it's already been started: the engine only ever acts
+        on `Start` while `status` is still `PENDING` (see `core.process`), so a
+        redelivered or duplicate `Start` can never re-run/reset a live or finished
+        Execution — this just warns eagerly, before publishing, for the common case
+        of a caller starting the same execution twice; the engine's own check is
+        what actually holds under a race (two `start()` calls, or a redelivery)."""
+        exe = await self.store.load(execution_id)
+        if exe is None:
+            raise KeyError(execution_id)
+        if exe.status is not Status.PENDING:
+            logger.warning(
+                "start() called on execution %s which is already %s; ignoring",
+                execution_id,
+                exe.status.value,
+            )
+            return
+        await self.transport.publish(execution_id, Event(kind="Start"), priority=exe.priority)
 
     async def send(self, execution_id: str, event: Event) -> None:
         exe = await self.store.load(execution_id)

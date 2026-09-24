@@ -655,7 +655,15 @@ def process(defn: Definition, exe: Execution, event: Event) -> Step:
         exe.processed_events += 1
         return
     if event.kind == "Start":
-        if exe.status is not Status.CANCELLED:
+        # only a fresh (never-started) Execution may be started: PENDING is the sole
+        # pre-start status (the `Execution` default). Anything else — RUNNING, DONE,
+        # FAILED, SUSPENDED, CANCELLING, even CANCELLED — is a no-op: a redelivered or
+        # duplicate Start must never re-run/reset an Execution that's already live or
+        # finished (it silently did before, resetting a DONE execution back to its
+        # initial state and re-running its enter hooks — see
+        # `AsyncDistributedRunner.start`, which additionally logs when this happens
+        # for a caller-visible signal).
+        if exe.status is Status.PENDING:
             # a Start may carry initial parameters (the caller's opaque payload):
             # seed the context before the machine runs.
             if event.data:

@@ -6,7 +6,9 @@
 
 Three endpoints:
 
-  POST /orders           — start a new payment flow; returns {id, state, status, log}
+  POST /orders           — start a new payment flow; returns {id, state, status, log}.
+                            `state` is null right after this call (PENDING — a worker
+                            hasn't entered AwaitingPayment yet); poll GET to see it settle.
   POST /webhooks/stripe  — enqueue the webhook event; returns 204 immediately
   GET  /orders/{id}      — poll current state (eventually consistent after a webhook)
 
@@ -63,7 +65,7 @@ app = FastAPI(title="harel · webhook payment demo")
 
 class OrderOut(BaseModel):
     id: str
-    state: str
+    state: str | None  # None while PENDING — start() only publishes, a worker sets it
     status: str
     log: list[str]
 
@@ -81,10 +83,14 @@ def _out(exe) -> OrderOut:
 def create_order():
     """Start a new payment flow.
 
-    create() runs the initial start() inline and returns the execution already in
-    AwaitingPayment — no worker round-trip needed to get the first state.
-    Store the returned id in your Stripe PaymentIntent metadata so the webhook
-    handler can route events back to this Execution.
+    create() persists the record AND publishes its Start through the transport
+    (start_on_create=True, the default) — a worker claims it and actually enters
+    AwaitingPayment; this request handler never runs any of the machine's actions
+    itself. The response still reflects PENDING for a few ms (the same eventual
+    consistency already noted below for the webhook path), since publishing
+    doesn't retroactively update the Execution object this call already has in
+    hand. Store the returned id in your Stripe PaymentIntent metadata so the
+    webhook handler can route events back to this Execution.
     """
     exe = runner.create(defn.id)
     return _out(exe)

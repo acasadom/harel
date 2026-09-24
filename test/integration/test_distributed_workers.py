@@ -128,7 +128,7 @@ def test_many_flat_machines_advance_concurrently(tmp_path):
     transport = SqliteTransport(db_queue)
     runner = DistributedRunner(store, transport, defs)
 
-    ids = [runner.create(defn.id).id for _ in range(25)]
+    ids = [runner.create(defn.id).id for _ in range(25)]  # start_on_create=True (default)
     for eid in ids:
         runner.send(eid, Event(kind="Go"))
 
@@ -157,7 +157,11 @@ def test_orthogonal_machines_fan_out_and_join_across_workers(tmp_path):
     transport = SqliteTransport(db_queue)
     runner = DistributedRunner(store, transport, defs)
 
-    parents = [runner.create(defn.id) for _ in range(6)]
+    parents = [runner.create(defn.id) for _ in range(6)]  # start_on_create=True (default)
+    setup_worker = runner.worker()
+    while setup_worker.step():  # processes each Start synchronously: forks the regions
+        pass
+    parents = [store.load(p.id) for p in parents]
     for p in parents:
         assert p.active_path == "Fork" and len(p.children) == 2
         runner.send(p.id, Event(kind="Go"))
@@ -192,7 +196,10 @@ def test_cooperative_cancel_discards_backlog_and_cleans_up_across_workers(tmp_pa
     transport = SqliteTransport(db_queue)
     runner = DistributedRunner(store, transport, defs)
 
-    ids = [runner.create(defn.id).id for _ in range(6)]
+    ids = [runner.create(defn.id).id for _ in range(6)]  # start_on_create=True (default)
+    setup_worker = runner.worker()
+    while setup_worker.step():  # processes each Start synchronously: parked at Working
+        pass
     for eid in ids:
         runner.send(eid, Event(kind="Finish"))  # backlog that would drive Working -> Done
         runner.cancel(eid)  # cooperative: drains the Finish, runs the Cancel cleanup
@@ -231,7 +238,10 @@ def test_timeout_fires_via_the_worker_sweep(tmp_path):
     transport = SqliteTransport(db_queue)
     runner = DistributedRunner(store, transport, defs)
 
-    eid = runner.create(defn.id).id  # parked at Trying with a 1s timer; no Success sent
+    eid = runner.create(defn.id).id  # start_on_create=True (default)
+    setup_worker = runner.worker()
+    while setup_worker.step():  # parked at Trying with a 1s timer; no Success sent
+        pass
 
     stop, threads = _run_workers(3, db_store, db_queue, defs)
     try:
@@ -256,7 +266,10 @@ def test_suspend_then_resume_across_workers(tmp_path):
     transport = SqliteTransport(db_queue)
     runner = DistributedRunner(store, transport, defs)
 
-    eid = runner.create(defn.id).id  # parked at B
+    eid = runner.create(defn.id).id  # start_on_create=True (default)
+    setup_worker = runner.worker()
+    while setup_worker.step():  # parked at B
+        pass
     runner.suspend(eid)
     runner.send(eid, Event(kind="Go"))  # parked while suspended, not processed
 

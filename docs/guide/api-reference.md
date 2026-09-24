@@ -67,7 +67,9 @@ from harel.engine.distributed import DistributedRunner
 from harel.engine.transport import InMemoryTransport   # + Sqlite/Libsql/Redis/Postgres/Rqlite/Mongo/Sqs
 
 DistributedRunner(store, transport, definitions, clock=time.time, resolver=None, trace=False)
-    .create(definition_id, context=None, execution_id=None, priority=0) -> Execution
+    .create(definition_id, context=None, execution_id=None, priority=0, start_on_create=True) -> Execution
+    .start(execution_id) -> None  # publishes Start; a worker runs it, not the caller.
+                                   # create()'s start_on_create=True already does this
     .send(execution_id, event) -> None
     .worker(...) -> Worker        # .step() one message; .run(stop_event) loops
     .cancel / .terminate / .suspend / .resume / .redrive

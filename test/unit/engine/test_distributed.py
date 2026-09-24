@@ -73,8 +73,11 @@ def test_flat_advances_through_the_transport(backend):
     defn = definition_from_dsl(FLAT, "M")
     runner = DistributedRunner(store, transport, {defn.id: defn})
 
-    exe = runner.create(defn.id)  # A -> B inline, parked at B
-    assert exe.active_path == "B"
+    exe = runner.create(defn.id)  # start_on_create=True (default): Start already published
+    assert exe.active_path is None  # still PENDING — nothing has claimed it yet
+
+    _drain(runner.worker())  # A -> B inline (auto), parked at B
+    assert store.load(exe.id).active_path == "B"
 
     runner.send(exe.id, Event(kind="Go"))
     _drain(runner.worker())
@@ -90,7 +93,10 @@ def test_orthogonal_fans_out_and_joins_through_the_transport(backend):
     defn = definition_from_dsl(ORTHO, "M")
     runner = DistributedRunner(store, transport, {defn.id: defn})
 
-    exe = runner.create(defn.id)  # fork: two regions parked, parent at Fork
+    exe = runner.create(defn.id)  # start_on_create=True (default)
+    _drain(runner.worker())  # fork: two regions parked, parent at Fork
+
+    exe = store.load(exe.id)
     assert exe.active_path == "Fork"
     child_ids = list(exe.children)
     assert len(child_ids) == 2
@@ -114,7 +120,7 @@ def test_duplicate_send_is_processed_once(backend):
     store, transport = backend
     defn = definition_from_dsl(FLAT, "M")
     runner = DistributedRunner(store, transport, {defn.id: defn})
-    exe = runner.create(defn.id)
+    exe = runner.create(defn.id)  # start_on_create=True (default)
 
     go = Event(kind="Go")  # same id both times
     runner.send(exe.id, go)
@@ -134,7 +140,7 @@ def test_send_publishes_with_execution_priority():
     defn = definition_from_dsl(FLAT, "M")
     runner = DistributedRunner(store, transport, {defn.id: defn})
 
-    exe = runner.create(defn.id, priority=3)
+    exe = runner.create(defn.id, priority=3, start_on_create=False)  # isolate send(), no Start
     runner.send(exe.id, Event(kind="Go"))
 
     # the event must be visible at min_priority=3; if send() published at 0 this returns None
@@ -151,13 +157,17 @@ def test_worker_high_ratio_drains_high_priority_first():
     defn = definition_from_dsl(FLAT, "M")
     runner = DistributedRunner(store, transport, {defn.id: defn})
 
-    # create 3 low-priority executions and send Go to each
+    # create 3 low-priority executions and 1 high-priority one (start_on_create=True,
+    # the default, publishes each Start already), all parked at B
     low_ids = [runner.create(defn.id, priority=0).id for _ in range(3)]
+    high_id = runner.create(defn.id, priority=2).id
+    setup_worker = runner.worker()
+    _drain(setup_worker)
+    for eid in [*low_ids, high_id]:
+        assert store.load(eid).active_path == "B"
+
     for eid in low_ids:
         runner.send(eid, Event(kind="Go"))
-
-    # create one high-priority execution and send Go
-    high_id = runner.create(defn.id, priority=2).id
     runner.send(high_id, Event(kind="Go"))
 
     worker = runner.worker(high_ratio=1.0, priority_threshold=2)

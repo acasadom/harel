@@ -33,10 +33,13 @@ all-rqlite, all-Mongo, all-libSQL: no Redis needed).
 
 ## Running with workers
 
-`DistributedRunner(store, transport, definitions)` is the façade: `create` an execution, `send`
-it events (published to the transport), and run one or more `worker`s that claim → load → dedupe
-→ route → ack. A worker's `step()` processes exactly one available message and returns whether it
-did — which lets us drive it deterministically here, without thread timing:
+`DistributedRunner(store, transport, definitions)` is the façade: `create` an execution — it
+never runs anything on this process; by default it also publishes a `Start` through the transport,
+so a worker runs the initial `on enter` (pass `start_on_create=False` to defer that and call
+`start` yourself later) — `send` further events (also published), and run one or more `worker`s
+that claim → load → dedupe → route → ack. A worker's `step()` processes exactly one available
+message and returns whether it did — which lets us drive it deterministically here, without
+thread timing:
 
 ```python
 from harel import definition_from_dsl, DictStore, Event
@@ -67,8 +70,9 @@ def drain():
         pass
 
 
-exe = runner.create(defn.id)
-drain()
+exe = runner.create(defn.id)  # PENDING — never runs on this process; Start is already
+drain()                       # published (start_on_create=True, the default) — a worker
+                               # (here, our own drain) runs it
 
 runner.send(exe.id, Event(kind="PlaceOrder"))
 drain()
