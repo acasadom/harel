@@ -249,3 +249,10 @@ class DistributedRunner:
         from harel.engine.aio import facade
 
         facade.run(self._async.resume, execution_id)
+
+    def redrive(self, execution_id: str, target_path: str) -> None:
+        """Force a dead-lettered (FAILED) `execution_id` back to RUNNING at
+        `target_path` (a leaf state you choose). No-op if not FAILED."""
+        from harel.engine.aio import facade
+
+        facade.run(self._async.redrive, execution_id, target_path)

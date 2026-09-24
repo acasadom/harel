@@ -358,3 +358,9 @@ class AsyncDistributedRunner:
 
     async def resume(self, execution_id: str) -> None:
         await control.resume(self.store, execution_id)
+
+    async def redrive(self, execution_id: str, target_path: str) -> None:
+        """Force a FAILED `execution_id` back to RUNNING at `target_path` (a leaf
+        the caller picks — see `control.redrive`)."""
+        driver, _exe = await self._driver_for(execution_id)
+        await control.redrive(self.store, driver.defn, execution_id, target_path)

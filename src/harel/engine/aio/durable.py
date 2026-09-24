@@ -132,3 +132,16 @@ class AsyncDurableRunner:
         loaded = await self.store.load(execution_id)
         assert loaded is not None
         return loaded
+
+    async def redrive(self, execution_id: str, target_path: str) -> Execution:
+        """Force a FAILED `execution_id` back to RUNNING at `target_path` (a leaf
+        the caller picks — see `control.redrive`). Use once the bug that dead-
+        lettered it is fixed; context is untouched."""
+        exe = await self.store.load(execution_id)
+        if exe is None:
+            raise KeyError(execution_id)
+        driver = self._driver(exe.definition_id)
+        await control.redrive(self.store, driver.defn, execution_id, target_path)
+        loaded = await self.store.load(execution_id)
+        assert loaded is not None
+        return loaded

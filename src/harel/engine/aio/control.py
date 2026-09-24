@@ -8,10 +8,10 @@ propagated to orthogonal regions, with optimistic-concurrency retry), awaited ag
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from harel import engine
-from harel.definition.model import Definition
+from harel.definition.model import Definition, NodeKind, is_descendant
 from harel.engine.execution import Execution, Status
 from harel.engine.store import StoreConflict
 from harel.spec.states import Event
@@ -30,6 +30,11 @@ async def _commit_status(
     execution_id: str,
     new_status: Status,
     *,
+    require_status: Optional[Status] = None,
+    validate: Optional[Callable[[Execution], None]] = None,
+    active_path: Optional[str] = None,
+    clear_error: bool = False,
+    clear_history: bool = False,
     emit_cancel: bool = False,
     cancel_data: Optional[dict] = None,
 ) -> None:
@@ -37,9 +42,19 @@ async def _commit_status(
         exe = await store.load(execution_id)
         if exe is None:
             raise KeyError(execution_id)
+        if require_status is not None and exe.status is not require_status:
+            return  # precondition no longer holds — someone else already moved it
         if exe.status in _TERMINAL and new_status is not Status.CANCELLED:
             return
+        if validate is not None:
+            validate(exe)  # raises to abort — not caught, doesn't count as a retry
         exe.status = new_status
+        if active_path is not None:
+            exe.active_path = active_path
+        if clear_error:
+            exe.error = None
+        if clear_history:
+            exe.history.clear()
         emits: list[tuple[Optional[str], Event]] = (
             [(exe.id, Event(kind="Cancel", data=dict(cancel_data or {})))] if emit_cancel else []
         )
@@ -102,3 +117,50 @@ async def resume(store: Any, execution_id: str) -> None:
         return
     await _commit_status(store, execution_id, Status.RUNNING)
     await _propagate(store, execution_id, Status.RUNNING)
+
+
+def _validate_redrive_target(defn: Definition, exe: Execution, target_path: str) -> None:
+    """Pure mirror of `harel.engine.control._validate_redrive_target` — see its
+    docstring. Re-run against the freshly loaded `exe` on every CAS attempt."""
+    node = defn.index.get(target_path)
+    if node is None or node.is_composite:
+        raise ValueError(f"redrive target must be a leaf state, got {target_path!r}")
+    root = defn.index[exe.root_path]
+    if not is_descendant(node, root):
+        raise ValueError(
+            f"redrive target {target_path!r} is outside this execution's own branch "
+            f"(rooted at {exe.root_path!r})"
+        )
+    cur = node.parent
+    while cur is not None:
+        if cur.kind is NodeKind.ORTHOGONAL:
+            raise ValueError(
+                f"redrive target {target_path!r} is inside orthogonal state "
+                f"{cur.full_path!r} — a single leaf can't represent a fork's parallel "
+                f"regions; target a leaf before it instead, and let the model's own "
+                f"transition re-fork it normally"
+            )
+        if cur is root:
+            break
+        cur = cur.parent
+    if any(not cs.finished for cs in exe.children.values()):
+        raise ValueError("redrive refused: execution has unfinished children (cancel/terminate them first)")
+
+
+async def redrive(store: Any, defn: Definition, execution_id: str, target_path: str) -> None:
+    """Async mirror of `harel.engine.control.redrive` — see its docstring."""
+    exe = await store.load(execution_id)
+    if exe is None:
+        raise KeyError(execution_id)
+    if exe.status is not Status.FAILED:
+        return
+    _validate_redrive_target(defn, exe, target_path)  # fail fast before any CAS work
+    await _commit_status(
+        store,
+        execution_id,
+        Status.RUNNING,
+        require_status=Status.FAILED,
+        validate=lambda fresh: _validate_redrive_target(defn, fresh, target_path),
+        active_path=target_path,
+        clear_error=True,
+    )

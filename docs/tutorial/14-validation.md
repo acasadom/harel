@@ -109,6 +109,6 @@ The rest of the documentation is the **operations** side — how these machines 
 - [Visualization & tooling](../guide/visualization) — diagrams, the language server, the live preview.
 - [Durability](../guide/durability) — persisting executions across crashes; the store backends.
 - [Distribution](../guide/distribution) — running machines across many workers.
-- [Control plane](../guide/control-plane) — cancel, suspend, resume, terminate.
+- [Control plane](../guide/control-plane) — cancel, suspend, resume, terminate, redrive.
 
 …plus a [DSL reference](../guide/dsl-reference) and the [public API](../guide/api-reference).
