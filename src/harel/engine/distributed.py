@@ -205,14 +205,20 @@ class DistributedRunner:
 
         return facade.run(self._async.create, definition_id, context, execution_id, priority, start_on_create)
 
-    def start(self, execution_id: str) -> None:
+    def start(self, execution_id: str, data: Optional[dict] = None) -> None:
         """Publish a `Start` for `execution_id` — a worker runs it, not this caller.
-        No-op (logged) if it's already been started."""
+        No-op (logged) if it's already been started. `data`, when given, seeds the
+        context before the machine runs (start-with-parameters) — the only
+        sanctioned way to attach a payload to `Start`; `send()` refuses the kind
+        outright."""
         from harel.engine.aio import facade
 
-        facade.run(self._async.start, execution_id)
+        facade.run(self._async.start, execution_id, data)
 
     def send(self, execution_id: str, event: Event) -> None:
+        """Publish a domain event — a worker processes it, not this caller. Refuses
+        a caller-supplied `Start` event (raises `ValueError`): use `create()` or
+        `start(execution_id, data=...)` instead."""
         from harel.engine.aio import facade
 
         facade.run(self._async.send, execution_id, event)
