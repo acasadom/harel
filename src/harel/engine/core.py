@@ -245,17 +245,6 @@ def _any_pred(t) -> bool:
     return True
 
 
-def _kind_pred(kind: str):
-    """A transition predicate matching any event_filter whose `kind` alternation
-    includes `kind`, ignoring data predicates (a structural check on the model)."""
-
-    def pred(t) -> bool:
-        ef = t.event_filter
-        return ef is not None and kind in [k.strip() for k in ef.kind.split("|")]
-
-    return pred
-
-
 def timeout_event(execution_id: str, path: str, fire_at: float) -> Event:
     """The `Timeout` event a due timer delivers. Its id is **stable** (derived from
     the timer key + fire time) so a timer swept by two workers dedupes to one
@@ -288,13 +277,18 @@ def has_error_handler(defn: Definition, exe: Execution, event: Event) -> bool:
     return _resolve(defn, exe, _event_pred(event), allow_parent=True) is not None
 
 
-def has_cancel_handler(defn: Definition, exe: Execution) -> bool:
-    """Whether the active configuration has its own `Cancel` transition (in scope,
-    with parent fallback). The control plane uses this to choose cooperative
-    cancel (let the machine clean up) over forceful terminate."""
+def has_cancel_handler(defn: Definition, exe: Execution, event: Event) -> bool:
+    """Whether the active configuration has its own `Cancel` transition for `event`
+    (in scope, with parent fallback, honouring its guard — mirrors `has_error_handler`).
+    The control plane uses this to choose cooperative cancel (let the machine clean
+    up) over forceful terminate; `event` carries the caller's `reason` payload, which
+    a guard (`on Cancel where reason == ...`) may match on. Guard-aware so this
+    predicts `process`'s own resolution exactly: a guard that fails here would also
+    fail when the injected `Cancel` is actually processed, so there is no daylight
+    between "decided cooperative" and "found a transition to take"."""
     if exe.active_path is None:
         return False
-    return _resolve(defn, exe, _kind_pred("Cancel"), allow_parent=True) is not None
+    return _resolve(defn, exe, _event_pred(event), allow_parent=True) is not None
 
 
 # --- LCA-based enter/exit (UML semantics: own hook per entered/exited level) ---
@@ -642,6 +636,13 @@ def process(defn: Definition, exe: Execution, event: Event) -> Step:
         # normal event; otherwise fall back to the forceful terminate (no hooks).
         # CANCELLING is the cooperative-cancel-in-flight status set by the control
         # plane: the injected Cancel resumes the machine (RUNNING) to run cleanup.
+        if exe.status in (Status.DONE, Status.CANCELLED):
+            # already finished — via this same cooperative cleanup, an unrelated
+            # path, or a second overlapping cancel() that queued its own distinct
+            # Cancel event before the first one's cleanup committed. A stale
+            # Cancel arriving after the fact must never re-force CANCELLED onto
+            # an execution that already reached its own, real terminal.
+            return
         active = exe.status in (Status.RUNNING, Status.CANCELLING) and exe.active_path is not None
         found = _resolve(defn, exe, _event_pred(event), allow_parent=True) if active else None
         if found is None:

@@ -178,8 +178,10 @@ leaves. Two declarations on the orthogonal node itself let it end before that:
   ```
 
 A cancelled region receives a `Cancel` event, so a region that models its own `on Cancel` cleanup
-gets to run it before it stops. Without either declaration the block waits for all regions — the
-plain join.
+gets to run it before it stops — same rule as anywhere else: the transition must resolve directly
+to a terminal (see [control plane](../guide/control-plane)), so the region finishes in that same
+step rather than lingering half-cancelled. Without either declaration the block waits for all
+regions — the plain join.
 
 What each region *produced* — and how the join can route on it (all succeeded? any failed?) —
 is the subject of [payloads](13-payloads). First, let's tackle reuse: the retry pattern from

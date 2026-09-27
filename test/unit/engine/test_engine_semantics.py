@@ -175,6 +175,15 @@ machine M {
 }
 """
 
+CANCEL_GUARDED = """
+machine M {
+  initial Working
+  state Working { on enter stm_actions.we }
+  state Cleanup { on enter stm_actions.ae }
+  from Working to Cleanup on Cancel where reason == "user_request"
+}
+"""
+
 
 def test_cancel_with_a_transition_runs_the_modelled_cleanup():
     # a state that models on:Cancel takes that transition (not a forceful terminate);
@@ -198,9 +207,27 @@ def test_has_cancel_handler_reflects_the_active_configuration():
     defn = definition_from_dsl(CANCEL_HANDLED, "M")
     exe = Execution(definition_id=defn.id)
     _Runner(defn).start(exe)  # parked at Working, which models on:Cancel
-    assert engine.has_cancel_handler(defn, exe) is True
+    assert engine.has_cancel_handler(defn, exe, Event(kind="Cancel")) is True
 
     defn2 = definition_from_dsl(CANCEL_UNHANDLED, "M")
     exe2 = Execution(definition_id=defn2.id)
     _Runner(defn2).start(exe2)
-    assert engine.has_cancel_handler(defn2, exe2) is False
+    assert engine.has_cancel_handler(defn2, exe2, Event(kind="Cancel")) is False
+
+
+def test_has_cancel_handler_honours_a_guard_like_has_error_handler():
+    # has_cancel_handler must predict process()'s own resolution exactly: a guard
+    # that would fail when the injected Cancel is actually processed must also
+    # make has_cancel_handler report False, or `cancel()` picks the cooperative
+    # path only to have it degrade into a forceful terminate anyway.
+    from harel import engine
+    from harel.engine.execution import Execution
+
+    defn = definition_from_dsl(CANCEL_GUARDED, "M")
+    exe = Execution(definition_id=defn.id)
+    _Runner(defn).start(exe)  # parked at Working
+
+    assert engine.has_cancel_handler(defn, exe, Event(kind="Cancel", data={"reason": "user_request"})) is True
+    assert (
+        engine.has_cancel_handler(defn, exe, Event(kind="Cancel", data={"reason": "something_else"})) is False
+    )

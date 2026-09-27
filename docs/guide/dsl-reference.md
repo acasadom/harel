@@ -141,6 +141,15 @@ See: [fragments](../tutorial/09-fragments), [imports](../tutorial/10-imports),
 engine's own events — don't use these names for your domain events. (`CancelOrder`, not `Cancel`,
 for a domain "cancel".)
 
+`Cancel` in particular is the control plane's own teardown signal (see
+[control plane](control-plane)), not a business event: `harel validate` rejects an `on Cancel`
+transition whose target is not itself a terminal state. The cooperative `cancel()` path always
+resolves in the same step the injected `Cancel` is processed — it never leaves the execution
+parked mid-cleanup. A model whose own cancellation needs more than that (release a lock now, wait
+for a refund confirmation later, ...) is modelling business cancellation, and belongs on its own
+event name (`CancelOrder`), handled with ordinary transitions, free to take as many steps as it
+needs — with no relation to `cancel()` at all.
+
 `on error` fires when a state's action **raises**: the engine synthesises an `error` event
 carrying the exception's `type` and `message` (so `on error where type == "TimeoutError"` routes
 by kind) and also stashes it in `context["_error"]`. Guards are evaluated in declaration order;

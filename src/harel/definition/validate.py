@@ -275,6 +275,60 @@ def _check_events(defn: Definition, issues: list[Issue]) -> None:
                 _check_event(node, t.event_filter, defn, issues)
 
 
+def _check_cancel_target(node: Node, t: Transition, issues: list[Issue]) -> None:
+    """`Cancel` is the control plane's cooperative-teardown signal, not a business
+    event: `cancel()` decides cooperative-vs-forceful structurally
+    (`has_cancel_handler`), and the worker starts discarding the execution's queued
+    backlog the moment the CAS to CANCELLING lands — before the injected `Cancel`
+    even gets its turn. So its transition must resolve, in that same step, straight
+    to the model's own terminal (a sink `_is_terminal` already recognizes, `final`
+    or not). A model whose cleanup needs more than that — release a lock now, then
+    wait on a further event to actually finish — is modelling *business*
+    cancellation, not execution cancellation, and should use its own event name
+    (e.g. `CancelOrder`) instead of the reserved `Cancel`."""
+    ef = t.event_filter
+    if ef is None or "Cancel" not in [k.strip() for k in ef.kind.split("|")]:
+        return
+    targets: list[Node] = []
+    if t.target is not None:
+        targets.append(t.target)
+    if t.selector is not None:
+        names = list(t.selector.mapper.values())
+        if t.selector.default is not None:
+            names.append(t.selector.default)
+        for name in names:
+            # relative to `node` — the transition's OWNING scope (it lives in
+            # `node.transitions`), not `t.source`: a dotted `from` can put the
+            # source deep inside a nested composite while the transition itself
+            # is owned by an outer scope, and a name can resolve to a different
+            # node from each starting point. `node` is what the engine/builder
+            # actually resolves selector branches against (see `_check_selectors`,
+            # the same convention) — resolving from `t.source` here would validate
+            # a target the engine never actually lands on.
+            resolved = resolve_relative(node, name)
+            if resolved is not None:
+                targets.append(resolved)
+    for target in targets:
+        if not _is_terminal(target):
+            issues.append(
+                Issue(
+                    "cancel_target_not_terminal",
+                    "error",
+                    node.full_path,
+                    f"`on Cancel` must resolve directly to a terminal state, got "
+                    f"{target.full_path!r} which has its own outgoing transitions — model "
+                    f"multi-step or async cancellation as an ordinary domain event instead "
+                    f"(e.g. `CancelOrder`), not the reserved `Cancel`",
+                )
+            )
+
+
+def _check_cancel_targets(defn: Definition, issues: list[Issue]) -> None:
+    for node in defn.index.values():
+        for t in node.transitions:
+            _check_cancel_target(node, t, issues)
+
+
 def _has_timeout_handler(node: Node) -> bool:
     """Whether a `Timeout` for `node` would be handled: a Timeout transition whose
     source is `node` or — since a Timeout bubbles up — any of its ancestors (the
@@ -471,6 +525,7 @@ def validate(defn: Definition) -> list[Issue]:
     _check_nondeterminism(defn, issues)
     _check_reachability(defn, issues)
     _check_events(defn, issues)
+    _check_cancel_targets(defn, issues)
     _check_terminal_outcomes(defn, issues)
     return issues
 

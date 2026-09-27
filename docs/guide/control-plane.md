@@ -46,6 +46,44 @@ The machine ran its modelled cleanup (`Working → Stopped`) and ended with the 
 (`cancelled`) — the engine didn't just kill it. Cleanup logic lives in the model, like
 everything else.
 
+### `on Cancel` must resolve directly to a terminal
+
+`Cancel` is the control plane's own teardown signal, not a business event — `harel validate`
+rejects an `on Cancel` transition whose target is not itself a terminal state (`Stopped` above is
+a `final`, so it qualifies). This guarantees the cooperative path always finishes in the very same
+step the injected `Cancel` is processed: the execution never sits parked mid-cleanup, waiting on
+some further event, indistinguishable from an ordinary `RUNNING` execution — which is exactly the
+state a second `cancel()` call could otherwise misinterpret.
+
+A model whose own cancellation needs more than a bounded, immediate cleanup — release a lock now,
+but wait for an external refund confirmation before actually finishing — is modelling **business**
+cancellation, not an execution one. Give it its own event name instead of the reserved `Cancel`:
+
+```text
+event CancelOrder {}
+event Refunded {}
+
+machine job {
+  initial Working
+  state Working {}
+  state Releasing {}
+  final Cancelled cancelled {}
+  final Done success {}
+
+  from Working to Done on Finish
+  from Working to Releasing on CancelOrder
+  from Releasing to Cancelled on Refunded
+}
+```
+
+`CancelOrder` is handled with an ordinary `send()`, like any other domain event — `cancel()` is
+never involved, `CANCELLING` never appears, and the machine can take as many steps as its own
+business logic needs. If this same execution also needs to be operationally abortable (a stuck or
+unwanted workflow, independent of what the business decided), that's a *separate* concern: give
+`Working` its own bounded `on Cancel` straight to a terminal, and call `cancel()` for that — the
+two mechanisms coexist without conflict, because they answer different questions ("did the
+business cancel the order?" vs. "should this running workflow be stopped?").
+
 ## Terminate, suspend, resume
 
 ```python

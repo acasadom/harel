@@ -73,18 +73,21 @@ machine M {{
 }}
 """
 
-# a state that owns its cancellation: on Cancel it cleans up via Releasing, which
-# waits for a Refunded event before reaching the terminal sink.
+# A machine whose Working state OWNS its cooperative cancellation. `on Cancel`
+# must resolve directly to a terminal (a validator rule — see `validate.py`'s
+# `_check_cancel_target`): the cleanup runs and reaches DONE in the same step
+# the injected Cancel is processed. A model whose OWN cancellation needs more
+# than that (multi-step, or waiting on a further event) is business
+# cancellation and uses its own event name (e.g. CancelOrder) instead — see
+# test_control.py's test_business_cancellation_is_an_ordinary_event_not_the_control_plane.
 CRITICAL = f"""
 machine M {{
    initial Working
    state Working {{ on enter {_h("working")} }}
-   state Releasing {{ on enter {_h("releasing")} }}
-   state Cancelled {{ on enter {_h("cancelled")} }}
-   state Done {{ on enter {_h("done")} }}
+   final Done success {{ on enter {_h("done")} }}
+   final Released cancelled {{ on enter {_h("released")} }}
    from Working to Done on Finish
-   from Working to Releasing on Cancel
-   from Releasing to Cancelled on Refunded
+   from Working to Released on Cancel
 }}
 """
 
@@ -206,14 +209,8 @@ def test_cooperative_cancel_discards_backlog_and_cleans_up_across_workers(tmp_pa
 
     stop, threads = _run_workers(4, db_store, db_queue, defs)
     try:
-        # each machine drains its Finish and parks at Releasing (awaiting Refunded)
-        at_releasing = _await(
-            lambda: all((e := store.load(i)) is not None and e.active_path == "Releasing" for i in ids)
-        )
-        assert at_releasing, "machines did not reach the Cancel cleanup state"
-
-        for eid in ids:
-            runner.send(eid, Event(kind="Refunded"))  # complete the cleanup
+        # the machine's own Cancel transition resolves directly to a terminal, so
+        # the cleanup finishes in the same step the injected Cancel is processed
         done = _await(lambda: all((e := store.load(i)) is not None and e.status is Status.DONE for i in ids))
     finally:
         stop.set()
@@ -223,9 +220,10 @@ def test_cooperative_cancel_discards_backlog_and_cleans_up_across_workers(tmp_pa
 
     for eid in ids:
         final = store.load(eid)
-        assert final.active_path == "Cancelled"
+        assert final.active_path == "Released"
+        assert final.outcome == "cancelled"
         # the queued Finish was discarded (no "done"); only the cleanup path ran
-        assert final.context["trace"] == ["working", "releasing", "cancelled"]
+        assert final.context["trace"] == ["working", "released"]
     store.close()
     transport.close()
 

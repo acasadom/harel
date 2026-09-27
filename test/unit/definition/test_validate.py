@@ -340,6 +340,110 @@ def test_undeclared_event_is_an_error():
     assert any(i.code == "unknown_event" and i.severity == "error" for i in issues)
 
 
+# --- Cancel must resolve directly to a terminal -------------------------------
+# `Cancel` is the control plane's own teardown signal (`cancel()` picks it up
+# structurally via `has_cancel_handler`, and the worker starts discarding the
+# execution's backlog the moment CANCELLING lands, before the injected Cancel
+# even gets its turn) — not a business event. A model whose cleanup needs more
+# than a direct-to-terminal hop is modelling business cancellation and should use
+# its own event name (e.g. `CancelOrder`) instead of the reserved `Cancel`.
+
+
+def test_cancel_target_not_terminal_is_an_error():
+    cfg = {
+        "start": "Working",
+        "events": {"Refunded": {}},
+        "states": {
+            "Working": {},
+            "Releasing": {},  # NOT terminal: has its own outgoing transition
+            "Cancelled": {"outcome": "cancelled"},
+        },
+        "transitions": [
+            {"from": "Working", "to": "Releasing", "on_event": {"type": "Cancel"}},
+            {"from": "Releasing", "to": "Cancelled", "on_event": {"type": "Refunded"}},
+        ],
+    }
+    issues = validate(build(cfg))
+    assert any(i.code == "cancel_target_not_terminal" and i.severity == "error" for i in issues)
+
+
+def test_cancel_target_terminal_is_clean():
+    cfg = {
+        "start": "Working",
+        "states": {"Working": {}, "Cancelled": {"outcome": "cancelled"}},
+        "transitions": [{"from": "Working", "to": "Cancelled", "on_event": {"type": "Cancel"}}],
+    }
+    assert "cancel_target_not_terminal" not in codes(build(cfg))
+
+
+def test_cancel_in_a_kind_alternation_is_still_checked():
+    # Cancel shares the transition with an ordinary event (`Foo|Cancel`) — the
+    # non-terminal target is still wrong for the Cancel half of the alternation.
+    # Mid must have an outgoing transition of its own, or it would be a sink
+    # regardless (a leaf with no outgoing transitions is terminal either way).
+    cfg = {
+        "start": "Working",
+        "events": {"Foo": {}, "Bar": {}},
+        "states": {"Working": {}, "Mid": {}, "Done": {"outcome": "success"}},
+        "transitions": [
+            {"from": "Working", "to": "Mid", "on_event": {"type": "Foo|Cancel"}},
+            {"from": "Mid", "to": "Done", "on_event": {"type": "Bar"}},
+        ],
+    }
+    assert "cancel_target_not_terminal" in codes(build(cfg), "error")
+
+
+def test_cancel_selector_branch_not_terminal_is_an_error():
+    cfg = {
+        "start": "Working",
+        "events": {"Bar": {}},
+        "states": {"Working": {}, "Mid": {}, "Done": {"outcome": "cancelled"}},
+        "transitions": [
+            {
+                "from": "Working",
+                "on_event": {"type": "Cancel"},
+                "selector": {"function": "mod.pick", "mapper": {"true": "Done", "false": "Mid"}},
+            },
+            {"from": "Mid", "to": "Done", "on_event": {"type": "Bar"}},  # Mid is NOT a sink
+        ],
+    }
+    issues = validate(build(cfg))
+    assert any(i.code == "cancel_target_not_terminal" for i in issues)
+
+
+def test_cancel_selector_branch_resolves_against_the_owning_scope_not_the_source():
+    # A dotted `from` can put the transition's source deep inside a nested
+    # composite while the transition itself is owned by an OUTER scope (here:
+    # the root). A selector branch name that exists at BOTH levels must resolve
+    # against the owning scope (matching what the engine/builder actually use,
+    # see _target_of/resolve_relative) — not against the source, which would
+    # find the wrong (here: terminal) node and miss the real, non-terminal one.
+    cfg = {
+        "start": "Outer",
+        "events": {"Retry": {}},
+        "states": {
+            "Outer": {
+                "start": "Working",
+                "states": {
+                    "Working": {},
+                    "Shared": {"outcome": "cancelled"},  # nested, terminal
+                },
+            },
+            "Shared": {},  # root-level sibling with the SAME bare name, NOT terminal
+        },
+        "transitions": [
+            {
+                "from": "Outer.Working",
+                "on_event": {"type": "Cancel"},
+                "selector": {"function": "mod.pick", "mapper": {"true": "Shared", "false": "Shared"}},
+            },
+            {"from": "Shared", "to": "Outer", "on_event": {"type": "Retry"}},
+        ],
+    }
+    issues = validate(build(cfg))
+    assert any(i.code == "cancel_target_not_terminal" for i in issues)
+
+
 # --- event parsing ------------------------------------------------------------
 
 

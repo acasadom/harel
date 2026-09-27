@@ -108,19 +108,15 @@ def test_cooperative_cancel_on_the_worker_stack(stack):
     for eid in ids:
         runner.cancel(eid)  # cooperative: CANCELLING + injected Cancel -> runs the cleanup
 
-    at_releasing = _await(
-        lambda: all((e := store.load(i)) is not None and e.active_path == "Releasing" for i in ids)
-    )
-    assert at_releasing, "the worker stack did not reach the Cancel cleanup state"
-
-    for eid in ids:
-        runner.send(eid, Event(kind="Refunded"))  # complete the cleanup
+    # the machine's own Cancel transition resolves directly to a terminal, so the
+    # cleanup finishes in the same step the injected Cancel is processed
     done = _await(lambda: all((e := store.load(i)) is not None and e.status is Status.DONE for i in ids))
     assert done, "the worker stack did not finish the cooperative cancel in time"
     for eid in ids:
         final = store.load(eid)
-        assert final.active_path == "Cancelled"
-        assert final.context["trace"] == ["working", "releasing", "cancelled"]
+        assert final.active_path == "Released"
+        assert final.outcome == "cancelled"
+        assert final.context["trace"] == ["working", "released"]
 
 
 def test_timeout_fires_on_the_worker_stack(stack):
