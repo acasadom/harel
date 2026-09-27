@@ -200,7 +200,15 @@ def _validate_redrive_target(defn: Definition, exe: Execution, target_path: str)
     """Pure precondition check for `redrive`, re-run against the freshly loaded `exe`
     on every CAS attempt (not just once) — a concurrent writer could otherwise finish
     spawning a child, or the check could otherwise run against a stale snapshot,
-    between an initial check and the winning write. Raises `ValueError`."""
+    between an initial check and the winning write. Raises `ValueError`.
+
+    Same three structural checks as `engine.is_valid_reposition_target` and its
+    async mirror `aio.control._validate_redrive_target` (leaf, within this
+    Execution's own branch, not nested inside an orthogonal ancestor) — three
+    independent copies now, so a change to this invariant must touch all three —
+    kept as its own walk here, not a call to that shared boolean, because `redrive` is
+    control-plane-invoked and wants a precise, caller-facing reason for exactly
+    which check failed. If the invariant ever changes, update both."""
     node = defn.index.get(target_path)
     if node is None or node.is_composite:
         raise ValueError(f"redrive target must be a leaf state, got {target_path!r}")

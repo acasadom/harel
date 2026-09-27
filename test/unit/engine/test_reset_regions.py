@@ -62,3 +62,31 @@ def test_reset_after_completion_restarts_the_orthogonal_cleanly():
     runner.inject(exe, Event(kind="GoB"))
     assert exe.active_path == "Done"
     assert exe.status is Status.DONE
+
+
+def test_reset_cancels_a_still_live_region_instead_of_abandoning_it():
+    # region A finished (GoA); region B is still live (no GoB yet) when Reset fires.
+    # Reset discards exe.children wholesale — without an explicit Cancel, B would
+    # just keep running forever, orphaned, never told to stop.
+    runner, exe = _fresh()
+    runner.inject(exe, Event(kind="GoA"))
+    assert exe.active_path == "Fork"
+    live_child_ids = [cid for cid, cs in exe.children.items() if not cs.finished]
+    assert len(live_child_ids) == 1  # region B, still at B1
+
+    runner.inject(exe, Event(kind="Reset"))
+
+    region_b = runner.get(live_child_ids[0])
+    assert region_b.status is Status.CANCELLED  # B has no `on Cancel` -> forceful terminate
+
+
+def test_reset_is_a_noop_while_cancelling():
+    # a Reset arriving mid cooperative-cancel cleanup must not abandon it half-done
+    # -- the same hazard a duplicate/racing Cancel already has (see control.py).
+    runner, exe = _fresh()
+    exe.status = Status.CANCELLING
+    before = (exe.status, exe.active_path, dict(exe.context))
+
+    runner.inject(exe, Event(kind="Reset"))
+
+    assert (exe.status, exe.active_path, dict(exe.context)) == before

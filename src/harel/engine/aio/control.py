@@ -133,7 +133,10 @@ async def resume(store: Any, execution_id: str) -> None:
 
 def _validate_redrive_target(defn: Definition, exe: Execution, target_path: str) -> None:
     """Pure mirror of `harel.engine.control._validate_redrive_target` — see its
-    docstring. Re-run against the freshly loaded `exe` on every CAS attempt."""
+    docstring. Re-run against the freshly loaded `exe` on every CAS attempt. A
+    third copy of this same invariant (leaf, own branch, not orthogonal-nested)
+    lives in `engine.is_valid_reposition_target`, as a single boolean rather than
+    per-check `ValueError`s — update all three if it ever changes."""
     node = defn.index.get(target_path)
     if node is None or node.is_composite:
         raise ValueError(f"redrive target must be a leaf state, got {target_path!r}")
