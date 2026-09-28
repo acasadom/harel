@@ -53,15 +53,32 @@ machine M {{
 }}
 """
 
-# a state that owns its cancellation: on Cancel it cleans up via Releasing, which
-# waits for a Refunded event before reaching the terminal sink.
+# A machine whose Working state OWNS its cooperative cancellation. `on Cancel`
+# must resolve directly to a terminal (a validator rule — see `validate.py`'s
+# `_check_cancel_target`): the cleanup runs and reaches DONE in the very same
+# step the injected Cancel is processed, never leaving the execution parked.
 CRITICAL = f"""
 machine M {{
    initial Working
    state Working {{ on enter {_h("working")} }}
+   final Released cancelled {{ on enter {_h("released")} }}
+   from Working to Released on Cancel
+}}
+"""
+
+# A model whose OWN cancellation needs more than a bounded cleanup (release now,
+# wait for a real refund confirmation later) is modelling BUSINESS cancellation,
+# not an execution one: its own event name (CancelOrder), driven by an ordinary
+# event, no relation to the control plane's `cancel()`.
+BUSINESS_CANCELLATION = f"""
+event CancelOrder {{}}
+event Refunded {{}}
+machine M {{
+   initial Working
+   state Working {{ on enter {_h("working")} }}
    state Releasing {{ on enter {_h("releasing")} }}
-   state Cancelled {{ on enter {_h("cancelled")} }}
-   from Working to Releasing on Cancel
+   final Cancelled cancelled {{ on enter {_h("cancelled")} }}
+   from Working to Releasing on CancelOrder
    from Releasing to Cancelled on Refunded
 }}
 """
@@ -216,11 +233,28 @@ def test_durable_cooperative_cancel_runs_cleanup_inline(tmp_path):
     exe = runner.create(defn.id)  # parked at Working
     assert exe.active_path == "Working"
 
-    # cooperative cancel: the injected Cancel is delivered inline and runs the
-    # machine's own cleanup transition (Working -> Releasing), then awaits Refunded
-    after = runner.cancel(exe.id)
+    # cooperative cancel: the injected Cancel is delivered inline and resolves
+    # directly to the terminal Released — same step, no intermediate RUNNING
+    final = runner.cancel(exe.id)
+    assert final.active_path == "Released"
+    assert final.status is Status.DONE
+    assert final.outcome == "cancelled"
+    assert final.context["trace"] == ["working", "released"]
+    store.close()
+
+
+def test_durable_business_cancellation_is_an_ordinary_event(tmp_path):
+    # a model needing more than a bounded cleanup names its own event (CancelOrder)
+    # and drives it like any other domain event — cancel() is never involved.
+    defn = definition_from_dsl(BUSINESS_CANCELLATION, "M")
+    store = SqliteStore(tmp_path / "stm.db")
+    runner = DurableRunner(store, {defn.id: defn})
+    exe = runner.create(defn.id)  # parked at Working
+    assert exe.active_path == "Working"
+
+    after = runner.process(exe.id, Event(kind="CancelOrder"))
     assert after.active_path == "Releasing"
-    assert after.status is Status.RUNNING
+    assert after.status is Status.RUNNING  # ordinary event processing, awaiting Refunded
 
     final = runner.process(exe.id, Event(kind="Refunded"))
     assert final.active_path == "Cancelled"

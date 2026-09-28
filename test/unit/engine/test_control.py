@@ -6,8 +6,14 @@ The key behaviours:
 - A `cancel` of a state with no `Cancel` transition is a forceful terminate.
 - A `cancel` of a state that models `on: Cancel` goes through CANCELLING: the
   worker drains the queued backlog as no-ops until the injected Cancel reaches the
-  machine, which then runs its own cleanup transition (which may itself wait for a
-  later event). This gives the queue-jump semantics without touching the transport.
+  machine, which then runs its own cleanup transition. `Cancel` is the control
+  plane's own teardown signal, not a business event, so a validator rule requires
+  its transition to resolve directly to a terminal — the cooperative path always
+  finishes in the same step, never leaving the execution parked mid-cleanup. A
+  model whose own cancellation needs more than that (multi-step, or waiting on a
+  further event) is business cancellation and uses its own event name instead
+  (e.g. `CancelOrder`), unrelated to the control plane — see
+  `test_business_cancellation_is_an_ordinary_event_not_the_control_plane` below.
 - `suspend` parks the backlog (FIFO preserved, no worker spin); `resume` continues.
 - `redrive` forces a dead-lettered (FAILED) execution back to RUNNING at a caller-
   chosen leaf; it's a plain CAS write, like `resume` — it does not drain, the next
@@ -39,17 +45,37 @@ machine M {
 }
 """
 
-# A machine whose Working state OWNS its cancellation: on Cancel it cleans up via
-# Releasing, which waits for a Refunded event before reaching the terminal sink.
+# A machine whose Working state OWNS its cooperative cancellation. `on Cancel`
+# must resolve directly to a terminal (Released, a sink) — the cleanup runs and
+# the execution reaches DONE in the very same step the injected Cancel lands.
 CRITICAL = """
+event Finish {}
+machine M {
+   initial Working
+   state Working { on enter stm_actions.rec(at: "working") }
+   final Done success { on enter stm_actions.rec(at: "done") }
+   final Released cancelled { on enter stm_actions.rec(at: "released") }
+   from Working to Done on Finish
+   from Working to Released on Cancel
+}
+"""
+
+# A model that needs MORE than a bounded cleanup (release now, wait for an actual
+# refund confirmation later) is modelling a BUSINESS cancellation, not an
+# execution one: its own event name (CancelOrder), ordinary transitions, no
+# relation to the control plane — see the module docstring.
+BUSINESS_CANCELLATION = """
+event Finish {}
+event CancelOrder {}
+event Refunded {}
 machine M {
    initial Working
    state Working { on enter stm_actions.rec(at: "working") }
    state Releasing { on enter stm_actions.rec(at: "releasing") }
-   state Cancelled { on enter stm_actions.rec(at: "cancelled") }
-   state Done { on enter stm_actions.rec(at: "done") }
+   final Cancelled cancelled { on enter stm_actions.rec(at: "cancelled") }
+   final Done success { on enter stm_actions.rec(at: "done") }
    from Working to Done on Finish
-   from Working to Releasing on Cancel
+   from Working to Releasing on CancelOrder
    from Releasing to Cancelled on Refunded
 }
 """
@@ -204,13 +230,39 @@ def test_cooperative_cancel_discards_backlog_and_runs_cleanup(backend):
     runner.cancel(exe.id)  # cooperative: -> CANCELLING + injected Cancel
     _drain(runner.worker())
 
-    # the queued Finish was drained (no Done); the machine took its Cancel cleanup
-    after_cancel = store.load(exe.id)
-    assert after_cancel.active_path == "Releasing"
-    assert after_cancel.status is Status.RUNNING  # cleanup is in progress, awaiting Refunded
-    assert "done" not in after_cancel.context["trace"]
+    # the queued Finish was drained (no Done); the machine's own Cancel transition
+    # resolves directly to a terminal, so the cleanup finishes in the same step —
+    # no intermediate RUNNING window, no second-cancel ambiguity.
+    final = store.load(exe.id)
+    assert final.active_path == "Released"
+    assert final.status is Status.DONE
+    assert final.outcome == "cancelled"
+    assert final.context["trace"] == ["working", "released"]
 
-    # cleanup waits for an event: Refunded completes it and reaches the sink
+
+def test_business_cancellation_is_an_ordinary_event_not_the_control_plane(backend):
+    # a model whose own cancellation needs more than a bounded cleanup (release
+    # now, wait for a real refund confirmation later) is business cancellation:
+    # its own event name (CancelOrder), driven by an ordinary send() — cancel()
+    # (and CANCELLING) never enter the picture, and the machine has no `on
+    # Cancel` handler at all (a genuine `cancel()` call on it would forcefully
+    # terminate, like any state without a Cancel transition).
+    store, transport = backend
+    defn = definition_from_dsl(BUSINESS_CANCELLATION, "M")
+    runner = DistributedRunner(store, transport, {defn.id: defn})
+    exe = runner.create(defn.id)
+    _drain(runner.worker())  # parked at Working
+    exe = store.load(exe.id)
+    assert exe.active_path == "Working"
+
+    runner.send(exe.id, Event(kind="CancelOrder"))
+    _drain(runner.worker())
+
+    after = store.load(exe.id)
+    assert after.active_path == "Releasing"
+    assert after.status is Status.RUNNING  # ordinary event processing, awaiting Refunded
+    assert "done" not in after.context["trace"]
+
     runner.send(exe.id, Event(kind="Refunded"))
     _drain(runner.worker())
 
@@ -218,6 +270,65 @@ def test_cooperative_cancel_discards_backlog_and_runs_cleanup(backend):
     assert final.active_path == "Cancelled"
     assert final.status is Status.DONE
     assert final.context["trace"] == ["working", "releasing", "cancelled"]
+
+
+# --- cancel/terminate never reclassify an already-finished execution -----------
+def test_second_cancel_after_cooperative_cleanup_is_a_noop(backend):
+    store, transport = backend
+    defn = definition_from_dsl(CRITICAL, "M")
+    runner = DistributedRunner(store, transport, {defn.id: defn})
+    exe = runner.create(defn.id)
+    _drain(runner.worker())  # parked at Working
+    runner.cancel(exe.id)  # cooperative -> DONE at Released (see test above)
+    _drain(runner.worker())
+    assert store.load(exe.id).status is Status.DONE
+
+    runner.cancel(exe.id)  # a second cancel() must not reclassify it as CANCELLED
+    _drain(runner.worker())
+
+    final = store.load(exe.id)
+    assert final.status is Status.DONE
+    assert final.active_path == "Released"
+
+
+def test_cancel_and_terminate_do_not_reclassify_a_normally_finished_execution(backend):
+    store, transport = backend
+    defn = definition_from_dsl(CRITICAL, "M")
+    runner = DistributedRunner(store, transport, {defn.id: defn})
+    exe = runner.create(defn.id)
+    runner.send(exe.id, Event(kind="Finish"))  # ordinary completion, no cancellation involved
+    _drain(runner.worker())
+    assert store.load(exe.id).status is Status.DONE
+
+    runner.cancel(exe.id)
+    assert store.load(exe.id).status is Status.DONE  # not corrupted to CANCELLED
+
+    runner.terminate(exe.id)
+    assert store.load(exe.id).status is Status.DONE  # terminate() is no exception either
+
+
+def test_overlapping_cancel_calls_before_any_drain_still_end_up_done(backend):
+    # two cancel() calls back-to-back, before a worker ever drains the first one:
+    # has_cancel_handler is true both times (active_path hasn't moved yet), so
+    # each commits its OWN distinct Cancel event (Event() mints a fresh id per
+    # call — the store's dedupe never collapses them). The worker processes the
+    # first Cancel, reaches the terminal (DONE). The second, now-stale Cancel
+    # must then be a no-op — not re-force CANCELLED onto an execution that
+    # already reached its own real terminal.
+    store, transport = backend
+    defn = definition_from_dsl(CRITICAL, "M")
+    runner = DistributedRunner(store, transport, {defn.id: defn})
+    exe = runner.create(defn.id)
+    _drain(runner.worker())  # parked at Working
+
+    runner.cancel(exe.id)
+    runner.cancel(exe.id)  # overlapping: no worker has processed the first one yet
+    _drain(runner.worker())
+
+    final = store.load(exe.id)
+    assert final.status is Status.DONE
+    assert final.active_path == "Released"
+    assert final.outcome == "cancelled"
 
 
 # --- suspend / resume -----------------------------------------------------------

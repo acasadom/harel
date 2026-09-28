@@ -56,7 +56,11 @@ Distinct problems, each a structured `Issue` (`severity`, `code`, `path`, `messa
 - **every referenced event is declared** (and, for events with fields, the field references
   exist and the operators match) — an undeclared event is an error;
 - `timeout` shape, and a warning for an unhandled `Timeout`;
-- unreachable states.
+- unreachable states;
+- an `on Cancel` transition resolves directly to a terminal — `Cancel` is the [control
+  plane](../guide/control-plane)'s own teardown signal, not a business event, so its cleanup
+  must finish in the same step the injected `Cancel` is processed. Model a multi-step or
+  asynchronous cancellation as an ordinary domain event instead (e.g. `CancelOrder`).
 
 ## Fix it, and fail the build on errors
 

@@ -20,6 +20,16 @@ Two cancellation modes, decided by the machine itself:
   priority/purge, which SQS FIFO could not provide anyway): the *worker* discards
   the backlog, not the transport.
 
+`Cancel` is the control plane's own teardown signal, not a business event: a
+validator rule requires its transition to resolve directly to a terminal, so the
+cooperative path always finishes in the very same step the injected `Cancel` is
+processed — it never leaves the execution parked mid-cleanup, indistinguishable
+from an ordinary RUNNING execution, waiting on some further event. A model whose
+own domain logic needs a multi-step or asynchronous unwind (release a lock now,
+wait for an external refund later, ...) is modelling a *business* cancellation,
+not an execution one — that belongs on its own event name (e.g. `CancelOrder`),
+handled with ordinary transitions, with no relation to `cancel()` at all.
+
 `suspend`/`resume` are reversible: state, history and the queued backlog are all
 preserved; resume returns to RUNNING and processing continues where it stopped.
 
@@ -93,8 +103,8 @@ def _commit_status(
             raise KeyError(execution_id)
         if require_status is not None and exe.status is not require_status:
             return  # precondition no longer holds — someone else already moved it
-        if exe.status in _TERMINAL and new_status is not Status.CANCELLED:
-            return  # already finished; only a (forceful) terminate may still fire
+        if exe.status in _TERMINAL:
+            return  # already finished; no control-plane command changes it further
         if validate is not None:
             validate(exe)  # raises to abort — not caught, doesn't count as a retry
         exe.status = new_status
@@ -126,7 +136,9 @@ def _propagate(store: ExecutionStore, parent_id: str, new_status: Status) -> Non
 
 def terminate(store: ExecutionStore, execution_id: str) -> None:
     """Forceful cancel: status -> CANCELLED now, no hooks, no cleanup. Regions
-    follow. The queued backlog drains as no-ops."""
+    follow. The queued backlog drains as no-ops. No-op if the execution already
+    finished (`_commit_status`'s terminal guard) — it does not retroactively
+    reclassify a `DONE` execution as `CANCELLED`."""
     _commit_status(store, execution_id, Status.CANCELLED)
     _propagate(store, execution_id, Status.CANCELLED)
 
@@ -142,11 +154,18 @@ def cancel(
     `Cancel` transition (-> CANCELLING + an injected `Cancel` for the cleanup),
     forceful terminate otherwise. Regions are terminated forcefully (a cancelled
     parent does not outlive its regions). `reason` is an opaque payload carried on
-    the cooperative `Cancel` event, readable by the model's cleanup transition."""
+    the cooperative `Cancel` event, readable by the model's cleanup transition (and
+    by its guard, e.g. `on Cancel where reason == "user_request"`). No-op if the
+    execution already finished (`DONE`/`CANCELLED`) — a validator rule requires
+    `on Cancel` to resolve directly to a terminal, so the cooperative path always
+    completes in the same step the injected `Cancel` is processed; there is no
+    window where a second `cancel()` could find the execution "mid cleanup"."""
     exe = store.load(execution_id)
     if exe is None:
         raise KeyError(execution_id)
-    if engine.has_cancel_handler(defn, exe):
+    if exe.status in _TERMINAL:
+        return
+    if engine.has_cancel_handler(defn, exe, Event(kind="Cancel", data=dict(reason or {}))):
         _commit_status(store, execution_id, Status.CANCELLING, emit_cancel=True, cancel_data=reason)
         _propagate(store, execution_id, Status.CANCELLED)
     else:
