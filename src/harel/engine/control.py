@@ -85,6 +85,7 @@ def _commit_status(
     active_path: Optional[str] = None,
     clear_error: bool = False,
     clear_history: bool = False,
+    clock: Callable[[], float] = time.time,
 ) -> None:
     """CAS the Execution to `new_status`, retrying on a concurrent writer.
     `require_status`, when given, is re-checked on every attempt (not just before
@@ -116,30 +117,32 @@ def _commit_status(
         if clear_history:
             exe.history.clear()
         try:
-            stamp(exe, time.time())
+            stamp(exe, clock())
             store.commit(exe, [])
             return
         except StoreConflict:
             continue
 
 
-def _propagate(store: ExecutionStore, parent_id: str, new_status: Status) -> None:
+def _propagate(
+    store: ExecutionStore, parent_id: str, new_status: Status, *, clock: Callable[[], float] = time.time
+) -> None:
     """Forcefully apply `new_status` to a parent's region children (recursively)."""
     parent = store.load(parent_id)
     if parent is None:
         return
     for child in _children(store, parent):
-        _commit_status(store, child.id, new_status)
-        _propagate(store, child.id, new_status)
+        _commit_status(store, child.id, new_status, clock=clock)
+        _propagate(store, child.id, new_status, clock=clock)
 
 
-def terminate(store: ExecutionStore, execution_id: str) -> None:
+def terminate(store: ExecutionStore, execution_id: str, *, clock: Callable[[], float] = time.time) -> None:
     """Forceful cancel: status -> CANCELLED now, no hooks, no cleanup. Regions
     follow. The queued backlog drains as no-ops. No-op if the execution already
     finished (`_commit_status`'s terminal guard) — it does not retroactively
     reclassify a `DONE` execution as `CANCELLED`."""
-    _commit_status(store, execution_id, Status.CANCELLED)
-    _propagate(store, execution_id, Status.CANCELLED)
+    _commit_status(store, execution_id, Status.CANCELLED, clock=clock)
+    _propagate(store, execution_id, Status.CANCELLED, clock=clock)
 
 
 def cancel(
@@ -148,6 +151,7 @@ def cancel(
     execution_id: str,
     *,
     reason: Optional[dict] = None,
+    clock: Callable[[], float] = time.time,
 ) -> None:
     """Cancel respecting the machine: cooperative if the active state models a
     `Cancel` transition (-> CANCELLING + an injected `Cancel` for the cleanup),
@@ -174,19 +178,19 @@ def cancel(
             return
         cancel_event = Event(kind="Cancel", data=dict(reason or {}))
         if exe.status is Status.FAILED or not engine.has_cancel_handler(defn, exe, cancel_event):
-            terminate(store, execution_id)
+            terminate(store, execution_id, clock=clock)
             return
         exe.status = Status.CANCELLING
-        stamp(exe, time.time())
+        stamp(exe, clock())
         try:
             store.commit(exe, [(exe.id, cancel_event)])
         except StoreConflict:
             continue
-        _propagate(store, execution_id, Status.CANCELLED)
+        _propagate(store, execution_id, Status.CANCELLED, clock=clock)
         return
 
 
-def suspend(store: ExecutionStore, execution_id: str) -> None:
+def suspend(store: ExecutionStore, execution_id: str, *, clock: Callable[[], float] = time.time) -> None:
     """Pause: RUNNING -> SUSPENDED. State, history and the backlog are preserved.
     No-op if not RUNNING. Regions are suspended too."""
     exe = store.load(execution_id)
@@ -194,11 +198,11 @@ def suspend(store: ExecutionStore, execution_id: str) -> None:
         raise KeyError(execution_id)
     if exe.status is not Status.RUNNING:
         return
-    _commit_status(store, execution_id, Status.SUSPENDED)
-    _propagate(store, execution_id, Status.SUSPENDED)
+    _commit_status(store, execution_id, Status.SUSPENDED, clock=clock)
+    _propagate(store, execution_id, Status.SUSPENDED, clock=clock)
 
 
-def resume(store: ExecutionStore, execution_id: str) -> None:
+def resume(store: ExecutionStore, execution_id: str, *, clock: Callable[[], float] = time.time) -> None:
     """Unpause: SUSPENDED -> RUNNING, continuing where it stopped (the backlog is
     intact). No-op if not SUSPENDED. Regions resume too."""
     exe = store.load(execution_id)
@@ -206,8 +210,8 @@ def resume(store: ExecutionStore, execution_id: str) -> None:
         raise KeyError(execution_id)
     if exe.status is not Status.SUSPENDED:
         return
-    _commit_status(store, execution_id, Status.RUNNING)
-    _propagate(store, execution_id, Status.RUNNING)
+    _commit_status(store, execution_id, Status.RUNNING, clock=clock)
+    _propagate(store, execution_id, Status.RUNNING, clock=clock)
 
 
 def _validate_redrive_target(defn: Definition, exe: Execution, target_path: str) -> None:
@@ -254,7 +258,14 @@ def _validate_redrive_target(defn: Definition, exe: Execution, target_path: str)
         raise ValueError("redrive refused: execution has unfinished children (cancel/terminate them first)")
 
 
-def redrive(store: ExecutionStore, defn: Definition, execution_id: str, target_path: str) -> None:
+def redrive(
+    store: ExecutionStore,
+    defn: Definition,
+    execution_id: str,
+    target_path: str,
+    *,
+    clock: Callable[[], float] = time.time,
+) -> None:
     """Force a dead-lettered execution back to life: FAILED -> RUNNING, repositioned
     at `target_path` (a caller-chosen leaf — never inferred from the failed
     `active_path`, which an `on_exit` failure may have left parked mid-cascade on a
@@ -290,6 +301,7 @@ def redrive(store: ExecutionStore, defn: Definition, execution_id: str, target_p
         active_path=target_path,
         clear_error=True,
         clear_history=True,
+        clock=clock,
     )
 
 

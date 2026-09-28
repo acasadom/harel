@@ -41,6 +41,7 @@ async def _commit_status(
     active_path: Optional[str] = None,
     clear_error: bool = False,
     clear_history: bool = False,
+    clock: Callable[[], float] = time.time,
 ) -> None:
     for _ in range(_RETRIES):
         exe = await store.load(execution_id)
@@ -60,30 +61,32 @@ async def _commit_status(
         if clear_history:
             exe.history.clear()
         try:
-            stamp(exe, time.time())
+            stamp(exe, clock())
             await store.commit(exe, [])
             return
         except StoreConflict:
             continue
 
 
-async def _propagate(store: Any, parent_id: str, new_status: Status) -> None:
+async def _propagate(
+    store: Any, parent_id: str, new_status: Status, *, clock: Callable[[], float] = time.time
+) -> None:
     parent = await store.load(parent_id)
     if parent is None:
         return
 
     async def _propagate_one(child: Execution) -> None:
-        await _commit_status(store, child.id, new_status)
-        await _propagate(store, child.id, new_status)
+        await _commit_status(store, child.id, new_status, clock=clock)
+        await _propagate(store, child.id, new_status, clock=clock)
 
     await asyncio.gather(*[_propagate_one(c) for c in await _children(store, parent)])
 
 
-async def terminate(store: Any, execution_id: str) -> None:
+async def terminate(store: Any, execution_id: str, *, clock: Callable[[], float] = time.time) -> None:
     """Forceful cancel: status -> CANCELLED now, no hooks, no cleanup. No-op if the
     execution already finished (`_commit_status`'s terminal guard)."""
-    await _commit_status(store, execution_id, Status.CANCELLED)
-    await _propagate(store, execution_id, Status.CANCELLED)
+    await _commit_status(store, execution_id, Status.CANCELLED, clock=clock)
+    await _propagate(store, execution_id, Status.CANCELLED, clock=clock)
 
 
 async def cancel(
@@ -92,6 +95,7 @@ async def cancel(
     execution_id: str,
     *,
     reason: Optional[dict] = None,
+    clock: Callable[[], float] = time.time,
 ) -> None:
     """Async mirror of `harel.engine.control.cancel` — see its docstring. No-op if
     the execution already finished: a validator rule requires `on Cancel` to
@@ -108,36 +112,36 @@ async def cancel(
             return
         cancel_event = Event(kind="Cancel", data=dict(reason or {}))
         if exe.status is Status.FAILED or not engine.has_cancel_handler(defn, exe, cancel_event):
-            await terminate(store, execution_id)
+            await terminate(store, execution_id, clock=clock)
             return
         exe.status = Status.CANCELLING
-        stamp(exe, time.time())
+        stamp(exe, clock())
         try:
             await store.commit(exe, [(exe.id, cancel_event)])
         except StoreConflict:
             continue
-        await _propagate(store, execution_id, Status.CANCELLED)
+        await _propagate(store, execution_id, Status.CANCELLED, clock=clock)
         return
 
 
-async def suspend(store: Any, execution_id: str) -> None:
+async def suspend(store: Any, execution_id: str, *, clock: Callable[[], float] = time.time) -> None:
     exe = await store.load(execution_id)
     if exe is None:
         raise KeyError(execution_id)
     if exe.status is not Status.RUNNING:
         return
-    await _commit_status(store, execution_id, Status.SUSPENDED)
-    await _propagate(store, execution_id, Status.SUSPENDED)
+    await _commit_status(store, execution_id, Status.SUSPENDED, clock=clock)
+    await _propagate(store, execution_id, Status.SUSPENDED, clock=clock)
 
 
-async def resume(store: Any, execution_id: str) -> None:
+async def resume(store: Any, execution_id: str, *, clock: Callable[[], float] = time.time) -> None:
     exe = await store.load(execution_id)
     if exe is None:
         raise KeyError(execution_id)
     if exe.status is not Status.SUSPENDED:
         return
-    await _commit_status(store, execution_id, Status.RUNNING)
-    await _propagate(store, execution_id, Status.RUNNING)
+    await _commit_status(store, execution_id, Status.RUNNING, clock=clock)
+    await _propagate(store, execution_id, Status.RUNNING, clock=clock)
 
 
 def _validate_redrive_target(defn: Definition, exe: Execution, target_path: str) -> None:
@@ -210,7 +214,14 @@ async def _purge_one(store: Any, exe: Execution) -> None:
         raise StoreConflict(exe.id, expected=exe.version, found=None)
 
 
-async def redrive(store: Any, defn: Definition, execution_id: str, target_path: str) -> None:
+async def redrive(
+    store: Any,
+    defn: Definition,
+    execution_id: str,
+    target_path: str,
+    *,
+    clock: Callable[[], float] = time.time,
+) -> None:
     """Async mirror of `harel.engine.control.redrive` — see its docstring."""
     exe = await store.load(execution_id)
     if exe is None:
@@ -227,4 +238,5 @@ async def redrive(store: Any, defn: Definition, execution_id: str, target_path: 
         active_path=target_path,
         clear_error=True,
         clear_history=True,
+        clock=clock,
     )

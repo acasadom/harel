@@ -480,17 +480,17 @@ class AsyncDistributedRunner:
 
     async def cancel(self, execution_id: str, *, reason: Optional[dict] = None) -> None:
         driver, exe = await self._driver_for(execution_id)
-        await control.cancel(self.store, driver.defn, execution_id, reason=reason)
+        await control.cancel(self.store, driver.defn, execution_id, reason=reason, clock=self._clock)
         await driver._flush(primary_priority={execution_id: exe.priority})
 
     async def terminate(self, execution_id: str) -> None:
-        await control.terminate(self.store, execution_id)
+        await control.terminate(self.store, execution_id, clock=self._clock)
 
     async def suspend(self, execution_id: str) -> None:
-        await control.suspend(self.store, execution_id)
+        await control.suspend(self.store, execution_id, clock=self._clock)
 
     async def resume(self, execution_id: str) -> None:
-        await control.resume(self.store, execution_id)
+        await control.resume(self.store, execution_id, clock=self._clock)
 
     async def purge(self, execution_id: str, *, archive: Optional[Callable[[dict], Any]] = None) -> bool:
         """Permanently delete a finished execution tree, archiving it first if `archive`
@@ -501,4 +501,4 @@ class AsyncDistributedRunner:
         """Force a FAILED `execution_id` back to RUNNING at `target_path` (a leaf
         the caller picks — see `control.redrive`)."""
         driver, _exe = await self._driver_for(execution_id)
-        await control.redrive(self.store, driver.defn, execution_id, target_path)
+        await control.redrive(self.store, driver.defn, execution_id, target_path, clock=self._clock)

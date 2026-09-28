@@ -68,13 +68,38 @@ def test_a_revived_execution_is_no_longer_finished():
     assert exe.finished_at is None and exe.updated_at == 500.0
 
 
-def test_terminate_stamps_finished_at():
-    runner, store, defn_id = _runner([100.0])
-    exe = runner.create(defn_id)
+ORTHO = """
+event Go {}
+machine M {
+   initial Fork
+   orthogonal Fork {
+      state R1 { initial W1  state W1 {}  final D1 success {}  from W1 to D1 on Go }
+      state R2 { initial W2  state W2 {}  final D2 success {}  from W2 to D2 on Go }
+   }
+   final Done success {}
+   from Fork to Done
+}
+"""
 
-    runner.terminate(exe.id)
 
-    assert store.load(exe.id).finished_at is not None  # control-plane writes use wall-clock time
+def test_control_plane_commands_stamp_with_the_runners_clock():
+    clock = [100.0]
+    defn = definition_from_dsl(ORTHO, "M")
+    store = DictStore()
+    runner = DurableRunner(store, {defn.id: defn}, clock=lambda: clock[0])
+    exe = runner.create(defn.id)
+    children = list(store.load(exe.id).children)
+
+    clock[0] = 200.0
+    runner.suspend(exe.id)
+    assert store.load(exe.id).updated_at == 200.0
+
+    clock[0] = 300.0
+    runner.terminate(exe.id)  # propagates to the regions too
+    for eid in (exe.id, *children):
+        loaded = store.load(eid)
+        assert loaded.status is Status.CANCELLED
+        assert (loaded.updated_at, loaded.finished_at) == (300.0, 300.0)
 
 
 # --- purge_finished ----------------------------------------------------------------

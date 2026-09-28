@@ -279,8 +279,9 @@ again:    False
 
 Every commit stamps three wall-clock fields on the `Execution`: `created_at` (the first commit),
 `updated_at` (the latest) and `finished_at` (when it became `DONE`/`CANCELLED` — cleared again if
-a `Reset` revives it). Runners use their injectable `clock`; control-plane commands use the wall
-clock.
+a `Reset` revives it). They come from the runner's injectable `clock` — control-plane commands
+included — so a simulated clock yields consistent timestamps; the `control` functions called
+directly (as the monitor does) default to the wall clock.
 
 `purge_finished` purges every root tree that finished more than `older_than` seconds ago — the
 same `purge` per tree, so the same rules apply — and reports what it did:
