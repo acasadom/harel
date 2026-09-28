@@ -58,3 +58,19 @@ def test_start_event_seeds_the_context_with_its_payload():
     assert exe.active_path == "A"
     assert exe.context["tenant"] == "acme"
     assert exe.context["n"] == 3
+
+
+def test_a_second_start_never_resets_an_already_started_execution():
+    """`Start` only acts while `status` is still PENDING (the pre-start default),
+    so a redelivered or duplicate Start can never reset an execution — including
+    one already finished — back to its initial state and re-run its enter hooks,
+    losing all progress."""
+    defn = definition_from_dsl(SEED, "M")
+    exe = Execution(definition_id=defn.id)
+    list(engine.process(defn, exe, Event(kind="Start")))
+    list(engine.process(defn, exe, Event(kind="Go")))
+    assert exe.active_path == "B" and exe.status is Status.DONE  # B is a dead-end sink
+
+    # a second Start (redelivery, caller bug, whatever) must be a complete no-op
+    list(engine.process(defn, exe, Event(kind="Start")))
+    assert exe.active_path == "B" and exe.status is Status.DONE

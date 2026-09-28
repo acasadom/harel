@@ -38,7 +38,7 @@ async def test_async_worker_run_drains_many_concurrently():
 
     ids = []
     for _ in range(25):
-        exe = await runner.create(defn.id)  # parked at B
+        exe = await runner.create(defn.id)  # start_on_create=True (default)
         await runner.send(exe.id, Event(kind="Go"))
         ids.append(exe.id)
 

@@ -92,8 +92,7 @@ async def _drain(runner):
 async def test_async_redis_pipeline_flat():
     defn = definition_from_dsl(FLAT, "M")
     runner = await _runner(defn)
-    exe = await runner.create(defn.id)
-    assert exe.active_path == "B"
+    exe = await runner.create(defn.id)  # start_on_create=True (default)
     await runner.send(exe.id, Event(kind="Go"))
     await _drain(runner)
     final = await runner.store.load(exe.id)
@@ -104,7 +103,9 @@ async def test_async_redis_pipeline_flat():
 async def test_async_redis_pipeline_orthogonal():
     defn = definition_from_dsl(ORTHO, "M")
     runner = await _runner(defn)
-    exe = await runner.create(defn.id)
+    exe = await runner.create(defn.id)  # start_on_create=True (default)
+    await _drain(runner)
+    exe = await runner.store.load(exe.id)
     assert exe.active_path == "Fork"
     child_ids = list(exe.children)
     await runner.send(exe.id, Event(kind="Go"))

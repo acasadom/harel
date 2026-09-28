@@ -124,7 +124,7 @@ def test_flat_machines_driven_by_separate_processes(tmp_path):
     transport = SqliteTransport(queue_db)
     runner = DistributedRunner(store, transport, {defn.id: defn})
 
-    ids = [runner.create(defn.id).id for _ in range(8)]
+    ids = [runner.create(defn.id).id for _ in range(8)]  # start_on_create=True (default)
     for eid in ids:
         runner.send(eid, Event(kind="Go"))
 
@@ -151,7 +151,11 @@ def test_orthogonal_fan_out_and_join_across_processes(tmp_path):
     transport = SqliteTransport(queue_db)
     runner = DistributedRunner(store, transport, {defn.id: defn})
 
-    parents = [runner.create(defn.id) for _ in range(4)]
+    parents = [runner.create(defn.id) for _ in range(4)]  # start_on_create=True (default)
+    setup_worker = runner.worker()
+    while setup_worker.step():  # processes each Start synchronously: forks the regions
+        pass
+    parents = [store.load(p.id) for p in parents]
     for p in parents:
         assert p.active_path == "Fork" and len(p.children) == 2
         runner.send(p.id, Event(kind="Go"))

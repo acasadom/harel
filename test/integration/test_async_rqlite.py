@@ -187,8 +187,7 @@ async def test_pipeline_flat_async_rqlite():
         defn = definition_from_dsl(FLAT, "M")
         runner = AsyncDistributedRunner(store, transport, {defn.id: defn})
 
-        exe = await runner.create(defn.id)
-        assert exe.active_path == "B"
+        exe = await runner.create(defn.id)  # start_on_create=True (default)
         await runner.send(exe.id, Event(kind="Go"))
         w = runner.worker()
         while await w.step():
@@ -214,7 +213,11 @@ async def test_pipeline_orthogonal_async_rqlite():
         defn = definition_from_dsl(ORTHO, "M")
         runner = AsyncDistributedRunner(store, transport, {defn.id: defn})
 
-        exe = await runner.create(defn.id)
+        exe = await runner.create(defn.id)  # start_on_create=True (default)
+        w = runner.worker()
+        while await w.step():
+            pass
+        exe = await store.load(exe.id)
         assert exe.active_path == "Fork"
         child_ids = list(exe.children)
         await runner.send(exe.id, Event(kind="Go"))

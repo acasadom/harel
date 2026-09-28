@@ -166,7 +166,7 @@ def test_cancel_without_handler_is_a_forceful_terminate(backend):
     store, transport = backend
     defn = definition_from_dsl(FLAT, "M")
     runner = DistributedRunner(store, transport, {defn.id: defn})
-    exe = runner.create(defn.id)  # parked at B
+    exe = runner.create(defn.id)  # forceful terminate works even on a not-yet-started (PENDING) execution
 
     runner.cancel(exe.id)
 
@@ -177,7 +177,8 @@ def test_terminate_drains_a_queued_backlog_as_noops(backend):
     store, transport = backend
     defn = definition_from_dsl(FLAT, "M")
     runner = DistributedRunner(store, transport, {defn.id: defn})
-    exe = runner.create(defn.id)  # parked at B
+    exe = runner.create(defn.id)  # start_on_create=True (default)
+    _drain(runner.worker())  # parked at B
 
     runner.send(exe.id, Event(kind="Go"))  # would advance B -> C if processed
     runner.terminate(exe.id)
@@ -193,7 +194,9 @@ def test_cooperative_cancel_discards_backlog_and_runs_cleanup(backend):
     store, transport = backend
     defn = definition_from_dsl(CRITICAL, "M")
     runner = DistributedRunner(store, transport, {defn.id: defn})
-    exe = runner.create(defn.id)  # parked at Working
+    exe = runner.create(defn.id)  # start_on_create=True (default)
+    _drain(runner.worker())  # parked at Working
+    exe = store.load(exe.id)
     assert exe.active_path == "Working"
 
     # a domain event is already queued; it would drive Working -> Done if processed
@@ -225,7 +228,8 @@ def test_suspend_preserves_the_backlog_and_resume_continues():
     defn = definition_from_dsl(FLAT, "M")
     runner = DistributedRunner(store, transport, {defn.id: defn})
     worker = runner.worker(visibility=30.0, suspend_recheck=5.0)
-    exe = runner.create(defn.id)  # parked at B
+    exe = runner.create(defn.id)  # start_on_create=True (default)
+    _drain(worker)  # parked at B
 
     runner.suspend(exe.id)
     runner.send(exe.id, Event(kind="Go"))
@@ -312,7 +316,7 @@ def test_redrive_over_the_distributed_runner(backend):
     store, transport = backend
     defn = definition_from_dsl(DEAD_LETTERS, "M")
     runner = DistributedRunner(store, transport, {defn.id: defn})
-    exe = runner.create(defn.id)
+    exe = runner.create(defn.id)  # start_on_create=True (default)
 
     runner.send(exe.id, Event(kind="Go"))
     _drain(runner.worker())
@@ -395,7 +399,9 @@ def test_suspend_and_terminate_propagate_to_regions(backend):
     store, transport = backend
     defn = definition_from_dsl(ORTHO, "M")
     runner = DistributedRunner(store, transport, {defn.id: defn})
-    exe = runner.create(defn.id)  # Fork: two region children parked
+    exe = runner.create(defn.id)  # start_on_create=True (default)
+    _drain(runner.worker())  # Fork: two region children parked
+    exe = store.load(exe.id)
     child_ids = list(exe.children)
     assert len(child_ids) == 2
 
@@ -443,8 +449,9 @@ def test_worker_survives_a_store_conflict_and_reprocesses(tmp_path):
     transport = InMemoryTransport()
     defn = definition_from_dsl(FLAT, "M")
     runner = DistributedRunner(store, transport, {defn.id: defn})
-    exe = runner.create(defn.id)  # parked at B
+    exe = runner.create(defn.id)  # start_on_create=True (default)
     worker = runner.worker()
+    _drain(worker)  # parked at B
 
     store.arm()  # the next commit (the Go route) loses the CAS, once
     runner.send(exe.id, Event(kind="Go"))

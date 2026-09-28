@@ -57,7 +57,7 @@ def _await(predicate, timeout=60.0):
 
 def test_flat_machines_driven_by_the_worker_stack(stack):
     runner, store, defn = _runner("flat")
-    ids = [runner.create(defn.id).id for _ in range(8)]
+    ids = [runner.create(defn.id).id for _ in range(8)]  # start_on_create=True (default)
     for eid in ids:
         runner.send(eid, Event(kind="Go"))
 
@@ -70,9 +70,14 @@ def test_flat_machines_driven_by_the_worker_stack(stack):
 
 def test_orthogonal_fan_out_and_join_on_the_worker_stack(stack):
     runner, store, defn = _runner("ortho")
-    parents = [runner.create(defn.id) for _ in range(4)]
+    parents = [runner.create(defn.id) for _ in range(4)]  # start_on_create=True (default)
+    forked = _await(
+        lambda: all((e := store.load(p.id)) is not None and e.active_path == "Fork" for p in parents)
+    )
+    assert forked, "the worker stack did not fork the orthogonal machines in time"
+    parents = [store.load(p.id) for p in parents]
     for p in parents:
-        assert p.active_path == "Fork" and len(p.children) == 2
+        assert len(p.children) == 2
         runner.send(p.id, Event(kind="Go"))
 
     done = _await(
@@ -95,7 +100,11 @@ def test_cooperative_cancel_on_the_worker_stack(stack):
     # test_distributed_workers (workers start after the cancel). Here we just prove the
     # cooperative cancel runs the modelled cleanup end-to-end on the real stack.
     runner, store, defn = _runner("critical")
-    ids = [runner.create(defn.id).id for _ in range(4)]
+    ids = [runner.create(defn.id).id for _ in range(4)]  # start_on_create=True (default)
+    started = _await(
+        lambda: all((e := store.load(i)) is not None and e.active_path == "Working" for i in ids)
+    )
+    assert started, "the worker stack did not start the critical machines in time"
     for eid in ids:
         runner.cancel(eid)  # cooperative: CANCELLING + injected Cancel -> runs the cleanup
 
@@ -159,7 +168,10 @@ def test_unhandled_action_error_fails_not_crashes_on_the_worker_stack(stack):
 
 def test_suspend_then_resume_on_the_worker_stack(stack):
     runner, store, defn = _runner("flat")
-    eid = runner.create(defn.id).id  # parked at B
+    eid = runner.create(defn.id).id  # start_on_create=True (default)
+    started = _await(lambda: (e := store.load(eid)) is not None and e.active_path == "B")
+    assert started, "the worker stack did not start the machine in time"
+
     runner.suspend(eid)
     runner.send(eid, Event(kind="Go"))  # parked while suspended, not processed
 

@@ -64,7 +64,9 @@ def test_distributed_worker_survives_an_unhandled_error():
     defn = definition_from_dsl(BOOM, "M")
     runner = DistributedRunner(store, transport, {defn.id: defn})
     worker = runner.worker()
-    exe = runner.create(defn.id)  # at A
+    exe = runner.create(defn.id)  # start_on_create=True (default): Start already published
+    assert worker.step() is True  # processes Start, parks at A
+    assert store.load(exe.id).active_path == "A"
 
     runner.send(exe.id, Event(kind="Go"))  # -> Boom.on_enter raises
     assert worker.step() is True  # the worker handles it (acks), does NOT crash

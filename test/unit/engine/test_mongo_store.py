@@ -183,8 +183,7 @@ def test_pipeline_flat_pure_mongo(client):
     store = MongoStore(client)
     runner = DistributedRunner(store, MongoTransport(client), {defn.id: defn})
 
-    exe = runner.create(defn.id)
-    assert exe.active_path == "B"
+    exe = runner.create(defn.id)  # start_on_create=True (default)
     runner.send(exe.id, Event(kind="Go"))
     w = runner.worker()
     while w.step():
@@ -201,7 +200,11 @@ def test_pipeline_orthogonal_pure_mongo(client):
     store = MongoStore(client)
     runner = DistributedRunner(store, MongoTransport(client), {defn.id: defn})
 
-    exe = runner.create(defn.id)
+    exe = runner.create(defn.id)  # start_on_create=True (default)
+    w = runner.worker()
+    while w.step():
+        pass
+    exe = store.load(exe.id)
     assert exe.active_path == "Fork"
     child_ids = list(exe.children)
     runner.send(exe.id, Event(kind="Go"))

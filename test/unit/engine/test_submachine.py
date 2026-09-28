@@ -239,7 +239,7 @@ def _run_distributed(parent_ctx):
     runner = DistributedRunner(
         store, transport, {parent.id: parent}, resolver=DictResolver({"acme.child": child})
     )
-    exe = runner.create(parent.id, context=parent_ctx)
+    exe = runner.create(parent.id, context=parent_ctx)  # start_on_create=True (default)
     worker = runner.worker()
     while worker.step():
         pass

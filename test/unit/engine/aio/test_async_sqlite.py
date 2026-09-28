@@ -73,8 +73,7 @@ async def test_async_sqlite_distributed_pipeline():
     transport = await AsyncSqliteTransport.create(":memory:")
     runner = AsyncDistributedRunner(store, transport, {defn.id: defn})
 
-    exe = await runner.create(defn.id)
-    assert exe.active_path == "B"
+    exe = await runner.create(defn.id)  # start_on_create=True (default)
     await runner.send(exe.id, Event(kind="Go"))
     w = runner.worker()
     while await w.step():

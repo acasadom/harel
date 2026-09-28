@@ -136,7 +136,8 @@ def test_worker_sweeps_due_timers_and_machine_times_out():
     defn = definition_from_dsl(RETRY, "M")
     runner = DistributedRunner(store, transport, {defn.id: defn}, clock=lambda: clock[0])
     worker = runner.worker(clock=lambda: clock[0])
-    exe = runner.create(defn.id)  # at Trying, timer fires at 110
+    exe = runner.create(defn.id)  # start_on_create=True (default): Start already published
+    assert worker.step() is True  # processes Start: at Trying, timer fires at 110
 
     # nothing due, queue empty: a step does nothing
     assert worker.step() is False
