@@ -182,7 +182,11 @@ def _cmd_purge(args: argparse.Namespace) -> int:
     from harel.engine.execution import Status
     from harel.worker import build_store
 
-    store = build_store()
+    try:
+        store = build_store()
+    except ValueError as exc:  # a backend setting missing from the STM_STORE_* environment
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     try:
         report = purge_finished(
             store,
@@ -193,6 +197,9 @@ def _cmd_purge(args: argparse.Namespace) -> int:
             limit=args.limit,
             dry_run=args.dry_run,
         )
+    except OSError as exc:  # the archive file can't be written: nothing further was deleted
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     finally:
         store.close()
     verb = "would purge" if args.dry_run else "purged"

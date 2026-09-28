@@ -177,3 +177,39 @@ def test_cli_rejects_a_malformed_age(capsys):
     with pytest.raises(SystemExit):
         main(["purge", "--older-than", "soon"])
     assert "invalid age" in capsys.readouterr().err
+
+
+def test_an_archiver_error_stops_the_run_even_if_it_is_a_value_error(store):
+    # only purge's own refusals (PurgeRefused / StoreConflict) are recorded and skipped
+    _finished(store, "a", 100.0)
+    _finished(store, "b", 100.0)
+
+    def archive(bundle):
+        raise ValueError("archive rejected the bundle")
+
+    with pytest.raises(ValueError, match="archive rejected"):
+        purge_finished(store, older_than=1, archive=archive, now=1000.0)
+    assert store.load("a") is not None and store.load("b") is not None
+
+
+def test_cli_reports_a_missing_store_setting_cleanly(monkeypatch, capsys):
+    monkeypatch.setenv("STM_STORE_BACKEND", "sqlite")
+    monkeypatch.delenv("STM_STORE_DB", raising=False)
+
+    assert main(["purge", "--older-than", "1d"]) == 1
+    assert "STM_STORE_DB is required" in capsys.readouterr().err
+
+
+def test_cli_reports_an_unwritable_archive_cleanly(tmp_path, monkeypatch, capsys):
+    db = tmp_path / "stm.db"
+    store = SqliteStore(db)
+    _finished(store, "old", 100.0)
+    store.close()
+    monkeypatch.setenv("STM_STORE_BACKEND", "sqlite")
+    monkeypatch.setenv("STM_STORE_DB", str(db))
+
+    assert main(["purge", "--older-than", "1d", "--archive", str(tmp_path / "missing" / "a.jsonl")]) == 1
+    assert capsys.readouterr().err.startswith("error:")
+    store = SqliteStore(db)
+    assert store.load("old") is not None  # the archive failed first, so nothing was deleted
+    store.close()

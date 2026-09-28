@@ -258,7 +258,8 @@ archived: 1 tree
 again:    False
 ```
 
-- **Only finished trees.** Every member must be `DONE` or `CANCELLED`, else `ValueError`. A
+- **Only finished trees.** Every member must be `DONE` or `CANCELLED`, else `PurgeRefused` (a
+  `ValueError`). A
   `FAILED` dead letter is waiting for a `redrive`, so abandoning it is a deliberate step:
   `terminate()` it first (its `error` is kept, and archived with it).
 - **Only roots.** A region or `invoke` child belongs to its parent's join; purging the root
@@ -294,8 +295,9 @@ report.refused          # root id -> why purge refused it (a member still live, 
 ```
 
 `statuses` narrows the candidates to `DONE` or `CANCELLED`, `limit` caps one run, and `dry_run`
-reports without deleting. Candidates are collected before anything is deleted; a refused tree is
-reported and skipped, while an archiver error stops the run. Executions stored before
+reports without deleting. Candidates are collected before anything is deleted; a tree `purge`
+refuses (`PurgeRefused`, or a `StoreConflict` from a concurrent change) is reported and skipped,
+while any other error — an archiver's included — stops the run. Executions stored before
 `finished_at` existed have none, and are skipped unless `include_undated=True`. It reads
 candidates with `list_executions`, so it takes a sync store — the `harel purge` command
 ([CLI](cli.md)) wraps it over the store configured by the `STM_STORE_*` environment.

@@ -363,6 +363,23 @@ def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None:
 
 `close` calls `self._r.close()` on the injected client.
 
+## `purge`
+
+`purge(execution_id, expected_version)` uses the same WATCH/MULTI/EXEC as the slow-path commit:
+
+```text
+WATCH exe:{id}
+GET exe:{id}                          -- present at another version -> UNWATCH, return False
+ZRANGE timers / HGETALL outbox / HGETALL spawns   -- find this execution's members
+MULTI
+  DEL exe:{id} processed:{id} trace:{id} trace:seq:{id}
+  ZREM timers <its members>; HDEL outbox <entries targeting it>; HDEL spawns <entries it issued>
+EXEC                                  -- a concurrent write to exe:{id} aborts it -> return False
+```
+
+It returns True if the Execution was deleted. If no row exists under the id at all, the companion deletes still run (a no-op, or the leftovers of an earlier interrupted purge) and it returns False. The control plane's [purge](../control-plane.md#purge) calls it once per member of a finished tree. After a purge, both commit paths treat a missing key with `old != 0` as a conflict,
+so a stale copy can't recreate it.
+
 ## Async twin
 
 `AsyncRedisStore` ([`aio_store/redis.py`](https://github.com/acasadom/harel/blob/main/src/harel/engine/aio_store/redis.py)) is the

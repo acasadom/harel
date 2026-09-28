@@ -342,7 +342,7 @@ fetching `limit + 1` rows to know whether a next page exists:
 rows = self._conn.execute(
     "SELECT id, definition_id, version, json_extract(data,'$.status'), "
     "json_extract(data,'$.outcome'), json_extract(data,'$.active_path'), "
-    "json_extract(data,'$.parent_id') FROM executions "
+    "json_extract(data,'$.parent_id'), json_extract(data,'$.finished_at') FROM executions "
     f"WHERE {' AND '.join(where)} ORDER BY id LIMIT ? OFFSET ?",
     (*params, limit + 1, off),
 ).fetchall()
@@ -417,6 +417,25 @@ def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None:
 ```
 
 `close()` closes the underlying connection.
+
+## `purge`
+
+`purge(execution_id, expected_version)` is the same single transaction as `SqliteStore.purge`
+(shared SQL, `_PURGE_COMPANIONS_SQL`):
+
+```text
+DELETE FROM executions WHERE id = ? AND version = ?        -- the CAS
+-- 0 rows and the id still exists -> it moved on: roll back, return False
+DELETE FROM processed_events WHERE execution_id = ?
+DELETE FROM trace            WHERE execution_id = ?
+DELETE FROM timers           WHERE execution_id = ?
+DELETE FROM outbox           WHERE target_id    = ?
+DELETE FROM spawns           WHERE parent_id    = ?
+COMMIT
+```
+
+Any error rolls it back. It returns True if the Execution was deleted. If no row exists under the id at all, the companion deletes still run (a no-op, or the leftovers of an earlier interrupted purge) and it returns False. The control plane's [purge](../control-plane.md#purge) calls it once per member of a finished tree. The async twin runs it on a thread under its lock, like
+every other call.
 
 ## Async twin — `AsyncLibsqlStore`
 

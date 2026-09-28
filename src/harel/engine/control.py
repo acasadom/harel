@@ -298,11 +298,16 @@ def redrive(store: ExecutionStore, defn: Definition, execution_id: str, target_p
 _PURGEABLE = (Status.DONE, Status.CANCELLED)
 
 
+class PurgeRefused(ValueError):
+    """`purge` refused a tree: not a root, or a member not finished. A `ValueError`, so a
+    caller treating any refusal as a bad request still catches it."""
+
+
 def _check_purgeable(root: Execution, tree: list[Execution]) -> None:
     """Pure precondition for `purge` (shared with the async control plane): `root` is a
-    root, and every member of its tree is finished. Raises `ValueError`."""
+    root, and every member of its tree is finished. Raises `PurgeRefused`."""
     if root.parent_id is not None:
-        raise ValueError(
+        raise PurgeRefused(
             f"purge refused: {root.id!r} is a child of {root.parent_id!r} — purge its root, "
             f"which removes the whole tree"
         )
@@ -312,7 +317,7 @@ def _check_purgeable(root: Execution, tree: list[Execution]) -> None:
         hint = (
             " — terminate a dead letter to abandon it" if any(e.status is Status.FAILED for e in live) else ""
         )
-        raise ValueError(f"purge refused: not finished: {listed}{hint}")
+        raise PurgeRefused(f"purge refused: not finished: {listed}{hint}")
 
 
 def _archive_bundle(root: Execution, tree: list[Execution], traces: dict[str, list[dict]]) -> dict:
@@ -346,7 +351,7 @@ def purge(
     descendant, and everything the store keys by them (dedupe, trace, timers, pending
     outbox/spawns). Returns False if no such execution exists (already purged).
 
-    Refuses (`ValueError`) a child (purge its root), or a tree with any member not
+    Refuses (`PurgeRefused`, a `ValueError`) a child (purge its root), or a tree with any member not
     `DONE`/`CANCELLED` — a `FAILED` dead letter must be abandoned with `terminate()`
     first. `archive`, when given, receives the tree (see `_archive_bundle`) before
     anything is deleted, so a failing archiver aborts the purge; it may see the same
@@ -434,6 +439,6 @@ def purge_finished(
         try:
             if purge(store, root_id, archive=archive):
                 report.purged.append(root_id)
-        except (ValueError, StoreConflict) as exc:
+        except (PurgeRefused, StoreConflict) as exc:  # anything else, e.g. the archiver, stops the run
             report.refused[root_id] = str(exc)
     return report

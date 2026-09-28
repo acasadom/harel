@@ -38,10 +38,11 @@ carrying a list of statements that the leader applies atomically (`transaction=t
 That single constraint shapes the whole backend. Because `commit` cannot read the current
 version, branch in Python, and conditionally write, **every write in `commit` is made
 conditional inside the SQL itself**, all guarded on the same compare-and-swap (CAS) succeeding.
-The Execution upsert applies only `WHERE version = old`; every side-write (outbox, dedupe,
-timers, spawns, trace) runs only `WHERE EXISTS (… the executions row now holds our exact data)`.
-A version mismatch therefore makes the *entire* request a no-op, which the store detects by
-looking at the upsert's `rows_affected` and raises `StoreConflict`. There is no second
+The Execution write applies only if the CAS holds (an insert only for a brand-new Execution, an
+update only `WHERE version = old`); every side-write (outbox, dedupe, timers, spawns, trace) runs
+only `WHERE EXISTS (… the executions row now holds our exact data)`. A version mismatch therefore
+makes the *entire* request a no-op, which the store detects by looking at the first statement's
+`rows_affected` and raises `StoreConflict`. There is no second
 round-trip, no lock to hold, no read-then-write race.
 
 ## HTTP API helpers
@@ -133,7 +134,7 @@ CREATE TABLE IF NOT EXISTS trace (execution_id TEXT NOT NULL, idx INTEGER NOT NU
 
 | Table | Holds |
 | --- | --- |
-| `executions` | One row per Execution. `id` PK; `definition_id` broken out so `list_executions` can filter without parsing JSON; `data` is the **full** Execution as `exe.model_dump_json()` (status, outcome, error, active_path, history, context, children join counter, parent/child id, invoke_seq, definition_fqn, version) — opaque except for `json_extract` in the summary projection; `version` is the broken-out optimistic-concurrency token used by the CAS (a cheap indexed scalar, not parsed from JSON). |
+| `executions` | One row per Execution. `id` PK; `definition_id` broken out so `list_executions` can filter without parsing JSON; `data` is the **full** Execution as `exe.model_dump_json()` (status, outcome, error, active_path, history, context, children join counter, parent/child id, invoke_seq, definition_fqn, created/updated/finished timestamps, version) — opaque except for `json_extract` in the summary projection; `version` is the broken-out optimistic-concurrency token used by the CAS (a cheap indexed scalar, not parsed from JSON). |
 | `outbox` | The transactional event outbox: deferred events awaiting delivery. `seq` is a monotonic autoincrement ack token; `target_id` is the Execution to deliver to (NULL = no target); `event` is the serialized `Event`. Drained by `pending_outbox`/`ack_outbox`. |
 | `processed_events` | The dedupe ledger: `(execution_id, event_id)` PK marks an event already handled, so at-least-once delivery takes effect exactly once. |
 | `timers` | Durable timers, keyed by `(execution_id, path)` PK so re-entry replaces. `fire_at` is the absolute due time (epoch seconds). Swept by `due_timers`. |
@@ -143,7 +144,7 @@ CREATE TABLE IF NOT EXISTS trace (execution_id TEXT NOT NULL, idx INTEGER NOT NU
 `data` is the source of truth; `definition_id` and `version` are denormalized out of it purely so
 the hot paths (CAS, listing) never parse JSON.
 
-## The guarded-upsert `commit` — the crux
+## The guarded `commit` — the crux
 
 `commit` is where the no-interactive-transaction constraint is paid off. It builds one
 `statements` list and ships it as a single transactional request. It cannot read the current
@@ -159,22 +160,27 @@ new = exe.version
 data = exe.model_dump_json()
 ```
 
-### (a) The Execution upsert — the CAS
+### (a) The Execution write — the CAS
 
-The first statement is the compare-and-swap. It inserts the row if absent, or updates it only if
-the stored version still matches `old`:
+The first statement is the compare-and-swap, and which one it is depends on `old`. A brand-new
+Execution (`old == 0`) is inserted only if the id is free:
 
 ```text
-INSERT INTO executions (id, definition_id, data, version) VALUES (?, ?, ?, ?)
-ON CONFLICT(id) DO UPDATE SET data = excluded.data, version = excluded.version
-WHERE executions.version = ?
+INSERT OR IGNORE INTO executions (id, definition_id, data, version) VALUES (?, ?, ?, ?)
 ```
 
-with params `(exe.id, exe.definition_id, data, new, old)` — the four insert values plus `old` for
-the `WHERE`. On a first save the row is absent and the plain `INSERT` succeeds. On an update,
-`ON CONFLICT(id)` fires and the `DO UPDATE … WHERE executions.version = old` clause only writes if
-nobody else has advanced the row past `old`. If another writer already moved the version, the
-`WHERE` matches nothing, the update is skipped, and **`rows_affected` is 0** — the CAS lost.
+with params `(exe.id, exe.definition_id, data, new)`. Any other version is updated only if the
+stored row is still at `old`:
+
+```text
+UPDATE executions SET data = ?, version = ? WHERE id = ? AND version = ?
+```
+
+with params `(data, new, exe.id, old)`. Either way, if another writer got there first (the id is
+taken, or the row moved past `old`), the statement matches nothing and **`rows_affected` is 0** —
+the CAS lost. An existing Execution is never inserted: if its row is gone (it was
+[purged](../control-plane.md#purge)), a commit of a stale copy is a conflict rather than silently
+recreating it.
 
 ### (b) Each side-write — guarded on the row holding *our exact data*
 
@@ -191,11 +197,11 @@ guards on**: not `version = new`, but `data = <our exact serialized data>`. Here
 matters.
 
 If we guarded on `version = new`, consider two concurrent writers both loaded at `old`. Writer A
-wins the CAS and stores its state at version `new`. Writer B's upsert loses (its `WHERE
+wins the CAS and stores its state at version `new`. Writer B's CAS write loses (its `WHERE
 version = old` no longer matches, A already moved it). But B's outbox `INSERT … WHERE EXISTS(…
 version = new)` would *still find a row at version `new`* — A's row — and B's outbox event would
 **leak**, even though B's state change never landed. Guarding on `data = <B's exact data>` closes
-this: that EXISTS is true **iff B's own upsert won the CAS and wrote B's bytes**. A concurrent
+this: that EXISTS is true **iff B's own write won the CAS and wrote B's bytes**. A concurrent
 writer reaching the same version with *different* state can't satisfy it, so B's side-writes are
 correctly suppressed.
 
@@ -225,8 +231,8 @@ if results[0].get("rows_affected", 0) == 0:
 ```
 
 The whole list goes in `transaction=True`, so it is atomic — and because every statement is
-guarded on the same condition, a CAS miss makes *all* of them no-ops, not just the upsert. The
-store then inspects `results[0]` (the upsert): if its `rows_affected` is 0 the CAS lost, so it
+guarded on the same condition, a CAS miss makes *all* of them no-ops, not just the CAS write. The
+store then inspects `results[0]` (the CAS write): if its `rows_affected` is 0 the CAS lost, so it
 rolls the in-memory version back to `old` (nothing was persisted) and raises `StoreConflict`,
 querying the stored version for the error's `found`. On success `exe.version` is already `new`.
 
@@ -313,7 +319,7 @@ JSON blob:
 ```text
 SELECT id, definition_id, version, json_extract(data,'$.status'),
   json_extract(data,'$.outcome'), json_extract(data,'$.active_path'),
-  json_extract(data,'$.parent_id') FROM executions
+  json_extract(data,'$.parent_id'), json_extract(data,'$.finished_at') FROM executions
 WHERE <filters> ORDER BY id LIMIT ? OFFSET ?
 ```
 
@@ -360,10 +366,27 @@ DELETE FROM timers WHERE execution_id = ? AND path = ? AND fire_at = ?
 `ack_outbox`, `ack_spawn`, and `delete_timer` are unguarded standalone `_execute` deletes (they
 are idempotent removes, not CAS writes). `close` closes the `requests.Session`.
 
+## `purge`
+
+rqlite has no interactive transaction, so `purge` is one transactional request whose companion
+deletes are **guarded on the Execution now being absent** — the same trick as `commit`'s guarded
+side-writes:
+
+```text
+DELETE FROM executions WHERE id = ? AND version = ?                              -- the CAS
+DELETE FROM processed_events WHERE execution_id = ? AND NOT EXISTS (SELECT 1 FROM executions WHERE id = ?)
+... likewise trace / timers (execution_id), outbox (target_id), spawns (parent_id)
+```
+
+If the version doesn't match, the row is still there, so every guarded delete is a no-op and the
+whole request changes nothing. The result is `results[0].rows_affected == 1`. It returns True if the Execution was deleted. If no row exists under the id at all, the companion deletes still run (a no-op, or the leftovers of an earlier interrupted purge) and it returns False. The control plane's [purge](../control-plane.md#purge) calls it once per member of a finished tree.
+A stale copy's later commit can't recreate it: an existing Execution is only ever `UPDATE`d
+(see (a) above).
+
 ## Async twin
 
 `harel/engine/aio_store/rqlite.py` is `AsyncRqliteStore`, the exact mirror over
-`httpx.AsyncClient`. The SQL, the schema, the guarded-upsert CAS, the `data`-guarded side-writes,
+`httpx.AsyncClient`. The SQL, the schema, the guarded CAS, the `data`-guarded side-writes,
 the trace ring, and the `level=strong` reads are **identical** — only the transport differs:
 every `_execute`/`_query` is an `async def` that `await`s the `httpx` POST, and every store method
 is `async`.
@@ -391,7 +414,7 @@ operating a Postgres server**. A small rqlite cluster (3 or 5 nodes) gives you:
 The cost is that it is correspondingly the **slowest** store. Each write pays consensus latency (a
 network round-trip to a quorum) **plus** an HTTP round-trip from the store **plus** an fsync per
 node; each read pays a leader round-trip for its linearizability check. And because the
-no-interactive-transaction constraint forces the guarded-upsert pattern, every `commit` is a
+no-interactive-transaction constraint forces the guarded-write pattern, every `commit` is a
 single (if larger) request — which is fine, but it means all the CAS cleverness lives in SQL
 rather than in a held transaction.
 
