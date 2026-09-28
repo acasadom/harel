@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, Optional
 
@@ -14,13 +15,29 @@ from harel.spec.states import Event
 class AsyncSqliteStore:
     """Async mirror of `SqliteStore` over `aiosqlite`: each Execution stored as JSON keyed
     by id, version-CAS via UPDATE-WHERE-version, the whole `commit` one atomic transaction.
-    aiosqlite serializes a connection's ops on its own worker thread, so the multi-statement
-    commit stays atomic. Build with `await AsyncSqliteStore.create(path)` (the connection must
-    be awaited open); `:memory:` is a non-persistent variant for tests."""
+
+    A SQLite transaction belongs to the connection, not to the coroutine: aiosqlite runs one
+    statement at a time, but statements from concurrent coroutines on the same connection
+    would otherwise interleave inside one another's transactions. `_lock` makes each method
+    (a whole transaction, or a read that must not observe another's uncommitted writes)
+    exclusive on the connection. A failed write is always rolled back, so the connection
+    never keeps holding the database's write lock. Build with
+    `await AsyncSqliteStore.create(path)` (the connection must be awaited open); `:memory:`
+    is a non-persistent variant for tests."""
 
     def __init__(self, conn: Any) -> None:
         self._conn = conn
+        self._lock = asyncio.Lock()
         self.trace_max = DEFAULT_TRACE_MAX
+
+    async def _execute_and_commit(self, sql: str, params: tuple) -> None:
+        async with self._lock:
+            try:
+                await self._conn.execute(sql, params)
+                await self._conn.commit()
+            except BaseException:
+                await self._conn.rollback()
+                raise
 
     @classmethod
     async def create(cls, path: str = ":memory:") -> "AsyncSqliteStore":
@@ -76,31 +93,39 @@ class AsyncSqliteStore:
             )
 
     async def append_trace(self, execution_id: str, entry: dict) -> None:
-        await self._write_trace(execution_id, entry)
-        await self._conn.commit()
+        async with self._lock:
+            try:
+                await self._write_trace(execution_id, entry)
+                await self._conn.commit()
+            except BaseException:
+                await self._conn.rollback()
+                raise
+
+    async def _fetchall(self, sql: str, params: tuple = ()) -> list:
+        async with self._lock:
+            cur = await self._conn.execute(sql, params)
+            return list(await cur.fetchall())
 
     async def read_trace(self, execution_id: str) -> list[dict]:
-        cur = await self._conn.execute(
+        rows = await self._fetchall(
             "SELECT idx, entry FROM trace WHERE execution_id = ? ORDER BY idx", (execution_id,)
         )
-        return [{**json.loads(entry), "index": idx} for idx, entry in await cur.fetchall()]
+        return [{**json.loads(entry), "index": idx} for idx, entry in rows]
 
     async def load(self, execution_id: str) -> Optional[Execution]:
-        cur = await self._conn.execute("SELECT data FROM executions WHERE id = ?", (execution_id,))
-        row = await cur.fetchone()
-        return Execution.model_validate_json(row[0]) if row is not None else None
+        rows = await self._fetchall("SELECT data FROM executions WHERE id = ?", (execution_id,))
+        return Execution.model_validate_json(rows[0][0]) if rows else None
 
     async def load_for_event(self, execution_id: str, event_id: str) -> tuple[Optional[Execution], bool]:
         """Load + dedupe-check in one round-trip (the worker's per-event pair)."""
-        cur = await self._conn.execute(
+        rows = await self._fetchall(
             "SELECT (SELECT data FROM executions WHERE id = ?), "
             "EXISTS(SELECT 1 FROM processed_events WHERE execution_id = ? AND event_id = ?)",
             (execution_id, execution_id, event_id),
         )
-        row = await cur.fetchone()
-        if row is None or row[0] is None:
+        if not rows or rows[0][0] is None:
             return None, False
-        return Execution.model_validate_json(row[0]), bool(row[1])
+        return Execution.model_validate_json(rows[0][0]), bool(rows[0][1])
 
     async def _write(self, exe: Execution) -> None:
         """CAS write WITHOUT committing (so it batches atomically with the outbox inserts)."""
@@ -124,12 +149,15 @@ class AsyncSqliteStore:
                 raise StoreConflict(exe.id, expected=old, found=found[0] if found else None)
 
     async def save(self, exe: Execution) -> None:
-        try:
-            await self._write(exe)
-            await self._conn.commit()
-        except StoreConflict:
-            await self._conn.rollback()
-            raise
+        async with self._lock:
+            old = exe.version
+            try:
+                await self._write(exe)
+                await self._conn.commit()
+            except BaseException:
+                await self._conn.rollback()
+                exe.version = old
+                raise
 
     async def commit(
         self,
@@ -140,80 +168,79 @@ class AsyncSqliteStore:
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,
     ) -> None:
-        try:
-            await self._write(exe)
-            for target_id, event in emits:
-                await self._conn.execute(
-                    "INSERT INTO outbox (target_id, event) VALUES (?, ?)",
-                    (target_id, event.model_dump_json()),
-                )
-            if processed_event_id is not None:
-                await self._conn.execute(
-                    "INSERT OR IGNORE INTO processed_events (execution_id, event_id) VALUES (?, ?)",
-                    (exe.id, processed_event_id),
-                )
-            for child_id, root_path, context in spawns:
-                await self._conn.execute(
-                    "INSERT INTO spawns (parent_id, child_id, root_path, context) VALUES (?, ?, ?, ?)",
-                    (exe.id, child_id, root_path, json.dumps(context)),
-                )
-            for op in timers:
-                if op.action == "schedule":
+        async with self._lock:
+            old = exe.version
+            try:
+                await self._write(exe)
+                for target_id, event in emits:
                     await self._conn.execute(
-                        "INSERT INTO timers (execution_id, path, fire_at) VALUES (?, ?, ?) "
-                        "ON CONFLICT(execution_id, path) DO UPDATE SET fire_at = excluded.fire_at",
-                        (exe.id, op.path, op.fire_at),
+                        "INSERT INTO outbox (target_id, event) VALUES (?, ?)",
+                        (target_id, event.model_dump_json()),
                     )
-                else:
+                if processed_event_id is not None:
                     await self._conn.execute(
-                        "DELETE FROM timers WHERE execution_id = ? AND path = ?", (exe.id, op.path)
+                        "INSERT OR IGNORE INTO processed_events (execution_id, event_id) VALUES (?, ?)",
+                        (exe.id, processed_event_id),
                     )
-            if trace is not None:
-                await self._write_trace(exe.id, trace)
-            await self._conn.commit()
-        except StoreConflict:
-            await self._conn.rollback()
-            raise
+                for child_id, root_path, context in spawns:
+                    await self._conn.execute(
+                        "INSERT INTO spawns (parent_id, child_id, root_path, context) VALUES (?, ?, ?, ?)",
+                        (exe.id, child_id, root_path, json.dumps(context)),
+                    )
+                for op in timers:
+                    if op.action == "schedule":
+                        await self._conn.execute(
+                            "INSERT INTO timers (execution_id, path, fire_at) VALUES (?, ?, ?) "
+                            "ON CONFLICT(execution_id, path) DO UPDATE SET fire_at = excluded.fire_at",
+                            (exe.id, op.path, op.fire_at),
+                        )
+                    else:
+                        await self._conn.execute(
+                            "DELETE FROM timers WHERE execution_id = ? AND path = ?", (exe.id, op.path)
+                        )
+                if trace is not None:
+                    await self._write_trace(exe.id, trace)
+                await self._conn.commit()
+            except BaseException:
+                await self._conn.rollback()
+                exe.version = old
+                raise
 
     async def is_processed(self, execution_id: str, event_id: str) -> bool:
-        cur = await self._conn.execute(
+        rows = await self._fetchall(
             "SELECT 1 FROM processed_events WHERE execution_id = ? AND event_id = ?",
             (execution_id, event_id),
         )
-        return (await cur.fetchone()) is not None
+        return bool(rows)
 
     async def pending_outbox(self) -> list[OutboxEntry]:
-        cur = await self._conn.execute("SELECT seq, target_id, event FROM outbox ORDER BY seq")
-        rows = await cur.fetchall()
+        rows = await self._fetchall("SELECT seq, target_id, event FROM outbox ORDER BY seq")
         return [OutboxEntry(seq, tid, Event.model_validate_json(ev)) for seq, tid, ev in rows]
 
     async def ack_outbox(self, seq: int) -> None:
-        await self._conn.execute("DELETE FROM outbox WHERE seq = ?", (seq,))
-        await self._conn.commit()
+        await self._execute_and_commit("DELETE FROM outbox WHERE seq = ?", (seq,))
 
     async def pending_spawns(self) -> list[SpawnEntry]:
-        cur = await self._conn.execute(
+        rows = await self._fetchall(
             "SELECT seq, parent_id, child_id, root_path, context FROM spawns ORDER BY seq"
         )
-        rows = await cur.fetchall()
         return [SpawnEntry(seq, pid, cid, rp, json.loads(ctx)) for seq, pid, cid, rp, ctx in rows]
 
     async def ack_spawn(self, seq: int) -> None:
-        await self._conn.execute("DELETE FROM spawns WHERE seq = ?", (seq,))
-        await self._conn.commit()
+        await self._execute_and_commit("DELETE FROM spawns WHERE seq = ?", (seq,))
 
     async def due_timers(self, now: float) -> list[tuple[str, str, float]]:
-        cur = await self._conn.execute(
+        rows = await self._fetchall(
             "SELECT execution_id, path, fire_at FROM timers WHERE fire_at <= ? ORDER BY fire_at", (now,)
         )
-        return [(eid, path, fa) for eid, path, fa in await cur.fetchall()]
+        return [(eid, path, fa) for eid, path, fa in rows]
 
     async def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None:
-        await self._conn.execute(
+        await self._execute_and_commit(
             "DELETE FROM timers WHERE execution_id = ? AND path = ? AND fire_at = ?",
             (execution_id, path, fire_at),
         )
-        await self._conn.commit()
 
     async def close(self) -> None:
-        await self._conn.close()
+        async with self._lock:
+            await self._conn.close()
