@@ -143,9 +143,10 @@ for a domain "cancel".)
 
 `Cancel` in particular is the control plane's own teardown signal (see
 [control plane](control-plane)), not a business event: `harel validate` rejects an `on Cancel`
-transition whose target is not itself a terminal state. The cooperative `cancel()` path always
-resolves in the same step the injected `Cancel` is processed — it never leaves the execution
-parked mid-cleanup. A model whose own cancellation needs more than that (release a lock now, wait
+transition whose target is not itself a terminal state, and `cancel()` checks the same thing
+itself at the moment it decides cooperative-vs-forceful, so an unvalidated Definition is not
+silently exposed to it either. The cooperative `cancel()` path always resolves in the same step
+the injected `Cancel` is processed — it never leaves the execution parked mid-cleanup. A model whose own cancellation needs more than that (release a lock now, wait
 for a refund confirmation later, ...) is modelling business cancellation, and belongs on its own
 event name (`CancelOrder`), handled with ordinary transitions, free to take as many steps as it
 needs — with no relation to `cancel()` at all.

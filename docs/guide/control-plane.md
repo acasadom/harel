@@ -50,9 +50,12 @@ everything else.
 
 `Cancel` is the control plane's own teardown signal, not a business event — `harel validate`
 rejects an `on Cancel` transition whose target is not itself a terminal state (`Stopped` above is
-a `final`, so it qualifies). This guarantees the cooperative path always finishes in the very same
-step the injected `Cancel` is processed: the execution never sits parked mid-cleanup, waiting on
-some further event, indistinguishable from an ordinary `RUNNING` execution — which is exactly the
+a `final`, so it qualifies). `cancel()` also checks this itself at the moment it decides
+cooperative-vs-forceful, so an unvalidated Definition gets the same guarantee, not just a
+recommendation: a non-terminal target is treated as no handler at all (forceful terminate)
+instead of being taken. Either way, the cooperative path always finishes in the very same step
+the injected `Cancel` is processed: the execution never sits parked mid-cleanup, waiting on some
+further event, indistinguishable from an ordinary `RUNNING` execution — which is exactly the
 state a second `cancel()` call could otherwise misinterpret.
 
 A model whose own cancellation needs more than a bounded, immediate cleanup — release a lock now,

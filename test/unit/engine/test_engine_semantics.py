@@ -184,6 +184,56 @@ machine M {
 }
 """
 
+# `on Cancel` must resolve directly to a terminal (a validator rule — see
+# `definition.validate`'s `cancel_target_not_terminal`); this Definition violates
+# it (Releasing has its own outgoing transition) and is never validated, to
+# exercise has_cancel_handler's own runtime check of that same invariant.
+CANCEL_NON_TERMINAL_TARGET = """
+machine M {
+  initial Working
+  state Working { on enter stm_actions.we }
+  state Releasing { on enter stm_actions.ae }
+  state Done { on enter stm_actions.ae }
+  from Working to Releasing on Cancel
+  from Releasing to Done on Refunded
+}
+"""
+
+# a leaf with no outgoing transition of its own is a sink; a COMPOSITE never is
+# (the machine would descend into it, not park there), regardless of whether ITS
+# own children eventually reach a sink.
+CANCEL_COMPOSITE_TARGET = """
+machine M {
+  initial Working
+  state Working { on enter stm_actions.we }
+  state Releasing {
+    initial Cleanup
+    state Cleanup { on enter stm_actions.ae }
+    state Done2 {}
+    from Cleanup to Done2 on Refunded
+  }
+  from Working to Releasing on Cancel
+}
+"""
+
+# a selector-based Cancel where one branch is safe (a terminal) and the other
+# isn't — has_cancel_handler can't run the selector action (pure, no IO), so it
+# must check every branch statically and refuse if ANY of them is unsafe.
+CANCEL_SELECTOR_UNSAFE_BRANCH = """
+machine M {
+  initial Working
+  state Working { on enter stm_actions.we }
+  final Safe cancelled { on enter stm_actions.ae }
+  state Unsafe { on enter stm_actions.ae }
+  state Elsewhere {}
+  from Working select stm_actions.pick on Cancel {
+    true to Safe
+    false to Unsafe
+  }
+  from Unsafe to Elsewhere on Go
+}
+"""
+
 
 def test_cancel_with_a_transition_runs_the_modelled_cleanup():
     # a state that models on:Cancel takes that transition (not a forceful terminate);
@@ -231,3 +281,123 @@ def test_has_cancel_handler_honours_a_guard_like_has_error_handler():
     assert (
         engine.has_cancel_handler(defn, exe, Event(kind="Cancel", data={"reason": "something_else"})) is False
     )
+
+
+def test_has_cancel_handler_refuses_a_non_terminal_target_even_when_unvalidated():
+    # a validated Definition can never have this shape (see CANCEL_NON_TERMINAL_
+    # TARGET's docstring), but has_cancel_handler must not rely on validate()
+    # having run: an unvalidated model with a non-terminal Cancel target must
+    # still be treated as "no handler" here, closing the same window a second
+    # cancel() could otherwise exploit mid-cleanup.
+    from harel import engine
+    from harel.engine.execution import Execution
+
+    defn = definition_from_dsl(CANCEL_NON_TERMINAL_TARGET, "M")  # validate=False (default)
+    exe = Execution(definition_id=defn.id)
+    _Runner(defn).start(exe)  # parked at Working
+    assert engine.has_cancel_handler(defn, exe, Event(kind="Cancel")) is False
+
+
+# an orthogonal region's own Cancel transition targeting a leaf OUTSIDE its own
+# branch (region B's own root is "Fork.B"; A1 lives under "Fork.A") — resolvable
+# in the shared Definition, but never a place region B's own Execution could
+# actually reach.
+CANCEL_OUTSIDE_OWN_BRANCH = """
+event GoA {}
+event GoB {}
+machine M {
+  initial Fork
+  orthogonal Fork {
+    state A {
+      initial A1
+      state A1 {}
+      final A2 success {}
+      from A1 to A2 on GoA
+    }
+    state B {
+      initial B1
+      state B1 {}
+      final B2 success {}
+      from B1 to B2 on GoB
+    }
+  }
+  final Done success {}
+  from Fork to Done
+}
+"""
+
+
+def test_has_cancel_handler_refuses_a_target_outside_this_executions_own_branch():
+    # a region's own Cancel target resolves fine in the shared Definition (it
+    # isn't scoped per-Execution) but a target outside that region's own branch
+    # isn't a descendant of its root_path — resolving it the way an ordinary,
+    # in-branch target is resolved would otherwise raise inside chain(), deep in
+    # a helper with no error handling around it (has_cancel_handler is called
+    # directly from control.cancel(), not from inside the effect pipeline that
+    # catches action errors).
+    from harel.engine import core
+
+    defn = definition_from_dsl(CANCEL_OUTSIDE_OWN_BRANCH, "M")
+    exe = Execution(definition_id=defn.id, root_path="Fork.B", active_path="Fork.B.B1")
+    target = defn.index["Fork.A.A1"]  # outside "Fork.B"'s own branch
+
+    assert core._would_be_a_sink(defn, exe, target) is False
+    assert exe.active_path == "Fork.B.B1"  # never mutated to check, not even transiently
+
+
+def test_cancel_with_a_non_terminal_target_forcefully_terminates_instead():
+    # end-to-end via the control plane (not a raw injected event, which bypasses
+    # has_cancel_handler entirely and would still take the transition — see
+    # test_has_cancel_handler_refuses_a_non_terminal_target_even_when_unvalidated
+    # above): control.cancel() must fall back to forceful termination rather than
+    # taking the model's on Cancel transition into a non-terminal state.
+    from harel.engine.durable import DurableRunner
+    from harel.engine.execution import Status
+    from harel.engine.store import DictStore
+
+    defn = definition_from_dsl(CANCEL_NON_TERMINAL_TARGET, "M")
+    runner = DurableRunner(DictStore(), {defn.id: defn})
+    exe = runner.create(defn.id)  # parked at Working
+
+    final = runner.cancel(exe.id)
+
+    assert final.context["trace"] == ["we"]  # Releasing's on_enter never ran
+    assert final.active_path == "Working"
+    assert final.status == Status.CANCELLED
+
+
+def test_cancel_with_a_composite_target_forcefully_terminates_instead():
+    # a composite is never a sink regardless of what its own children eventually
+    # reach — the machine would descend into it (or fork/invoke), not park there.
+    from harel.engine.durable import DurableRunner
+    from harel.engine.execution import Status
+    from harel.engine.store import DictStore
+
+    defn = definition_from_dsl(CANCEL_COMPOSITE_TARGET, "M")
+    runner = DurableRunner(DictStore(), {defn.id: defn})
+    exe = runner.create(defn.id)  # parked at Working
+
+    final = runner.cancel(exe.id)
+
+    assert final.context["trace"] == ["we"]  # Releasing was never entered
+    assert final.active_path == "Working"
+    assert final.status == Status.CANCELLED
+
+
+def test_cancel_with_an_unsafe_selector_branch_forcefully_terminates_instead():
+    # has_cancel_handler can't run the selector action (pure, no IO), so it must
+    # refuse the whole transition if ANY branch is unsafe — regardless of which
+    # branch this particular run would actually pick (here: the SAFE one, "true").
+    from harel.engine.durable import DurableRunner
+    from harel.engine.execution import Status
+    from harel.engine.store import DictStore
+
+    defn = definition_from_dsl(CANCEL_SELECTOR_UNSAFE_BRANCH, "M")
+    runner = DurableRunner(DictStore(), {defn.id: defn})
+    exe = runner.create(defn.id, context={"pick": True})  # would route to the SAFE branch
+
+    final = runner.cancel(exe.id)
+
+    assert final.context["trace"] == ["we"]  # the selector never even ran
+    assert final.active_path == "Working"
+    assert final.status == Status.CANCELLED
