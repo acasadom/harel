@@ -307,3 +307,46 @@ def test_inner_timeout_bubbles_up_to_an_enclosing_handler():
     final = store.load(exe.id)
     assert final.active_path == "Failed"  # caught by `from C to Failed on Timeout`
     assert final.status is Status.DONE
+
+
+FORK_WITH_TIMEOUT = """
+event Go {}
+machine M {
+   initial Fork
+   orthogonal Fork {
+      timeout 10
+      state A { initial A1  state A1 {}  final A2 success {}  from A1 to A2 on Go }
+      state B { initial B1  state B1 {}  final B2 success {}  from B1 to B2 on Go }
+   }
+   final Elsewhere cancelled {}
+   final Done success {}
+   from Fork to Done
+   from Fork to Elsewhere on Timeout
+}
+"""
+
+
+def test_a_forks_own_timeout_reaches_the_fork_not_its_live_regions():
+    # the Timeout is addressed to the Execution whose state armed the timer; a domain
+    # event is broadcast to the live regions, but a Timeout must not be — else the
+    # fork's budget never fires on the worker path
+    clock = [1000.0]
+    store = DictStore()
+    defn = definition_from_dsl(FORK_WITH_TIMEOUT, "M", validate=True)
+    runner = DistributedRunner(
+        store, InMemoryTransport(clock=lambda: clock[0]), {defn.id: defn}, clock=lambda: clock[0]
+    )
+    exe = runner.create(defn.id)
+    worker = runner.worker()
+    while worker.step():
+        pass
+    assert store.load(exe.id).active_path == "Fork"
+
+    clock[0] += 20
+    worker.fire_due_timers()
+    while worker.step():
+        pass
+
+    final = store.load(exe.id)
+    assert final.status is Status.DONE
+    assert final.active_path == "Elsewhere"

@@ -258,7 +258,9 @@ sequenceDiagram
 ```
 
 Regions share the parent's event stream (a domain event is broadcast to all live regions — UML
-semantics). In the headless host (`inject`) the delivery to each live region runs
+semantics). Engine events are not: lifecycle events, a region's `Finished`, and a `Timeout` —
+addressed to the Execution whose state armed the timer, so a fork's own `timeout` fires on the
+fork — go to the parent itself. In the headless host (`inject`) the delivery to each live region runs
 **concurrently** via `asyncio.gather`, so a broadcast that triggers async actions in multiple
 regions (LLM calls, HTTP requests…) overlaps them on the event loop rather than serialising
 them. Data-parallel work (N independent workers) is **not** an orthogonal state but a fan-out

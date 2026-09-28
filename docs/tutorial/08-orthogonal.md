@@ -104,7 +104,7 @@ Three things happen here:
 - **Fork.** Entering `Verifying` starts both regions at once. Under the hood each region runs
   as its own child execution over the same definition — which is exactly what makes them
   durable and, later, distributable.
-- **Broadcast.** Every event is delivered to *all* regions (Harel semantics). `FraudCleared`
+- **Broadcast.** Every domain event is delivered to *all* regions (Harel semantics). `FraudCleared`
   reaches both; `Fraud` has a transition for it and advances to `Cleared`, while `Stock`
   ignores it. The parent stays parked on `Verifying` the whole time.
 - **Join.** The parent only leaves `Verifying` once **every** region has finished. After
