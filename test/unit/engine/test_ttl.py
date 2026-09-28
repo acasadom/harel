@@ -76,10 +76,11 @@ def test_ttl_is_a_machine_level_declaration():
     assert definition_from_dsl(LISTENER, "M").ttl == 60
     with pytest.raises(DslError, match="only allowed at the machine level, not on state A"):
         definition_from_dsl("machine M {\n  initial A\n  state A { ttl 5 }\n}", "M")
-    with pytest.raises(DslError, match="inline `invoke` target"):
+    with pytest.raises(DslError, match="inline `invoke` target") as err:
         definition_from_dsl(
             "machine M {\n  initial A\n  state A { invoke { ttl 5  initial X  state X {} } }\n}", "M"
         )
+    assert err.value.line == 3
 
 
 def test_validator_rules_for_ttl_and_expired():
@@ -226,7 +227,8 @@ def test_a_forceful_expiry_cancels_the_live_regions():
 
 
 def test_an_invoked_machines_ttl_does_not_apply_as_a_child():
-    child = definition_from_dsl(LISTENER, "M")
+    child = definition_from_dsl(LISTENER.replace("machine M", "machine Child"), "Child")
+    assert child.ttl == 60
     parent = definition_from_dsl(
         """
         machine P {
@@ -238,12 +240,9 @@ def test_an_invoked_machines_ttl_does_not_apply_as_a_child():
         """,
         "P",
     )
-    child_defn = type(child)(
-        id="Child", root=child.root, index=child.index, events=child.events, ttl=child.ttl
-    )
     clock = [0.0]
     store = DictStore()
-    runner = DurableRunner(store, {parent.id: parent, "Child": child_defn}, clock=lambda: clock[0])
+    runner = DurableRunner(store, {parent.id: parent, child.id: child}, clock=lambda: clock[0])
     exe = runner.create(parent.id)
     (cid,) = store.load(exe.id).children
     assert store.load(cid).expires_at is None

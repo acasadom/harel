@@ -333,11 +333,12 @@ class _ToProgram(Transformer):
     def invoke_for(self, var, coll):
         return (str(var), str(coll))
 
-    def inline_machine(self, *items):
+    @v_args(inline=True, meta=True)
+    def inline_machine(self, meta, *items):
         # an inline submachine body -> a machine config dict (built as its own
         # Definition with a synthetic FQN by the builder)
         cfg = self._assemble(items)
-        _refuse_ttl(cfg, "an inline `invoke` target, which always runs as a child")
+        _refuse_ttl(cfg, "an inline `invoke` target, which always runs as a child", meta)
         return cfg
 
     def invoke(self, *children):
