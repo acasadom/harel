@@ -14,6 +14,8 @@ The key behaviours:
   further event) is business cancellation and uses its own event name instead
   (e.g. `CancelOrder`), unrelated to the control plane — see
   `test_business_cancellation_is_an_ordinary_event_not_the_control_plane` below.
+- A `cancel` of a dead-lettered (FAILED) execution is always forceful: the model's
+  cleanup never runs from a dead-lettered position.
 - `suspend` parks the backlog (FIFO preserved, no worker spin); `resume` continues.
 - `redrive` forces a dead-lettered (FAILED) execution back to RUNNING at a caller-
   chosen leaf; it's a plain CAS write, like `resume` — it does not drain, the next
@@ -111,6 +113,20 @@ machine M {
    state C { on enter stm_actions.rec(at: "C.enter") }
    from A to B on Go
    from B to C on Advance
+}
+"""
+
+# Working's `on enter` always raises -> dead-letters at Working, a state that
+# does model a cooperative `on Cancel` straight to a terminal.
+DEAD_LETTER_WITH_CANCEL_HANDLER = """
+event Go {}
+machine M {
+   initial Waiting
+   state Waiting {}
+   state Working { on enter stm_actions.boom }
+   final Released cancelled { on enter stm_actions.rec(at: "released") }
+   from Waiting to Working on Go
+   from Working to Released on Cancel
 }
 """
 
@@ -329,6 +345,98 @@ def test_overlapping_cancel_calls_before_any_drain_still_end_up_done(backend):
     assert final.status is Status.DONE
     assert final.active_path == "Released"
     assert final.outcome == "cancelled"
+
+
+# --- cancel of a dead letter is always forceful ----------------------------------
+def test_cancel_of_a_dead_letter_terminates_without_running_the_cleanup():
+    # the dead-lettered position is not a trustworthy resting state, so the
+    # model's own `on Cancel` cleanup must not run from it, even though the
+    # active state does model one
+    store = DictStore()
+    defn = definition_from_dsl(DEAD_LETTER_WITH_CANCEL_HANDLER, "M", validate=True)
+    runner = DurableRunner(store, {defn.id: defn})
+    exe = runner.create(defn.id)
+    runner.process(exe.id, Event(kind="Go"))
+    assert store.load(exe.id).status is Status.FAILED
+
+    runner.cancel(exe.id)
+
+    final = store.load(exe.id)
+    assert final.status is Status.CANCELLED
+    assert final.active_path == "Working"
+    assert final.error  # kept: the record of why it died
+    assert "released" not in final.context.get("trace", [])
+
+
+async def test_async_cancel_of_a_dead_letter_terminates_without_running_the_cleanup():
+    from harel.engine.aio import control as aio_control
+    from harel.engine.aio_store import AsyncDictStore
+    from harel.engine.execution import Execution
+
+    defn = definition_from_dsl(DEAD_LETTER_WITH_CANCEL_HANDLER, "M", validate=True)
+    store = AsyncDictStore()
+    exe = Execution(
+        definition_id=defn.id,
+        status=Status.FAILED,
+        active_path="Working",
+        error="RuntimeError: boom",
+    )
+    await store.save(exe)
+
+    await aio_control.cancel(store, defn, exe.id)
+
+    final = await store.load(exe.id)
+    assert final.status is Status.CANCELLED
+    assert final.active_path == "Working"
+    assert final.error == "RuntimeError: boom"
+
+
+class _FailsBeforeCommit:
+    """Wraps a store so that, once armed, the next commit loses the CAS because a
+    worker dead-lettered the Execution in between — the stored record is FAILED
+    when the caller reloads it."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self._armed = False
+
+    def arm(self):
+        self._armed = True
+
+    def commit(self, exe, emits, **kwargs):
+        if self._armed:
+            self._armed = False
+            dead = self._inner.load(exe.id)
+            dead.status = Status.FAILED
+            dead.error = "RuntimeError: boom"
+            self._inner.save(dead)
+            raise StoreConflict(exe.id, expected=exe.version, found=exe.version + 1)
+        return self._inner.commit(exe, emits, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def test_cancel_re_decides_when_the_execution_dead_letters_concurrently(tmp_path):
+    # cancel() decides "cooperative" against a RUNNING record; a worker dead-letters
+    # it before the write lands. The retry must re-decide against the FAILED record
+    # (forceful), not write CANCELLING + a Cancel event onto the dead letter.
+    from harel.engine import control
+
+    inner = SqliteStore(tmp_path / "stm.db")
+    defn = definition_from_dsl(CRITICAL, "M", validate=True)
+    exe = DurableRunner(inner, {defn.id: defn}).create(defn.id)
+    assert inner.load(exe.id).active_path == "Working"
+
+    store = _FailsBeforeCommit(inner)
+    store.arm()
+    control.cancel(store, defn, exe.id)
+
+    final = inner.load(exe.id)
+    assert final.status is Status.CANCELLED
+    assert final.active_path == "Working"
+    assert final.error == "RuntimeError: boom"
+    inner.close()
 
 
 # --- suspend / resume -----------------------------------------------------------

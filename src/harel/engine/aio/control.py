@@ -38,8 +38,6 @@ async def _commit_status(
     active_path: Optional[str] = None,
     clear_error: bool = False,
     clear_history: bool = False,
-    emit_cancel: bool = False,
-    cancel_data: Optional[dict] = None,
 ) -> None:
     for _ in range(_RETRIES):
         exe = await store.load(execution_id)
@@ -58,11 +56,8 @@ async def _commit_status(
             exe.error = None
         if clear_history:
             exe.history.clear()
-        emits: list[tuple[Optional[str], Event]] = (
-            [(exe.id, Event(kind="Cancel", data=dict(cancel_data or {})))] if emit_cancel else []
-        )
         try:
-            await store.commit(exe, emits)
+            await store.commit(exe, [])
             return
         except StoreConflict:
             continue
@@ -98,17 +93,26 @@ async def cancel(
     the execution already finished: a validator rule requires `on Cancel` to
     resolve directly to a terminal, so the cooperative path always completes in the
     same step the injected `Cancel` is processed — there is no window where a
-    second `cancel()` could find the execution "mid cleanup"."""
-    exe = await store.load(execution_id)
-    if exe is None:
-        raise KeyError(execution_id)
-    if exe.status in _TERMINAL:
-        return
-    if engine.has_cancel_handler(defn, exe, Event(kind="Cancel", data=dict(reason or {}))):
-        await _commit_status(store, execution_id, Status.CANCELLING, emit_cancel=True, cancel_data=reason)
+    second `cancel()` could find the execution "mid cleanup". A `FAILED`
+    execution is always terminated forcefully, and the cooperative decision is
+    re-made on a concurrent write."""
+    for _ in range(_RETRIES):
+        exe = await store.load(execution_id)
+        if exe is None:
+            raise KeyError(execution_id)
+        if exe.status in _TERMINAL:
+            return
+        cancel_event = Event(kind="Cancel", data=dict(reason or {}))
+        if exe.status is Status.FAILED or not engine.has_cancel_handler(defn, exe, cancel_event):
+            await terminate(store, execution_id)
+            return
+        exe.status = Status.CANCELLING
+        try:
+            await store.commit(exe, [(exe.id, cancel_event)])
+        except StoreConflict:
+            continue
         await _propagate(store, execution_id, Status.CANCELLED)
-    else:
-        await terminate(store, execution_id)
+        return
 
 
 async def suspend(store: Any, execution_id: str) -> None:
