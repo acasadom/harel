@@ -178,4 +178,5 @@ async def redrive(store: Any, defn: Definition, execution_id: str, target_path: 
         validate=lambda fresh: _validate_redrive_target(defn, fresh, target_path),
         active_path=target_path,
         clear_error=True,
+        clear_history=True,
     )
