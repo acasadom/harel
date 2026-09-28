@@ -17,7 +17,7 @@ from typing import Any, Callable, Optional
 
 from harel import engine
 from harel.definition.model import ActionRef, Definition
-from harel.engine.execution import Execution
+from harel.engine.execution import Execution, stamp
 from harel.engine.resolve import ResolveError
 from harel.engine.store import DictStore, ExecutionStore, TimerOp
 from harel.spec.states import Event
@@ -122,6 +122,7 @@ class _SyncDriver:
     # --- core --------------------------------------------------------------
     def register(self, exe: Execution) -> None:
         """Make an Execution known to the store (initial persist)."""
+        stamp(exe, self._clock())
         self.store.save(exe)
 
     def get(self, execution_id: str) -> Optional[Execution]:
@@ -139,6 +140,7 @@ class _SyncDriver:
         from_path = exe.active_path
         emits, timer_ops, spawns, actions = self._drive(exe, gen)
         step = _trace_step(event, from_path, exe, actions, self._clock()) if self._trace_enabled else None
+        stamp(exe, self._clock())
         self.store.commit(
             exe,
             emits,

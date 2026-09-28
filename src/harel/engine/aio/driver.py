@@ -22,7 +22,7 @@ from typing import Any, Callable, Optional
 
 from harel import engine
 from harel.definition.model import Definition
-from harel.engine.execution import Execution, Status
+from harel.engine.execution import Execution, Status, stamp
 from harel.engine.resolve import ResolveError
 from harel.engine.runtime import _CONTROL, _action_name, _Proxy, _resolve, _trace_step
 from harel.engine.store import TimerOp
@@ -77,6 +77,7 @@ class AsyncDriver:
         from_path = exe.active_path
         emits, timer_ops, spawns, actions = await self._drive(exe, gen)
         step = _trace_step(event, from_path, exe, actions, self._clock()) if self._trace_enabled else None
+        stamp(exe, self._clock())
         await self.store.commit(
             exe,
             emits,

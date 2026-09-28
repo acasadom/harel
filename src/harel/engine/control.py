@@ -49,11 +49,13 @@ worker may be committing an event for the same Execution concurrently.
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+import time
+from dataclasses import dataclass, field
+from typing import Callable, Iterable, Optional
 
 from harel import engine
 from harel.definition.model import Definition, NodeKind, is_descendant
-from harel.engine.execution import Execution, Status
+from harel.engine.execution import Execution, Status, stamp
 from harel.engine.store import ExecutionStore, StoreConflict
 from harel.spec.states import Event
 
@@ -114,6 +116,7 @@ def _commit_status(
         if clear_history:
             exe.history.clear()
         try:
+            stamp(exe, time.time())
             store.commit(exe, [])
             return
         except StoreConflict:
@@ -174,6 +177,7 @@ def cancel(
             terminate(store, execution_id)
             return
         exe.status = Status.CANCELLING
+        stamp(exe, time.time())
         try:
             store.commit(exe, [(exe.id, cancel_event)])
         except StoreConflict:
@@ -370,3 +374,66 @@ def purge(
 def _purge_one(store: ExecutionStore, exe: Execution) -> None:
     if not store.purge(exe.id, exe.version):
         raise StoreConflict(exe.id, expected=exe.version, found=None)
+
+
+@dataclass
+class PurgeReport:
+    """What `purge_finished` did: the root ids purged (or, on a dry run, that would be),
+    how many finished roots carry no `finished_at` (written before it was recorded) and
+    were skipped, and the roots refused, each with the reason."""
+
+    purged: list[str] = field(default_factory=list)
+    skipped_undated: int = 0
+    refused: dict[str, str] = field(default_factory=dict)
+
+
+def purge_finished(
+    store: ExecutionStore,
+    *,
+    older_than: float,
+    statuses: Iterable[Status] = _PURGEABLE,
+    archive: Optional[Callable[[dict], None]] = None,
+    include_undated: bool = False,
+    limit: Optional[int] = None,
+    dry_run: bool = False,
+    now: Optional[float] = None,
+) -> PurgeReport:
+    """Purge every root tree that finished more than `older_than` seconds ago (see `purge`).
+
+    Candidates are the roots in `statuses` (a subset of DONE/CANCELLED) whose
+    `finished_at` is before the cutoff; all are collected before any is deleted, so paging
+    isn't disturbed. A root without `finished_at` is skipped unless `include_undated`. A
+    candidate `purge` refuses (a member still live, or changed concurrently) is recorded in
+    `refused` and the run goes on; an archiver error aborts it. `limit` caps how many roots
+    are purged; `dry_run` only reports them."""
+    statuses = set(statuses)
+    if not statuses <= set(_PURGEABLE):
+        raise ValueError(f"only {', '.join(s.name for s in _PURGEABLE)} executions can be purged")
+    cutoff = (time.time() if now is None else now) - older_than
+    report = PurgeReport()
+    candidates: list[str] = []
+    cursor: Optional[str] = None
+    while limit is None or len(candidates) < limit:
+        page = store.list_executions(status=statuses, roots_only=True, limit=500, cursor=cursor)
+        for summary in page.items:
+            if summary.finished_at is None:
+                if not include_undated:
+                    report.skipped_undated += 1
+                    continue
+            elif summary.finished_at >= cutoff:
+                continue
+            candidates.append(summary.id)
+        cursor = page.next_cursor
+        if cursor is None:
+            break
+    candidates = candidates[:limit]
+    if dry_run:
+        report.purged = candidates
+        return report
+    for root_id in candidates:
+        try:
+            if purge(store, root_id, archive=archive):
+                report.purged.append(root_id)
+        except (ValueError, StoreConflict) as exc:
+            report.refused[root_id] = str(exc)
+    return report

@@ -24,7 +24,7 @@ from harel.definition.model import Definition
 from harel.engine.aio import control
 from harel.engine.aio.driver import _AsyncRuntimeDriver
 from harel.engine.distributed import _defn_for, _register_submachines, _resolve_machine
-from harel.engine.execution import Execution, Status
+from harel.engine.execution import Execution, Status, stamp
 from harel.engine.resolve import MachineResolver
 from harel.engine.runtime import _CONTROL
 from harel.engine.store import StoreConflict
@@ -92,6 +92,7 @@ class AsyncTransportDriver(_AsyncRuntimeDriver):
         if event.kind not in _CONTROL and live:
             for child in live:
                 await self.transport.publish(child.id, event, priority=child.priority)
+            stamp(exe, self._clock())
             await self.store.commit(exe, [], processed_event_id=event.id)
             enqueued = False  # broadcast went straight to the transport; nothing in the outbox
         else:
@@ -361,6 +362,7 @@ class AsyncDistributedRunner:
         if start_on_create:
             await self._persist_start(exe)
         else:
+            stamp(exe, self._clock())
             await self.store.save(exe)
         return exe
 
@@ -383,6 +385,7 @@ class AsyncDistributedRunner:
         pick up (see `route`'s comment on orphan draining) — raising here would cost
         the caller the very id they'd need to retry via `start(execution_id)`."""
         event = Event(kind="Start", data=dict(data or {}))
+        stamp(exe, self._clock())
         await self.store.commit(exe, [(exe.id, event)])
         try:
             await self.transport.publish(exe.id, event, priority=exe.priority)

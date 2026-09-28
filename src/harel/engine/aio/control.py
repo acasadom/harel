@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import time
 from typing import Any, Callable, Optional
 
 from harel import engine
 from harel.definition.model import Definition, NodeKind, is_descendant
 from harel.engine.control import _archive_bundle, _check_purgeable
-from harel.engine.execution import Execution, Status
+from harel.engine.execution import Execution, Status, stamp
 from harel.engine.store import StoreConflict
 from harel.spec.states import Event
 
@@ -59,6 +60,7 @@ async def _commit_status(
         if clear_history:
             exe.history.clear()
         try:
+            stamp(exe, time.time())
             await store.commit(exe, [])
             return
         except StoreConflict:
@@ -109,6 +111,7 @@ async def cancel(
             await terminate(store, execution_id)
             return
         exe.status = Status.CANCELLING
+        stamp(exe, time.time())
         try:
             await store.commit(exe, [(exe.id, cancel_event)])
         except StoreConflict:

@@ -146,7 +146,8 @@ class PostgresStore:
         with self._conn.cursor() as cur:
             cur.execute(
                 "SELECT id, definition_id, version, data::jsonb->>'status', "
-                "data::jsonb->>'outcome', data::jsonb->>'active_path', data::jsonb->>'parent_id' "
+                "data::jsonb->>'outcome', data::jsonb->>'active_path', data::jsonb->>'parent_id', "
+                "(data::jsonb->>'finished_at')::float8 "
                 f"FROM executions WHERE {' AND '.join(where)} ORDER BY id LIMIT %s OFFSET %s",
                 (*params, limit + 1, off),
             )
@@ -161,6 +162,7 @@ class PostgresStore:
                 outcome=r[4],
                 active_path=r[5],
                 parent_id=r[6],
+                finished_at=r[7],
             )
             for r in rows[:limit]
         ]
