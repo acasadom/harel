@@ -111,8 +111,11 @@ Two ways to seed an execution's context:
 
 - **At creation** — `runner.create(defn.id, context={...})`, which we used for the fan-out's
   `parcels` and the submachine's `amount`.
-- **On a `Start` event with data** — `Event(kind="Start", data={...})` seeds the context as the
-  machine starts.
+- **On `Start` itself** — `DistributedRunner.start(execution_id, data={...})` seeds the context as
+  the machine starts, for a caller that reserved the id with `create(..., start_on_create=False)`
+  before the real parameters were known. This is the *only* way to attach a payload to `Start` on
+  a distributed runner — `send()` refuses the kind outright, so it can never race a delayed
+  `start()` with a differently-parametrized one.
 
 And on the way out under cancellation, `cancel(reason={...})` attaches an opaque payload to the
 cooperative `Cancel` event, readable by the machine's own `on Cancel` cleanup — that's the

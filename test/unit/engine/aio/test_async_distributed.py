@@ -8,6 +8,8 @@ fully async (single worker draining deterministically via `step()`).
 
 import logging
 
+import pytest
+
 from harel.dsl import definition_from_dsl
 from harel.engine.aio.distributed import AsyncDistributedRunner
 from harel.engine.aio_store import AsyncDictStore
@@ -130,13 +132,90 @@ async def test_create_survives_a_transient_publish_failure(caplog):
     # nothing claimable yet — the one and only publish attempt failed
     assert await runner.worker().step() is False
 
-    # the Start is durably queued: a later flush (here, triggered by an unrelated
-    # create() now that the transport works again) recovers it
-    other = await runner.create(defn.id)
-    assert other.id != exe.id
+    # still PENDING (the commit succeeded, only the publish attempt failed), so a
+    # caller-level retry via start() is exactly what the docstring promises: safe,
+    # since the engine only ever acts on a Start while status is still PENDING
+    await runner.start(exe.id)
 
     await _drain(runner)
     final = await store.load(exe.id)
     assert final.status is Status.RUNNING  # started, and parked at B awaiting Go
     assert final.active_path == "B"
     assert final.context["trace"] == ["A.enter", "B.enter"]
+
+
+async def test_create_does_not_drain_unrelated_backlog():
+    """create()'s best-effort Start delivery must publish only its own, already-
+    known entry — not call the generic _flush(), which drains the store's ENTIRE
+    pending outbox/spawns fleet-wide. Piggybacking on that global scan would make
+    every create() pay for O(backlog) work to deliver one known entry, and would
+    misattribute a failure publishing someone else's backlog to this exe's Start."""
+    defn = definition_from_dsl(FLAT, "M")
+    store = AsyncDictStore()
+    runner = AsyncDistributedRunner(store, AsyncInMemoryTransport(), {defn.id: defn})
+
+    # an unrelated, already-pending outbox entry — as if some other execution's
+    # own delivery attempt failed earlier and is still awaiting a flush
+    other = await store.load((await runner.create(defn.id, start_on_create=False)).id)
+    await store.commit(other, [(other.id, Event(kind="Marker"))])
+    assert len(await store.pending_outbox()) == 1
+
+    exe = await runner.create(defn.id)  # healthy transport — delivers its own Start fine
+    await _drain(runner)
+    assert (await store.load(exe.id)).status is Status.RUNNING
+
+    # the unrelated entry was never touched (published or acked) by create()'s
+    # targeted delivery of its own, unrelated Start
+    marker_entries = [e for e in await store.pending_outbox() if e.event.kind == "Marker"]
+    assert len(marker_entries) == 1
+
+
+async def test_start_survives_a_transient_publish_failure(caplog):
+    """start() shares create()'s _persist_start helper, so it gets the same
+    durability guarantee: a failed immediate delivery leaves the Start durably
+    committed to the outbox (not lost), and start() itself must not raise — the
+    caller already has the execution_id, so a plain retry is always available."""
+    defn = definition_from_dsl(FLAT, "M")
+    store = AsyncDictStore()
+    transport = _FlakyOncePublish()
+    runner = AsyncDistributedRunner(store, transport, {defn.id: defn})
+    exe = await runner.create(defn.id, start_on_create=False)
+
+    with caplog.at_level(logging.WARNING):
+        await runner.start(exe.id)  # the flaky publish() raises internally...
+    assert (await store.load(exe.id)).status is Status.PENDING  # ...but doesn't raise
+    assert "could not immediately publish the Start" in caplog.text
+    assert await runner.worker().step() is False  # nothing claimable yet
+
+    await runner.start(exe.id)  # retry, now that the transport works again
+    await _drain(runner)
+    final = await store.load(exe.id)
+    assert final.status is Status.RUNNING
+    assert final.active_path == "B"
+
+
+async def test_async_send_refuses_a_caller_supplied_start_event():
+    defn = definition_from_dsl(FLAT, "M")
+    store = AsyncDictStore()
+    runner = AsyncDistributedRunner(store, AsyncInMemoryTransport(), {defn.id: defn})
+    exe = await runner.create(defn.id, start_on_create=False)
+
+    with pytest.raises(ValueError):
+        await runner.send(exe.id, Event(kind="Start"))
+
+    assert await runner.worker().step() is False
+    assert (await store.load(exe.id)).status is Status.PENDING
+
+
+async def test_async_start_can_seed_the_context_with_its_own_data():
+    defn = definition_from_dsl(FLAT, "M")
+    store = AsyncDictStore()
+    runner = AsyncDistributedRunner(store, AsyncInMemoryTransport(), {defn.id: defn})
+    exe = await runner.create(defn.id, start_on_create=False)
+
+    await runner.start(exe.id, data={"tenant": "acme"})
+    await _drain(runner)
+
+    started = await store.load(exe.id)
+    assert started.status is Status.RUNNING
+    assert started.context["tenant"] == "acme"

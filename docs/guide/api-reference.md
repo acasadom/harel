@@ -68,9 +68,10 @@ from harel.engine.transport import InMemoryTransport   # + Sqlite/Libsql/Redis/P
 
 DistributedRunner(store, transport, definitions, clock=time.time, resolver=None, trace=False)
     .create(definition_id, context=None, execution_id=None, priority=0, start_on_create=True) -> Execution
-    .start(execution_id) -> None  # publishes Start; a worker runs it, not the caller.
-                                   # create()'s start_on_create=True already does this
-    .send(execution_id, event) -> None
+    .start(execution_id, data=None) -> None  # publishes Start; a worker runs it, not the caller.
+                                   # create()'s start_on_create=True already does this;
+                                   # data seeds the context — the only way to attach one to Start
+    .send(execution_id, event) -> None  # refuses a caller-supplied Start (raises ValueError)
     .worker(...) -> Worker        # .step() one message; .run(stop_event) loops
     .cancel / .terminate / .suspend / .resume / .redrive
 ```

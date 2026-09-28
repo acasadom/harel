@@ -160,21 +160,62 @@ def test_an_event_sent_right_after_create_is_not_lost_behind_start():
     assert final.context["trace"] == ["A.enter", "B.enter"]
 
 
-def test_an_event_sent_before_the_deferred_start_is_discarded_not_lost_later():
+def test_send_refuses_a_caller_supplied_start_event():
+    """Authorization gap: start() and send() both end up publishing to the same
+    transport, and nothing at the engine level can tell which one produced a
+    given Start — a state check (is it PENDING?) can't distinguish a legitimate
+    caller from an unauthorized one, since both would see the same status. Only
+    rejecting the kind outright, unconditionally, closes it: create()/start()
+    become the sole way to produce a Start."""
+    store = DictStore()
+    defn = definition_from_dsl(FLAT, "M")
+    runner = DistributedRunner(store, InMemoryTransport(), {defn.id: defn})
+    exe = runner.create(defn.id, start_on_create=False)
+
+    with pytest.raises(ValueError):
+        runner.send(exe.id, Event(kind="Start"))
+
+    # refused before publishing anything — still nothing to claim
+    assert runner.worker().step() is False
+    assert store.load(exe.id).status is Status.PENDING
+
+
+def test_start_can_seed_the_context_with_its_own_data():
+    """The sanctioned replacement for constructing Event(kind="Start", data=...)
+    by hand and sending it: reserve an id, learn the real parameters later, start
+    with them through the one authorized entry point."""
+    store = DictStore()
+    defn = definition_from_dsl(FLAT, "M")
+    runner = DistributedRunner(store, InMemoryTransport(), {defn.id: defn})
+    exe = runner.create(defn.id, start_on_create=False)
+
+    runner.start(exe.id, data={"tenant": "acme"})
+    _drain(runner.worker())
+
+    started = store.load(exe.id)
+    assert started.status is Status.RUNNING
+    assert started.context["tenant"] == "acme"
+
+
+def test_an_event_sent_before_the_deferred_start_is_discarded_not_lost_later(caplog):
     """With start_on_create=False, a domain event addressed to the still-PENDING
     execution is discarded on arrival (see AsyncWorker._handle's PENDING branch) —
     not parked (parking would deadlock the group against Start itself) and not
     recorded as processed either, so a caller-level retry with a fresh publish of
-    the same logical event succeeds normally once the execution has started."""
+    the same logical event succeeds normally once the execution has started. The
+    discard is logged (otherwise it would be entirely invisible — no error, no
+    trace, just a silently missing effect)."""
     store = DictStore()
     defn = definition_from_dsl(FLAT, "M")
     runner = DistributedRunner(store, InMemoryTransport(), {defn.id: defn})
     exe = runner.create(defn.id, start_on_create=False)
 
     go = Event(kind="Go")
-    runner.send(exe.id, go)  # arrives while PENDING -> discarded
-    _drain(runner.worker())
+    with caplog.at_level(logging.WARNING):
+        runner.send(exe.id, go)  # arrives while PENDING -> discarded
+        _drain(runner.worker())
     assert store.load(exe.id).status is Status.PENDING  # discarded, not queued
+    assert "still PENDING" in caplog.text
 
     runner.start(exe.id)
     runner.send(exe.id, Event(kind="Go"))  # a fresh publish of the same logical event

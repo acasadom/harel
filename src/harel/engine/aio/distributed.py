@@ -175,10 +175,21 @@ class AsyncWorker:
             # group "in flight" (the single-active-consumer lock), blocking the
             # Start itself from ever being claimed behind it — a self-deadlock,
             # not a fix. `create()` defaults to `start_on_create=True`, publishing
-            # Start immediately, so this is normally unreachable; it only fires for
-            # a caller that opted into `start_on_create=False` and got a domain
-            # event delivered before its own explicit `start()` call — a risk that
-            # choice already accepts (see `AsyncDistributedRunner.create`).
+            # Start immediately, so this is normally unreachable; it mainly fires
+            # for a caller that opted into `start_on_create=False` and got a
+            # domain event delivered before its own explicit `start()` call — a
+            # risk that choice already accepts (see `AsyncDistributedRunner.create`)
+            # — but can also fire, rarely, if Start's own best-effort delivery was
+            # delayed by a transient publish failure (`_persist_start`) and a
+            # fast-following domain event reached the transport first. Logged
+            # (not just silently ack'd) because this discard is otherwise
+            # invisible: nothing else records that the event was ever dropped.
+            logger.warning(
+                "discarding %s event for execution %s: still PENDING (not yet "
+                "started) — the sender should retry once it is RUNNING",
+                lease.event.kind,
+                lease.group_id,
+            )
             await self.transport.ack(lease)
             return True
         if exe.status is Status.CANCELLING and lease.event.kind != "Cancel":
@@ -313,19 +324,23 @@ class AsyncDistributedRunner:
         at all, it'd run on whoever called `create`. Either way its actions run on
         whichever worker claims the published `Start`, never on this caller.
 
-        `start_on_create` (default `True`) publishes that `Start` immediately, in
-        this same call, so the returned Execution is `PENDING` only as a transient
-        detail — a worker picks it up right away. This also closes a genuine race:
-        with the record persisted but no `Start` published yet, a domain event
-        addressed to it can't be queued or deferred (only a `RUNNING` execution
-        processes domain events — see `AsyncWorker._handle`'s `PENDING` branch) and
-        a naive "park it and retry" would deadlock (parking holds the execution's
-        single-active-consumer group lock, blocking the `Start` behind it from ever
-        being claimed). Passing `start_on_create=False` reopens that window
-        deliberately — use it only if you have a reason to delay starting past
-        `create()`, and be aware that anything you send in the meantime is
-        discarded on arrival, not queued: call `start(execution_id)` yourself when
-        ready."""
+        `start_on_create` (default `True`) commits that `Start` immediately, in this
+        same call, so the returned Execution is `PENDING` only as a transient detail
+        — a worker picks it up right away in the common case. This also narrows (it
+        cannot fully close — delivery is still a separate, best-effort step; see
+        `_persist_start`) a genuine race: with the record persisted but no `Start`
+        ever queued, a domain event addressed to it can't be queued or deferred
+        (only a `RUNNING` execution processes domain events — see
+        `AsyncWorker._handle`'s `PENDING` branch) and a naive "park it and retry"
+        would deadlock (parking holds the execution's single-active-consumer group
+        lock, blocking the `Start` behind it from ever being claimed). Passing
+        `start_on_create=False` reopens that window deliberately — use it only if
+        you have a reason to delay starting past `create()`, and be aware that
+        anything you send in the meantime is discarded on arrival, not queued: call
+        `start(execution_id)` yourself when ready. `create()` and `start()` are the
+        only way to produce a `Start` — `send()` refuses the kind outright, so
+        nothing else can race your own delayed start with a differently-
+        parametrized one."""
         if execution_id is not None and await self.store.load(execution_id) is not None:
             from harel.engine.store import ExecutionAlreadyExists
 
@@ -344,45 +359,58 @@ class AsyncDistributedRunner:
             **({"id": execution_id} if execution_id is not None else {}),
         )
         if start_on_create:
-            # commit (not save): the Start rides the SAME atomic write as the
-            # Execution's first persistence, in the durable outbox — exactly how
-            # every other emit in this engine reaches the transport (see `route`'s
-            # `_run`+`_flush` pairing, or `control.cancel`'s injected Cancel). A raw
-            # save()-then-publish() would leave a window where the record exists
-            # but nothing durable records that it needs a Start: a transient
-            # transport failure between the two would silently orphan a PENDING
-            # execution forever, with no id ever returned to the caller and no
-            # outbox entry for any later flush to retry.
-            await self.store.commit(exe, [(exe.id, Event(kind="Start"))])
-            driver = self._transport_driver(self.definitions[definition_id])
-            try:
-                # best-effort immediate delivery — most callers get it published in
-                # this same call. If it fails here, the Start stays durably queued
-                # (already committed above) for the next flush anywhere in the
-                # fleet to pick up (see `route`'s comment on orphan draining); it
-                # must not turn into an exception that costs the caller the very id
-                # they'd need to retry via `start(execution_id)`.
-                await driver._flush(primary_priority={exe.id: exe.priority})
-            except Exception:
-                logger.warning(
-                    "create() could not immediately publish the Start for execution "
-                    "%s; it is durably queued and will be delivered by a later flush",
-                    exe.id,
-                    exc_info=True,
-                )
+            await self._persist_start(exe)
         else:
             await self.store.save(exe)
         return exe
 
-    async def start(self, execution_id: str) -> None:
-        """Publish a `Start` for `execution_id` through the transport — a worker
-        claims it and runs the actual start sequence (its actions run there, not on
-        this caller). No-op if it's already been started: the engine only ever acts
-        on `Start` while `status` is still `PENDING` (see `core.process`), so a
-        redelivered or duplicate `Start` can never re-run/reset a live or finished
-        Execution — this just warns eagerly, before publishing, for the common case
-        of a caller starting the same execution twice; the engine's own check is
-        what actually holds under a race (two `start()` calls, or a redelivery)."""
+    async def _persist_start(self, exe: Execution, data: Optional[dict] = None) -> None:
+        """Commit `exe`'s `Start` into the durable outbox — the same atomic write as
+        `exe`'s own persistence, exactly how every other emit in this engine reaches
+        the transport (see `control.cancel`'s injected `Cancel`) — then attempt a
+        direct, best-effort publish of just that one entry.
+
+        Deliberately does NOT call the generic `_flush()`: that drains the store's
+        ENTIRE pending outbox/spawns, fleet-wide. Piggybacking on that scan is fine
+        when it's already happening for other reasons (`route()`, `cancel()`); here
+        it would be pure waste (we already know the one entry we want delivered) and
+        actively misleading (a failure publishing some UNRELATED execution's
+        backlog, encountered first in that scan, would abort before this exe's own
+        entry is even attempted, and get logged as *this* exe's Start failing).
+
+        A failed direct publish must not raise: `exe` is already durably committed
+        above, so the Start stays queued for the next flush anywhere in the fleet to
+        pick up (see `route`'s comment on orphan draining) — raising here would cost
+        the caller the very id they'd need to retry via `start(execution_id)`."""
+        event = Event(kind="Start", data=dict(data or {}))
+        await self.store.commit(exe, [(exe.id, event)])
+        try:
+            await self.transport.publish(exe.id, event, priority=exe.priority)
+        except Exception:
+            logger.warning(
+                "could not immediately publish the Start for execution %s; it is "
+                "durably queued and will be delivered by a later flush",
+                exe.id,
+                exc_info=True,
+            )
+
+    async def start(self, execution_id: str, data: Optional[dict] = None) -> None:
+        """Publish a `Start` for `execution_id` — a worker claims it and runs the
+        actual start sequence (its actions run there, not on this caller). No-op if
+        it's already been started: the engine only ever acts on `Start` while
+        `status` is still `PENDING` (see `core.process`), so a redelivered or
+        duplicate `Start` can never re-run/reset a live or finished Execution — this
+        just warns eagerly, before publishing, for the common case of a caller
+        starting the same execution twice; the engine's own check is what actually
+        holds under a race (two `start()` calls, or a redelivery).
+
+        `data`, when given, seeds the context before the machine runs (start-with-
+        parameters — e.g. `create(execution_id=..., start_on_create=False)` reserves
+        an id before the real parameters are known, and `start(id, data={...})`
+        supplies them once they are). This is the *only* sanctioned way to attach
+        a payload to `Start`: `send()` refuses the kind outright, precisely so a
+        caller can't race this one with their own, differently-parametrized
+        `Start`."""
         exe = await self.store.load(execution_id)
         if exe is None:
             raise KeyError(execution_id)
@@ -393,9 +421,24 @@ class AsyncDistributedRunner:
                 exe.status.value,
             )
             return
-        await self.transport.publish(execution_id, Event(kind="Start"), priority=exe.priority)
+        await self._persist_start(exe, data)
 
     async def send(self, execution_id: str, event: Event) -> None:
+        """Publish a domain event through the transport. Refuses `Start` (raises
+        `ValueError`): a state check (`status is PENDING?`) can't tell a
+        legitimate caller from an unauthorized one — both see the same status, so
+        both would pass — only rejecting the *kind* outright, regardless of
+        state, closes the gap. `create()`/`start()` are the only sanctioned way
+        to begin an execution (optionally with its own `data`); a caller-supplied
+        `Start` racing a legitimate one could otherwise seed the wrong context
+        into a still-`PENDING` execution, since only the first `Start` any
+        worker claims ever counts (see `core.process`)."""
+        if event.kind == "Start":
+            raise ValueError(
+                "send() refuses a caller-supplied Start event — use create() or "
+                "start(execution_id, data=...) instead, the only sanctioned way to "
+                "begin an execution (optionally with its parameters)"
+            )
         exe = await self.store.load(execution_id)
         priority = exe.priority if exe is not None else 0
         await self.transport.publish(execution_id, event, priority=priority)
