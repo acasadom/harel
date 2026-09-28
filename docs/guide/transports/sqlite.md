@@ -81,8 +81,12 @@ at a time, so per-group order is preserved.
 ## Async twin
 
 `AsyncSqliteTransport` (`aio_transport/sqlite.py`) mirrors this over **aiosqlite** — every cursor
-op awaited, the same hand-driven `BEGIN IMMEDIATE`/`COMMIT`. aiosqlite serializes a connection's
-operations on its own worker thread, so the multi-statement claim stays atomic.
+op awaited, the same hand-driven `BEGIN IMMEDIATE`/`COMMIT`. A SQLite transaction belongs to the
+connection, not to the coroutine, and aiosqlite only runs one *statement* at a time — while the
+async worker claims on its main loop, its in-flight tasks ack/nack/publish on the same
+connection. Each method therefore holds an `asyncio.Lock` for its whole duration, so one
+coroutine's `BEGIN IMMEDIATE` never lands inside (or is rolled back by) another's transaction,
+and the multi-statement claim stays atomic.
 
 ## When to pick it
 

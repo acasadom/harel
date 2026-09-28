@@ -205,7 +205,7 @@ Step by step:
    drops the stale work.
 
 `save` is the standalone version used outside an event step: `_write` then `self._conn.commit()`,
-with `except StoreConflict: self._conn.rollback(); raise`.
+rolling back (and restoring `exe.version`) on any exception, exactly like `commit` below.
 
 ## `commit` — the one atomic transaction
 
@@ -215,6 +215,7 @@ effect of that event are a single durable unit:
 
 ```text
 def commit(self, exe, emits, processed_event_id=None, timers=(), spawns=(), trace=None):
+    old = exe.version
     try:
         self._write(exe)                                   # 1. CAS the Execution (no commit yet)
 
@@ -252,8 +253,9 @@ def commit(self, exe, emits, processed_event_id=None, timers=(), spawns=(), trac
             self._write_trace(exe.id, trace)
 
         self._conn.commit()                                # 7. ONE commit: all-or-nothing
-    except StoreConflict:
-        self._conn.rollback()                              # CAS lost: discard the whole batch
+    except BaseException:
+        self._conn.rollback()                              # any failure: discard the whole batch
+        exe.version = old
         raise
 ```
 
@@ -278,8 +280,12 @@ Statement by statement:
    given.
 7. **The single `self._conn.commit()`** — flushes the whole batch atomically.
 
-The `except StoreConflict: self._conn.rollback(); raise` is the only failure branch: if the CAS
-lost, the entire batch (state, outbox, dedupe, timers, spawns, trace) is discarded together.
+The `except` branch covers **any** failure, not only a lost CAS: the entire batch (state, outbox,
+dedupe, timers, spawns, trace) is discarded together and the in-memory `exe.version` is restored,
+so a retry of the same Execution is not a false conflict. Rolling back on every error also
+matters for the file as a whole: a transaction left open would keep holding SQLite's single
+write lock, so every other writer on the same file would time out with `database is locked`,
+and the next commit on this connection would persist the half-written batch.
 Because all of this is **one transaction**, a crash at any point leaves the store either fully
 at the prior step or fully at the new one — never half-applied (e.g. a state advanced but its
 `Finished` lost, or a fork's children created but the parent's join expectations missing). This
@@ -429,10 +435,16 @@ same SQL, same CAS, same one-transaction `commit`. The differences are mechanica
 
 - Every DB call is `await`ed (`await self._conn.execute(...)`, `await cur.fetchone()`,
   `await self._conn.commit()`).
-- **Atomicity still holds.** `aiosqlite` serializes a connection's operations on its own worker
-  thread, so the multi-statement `commit` runs as one ordered batch on that thread and remains a
-  single atomic transaction — exactly like the sync version. The `await`s interleave with other
-  tasks at the event loop, not mid-transaction.
+- **One transaction at a time per connection.** A SQLite transaction belongs to the
+  *connection*, not to the coroutine, and `aiosqlite` only runs one *statement* at a time: the
+  `await`s between the statements of a `commit` are points where another coroutine can run. The
+  async worker drives many coroutines over a single store (concurrent events, concurrent child
+  spawns), so without further care their statements would interleave inside one another's
+  transactions — one coroutine's `commit()` persisting another's half-written batch, or two
+  coroutines both creating the same child Execution. The store therefore holds an
+  **`asyncio.Lock` for every method**: each transaction (and each read, which must not observe
+  another coroutine's uncommitted writes) has the connection to itself, and `commit` stays a
+  single atomic transaction exactly like the sync version.
 - **Construction is async:** the connection must be awaited open, so you build it with
   `await AsyncSqliteStore.create(path)` (a classmethod that opens the connection, sets the
   PRAGMAs, creates the tables, commits, and returns the instance). `__init__` just stores the

@@ -108,6 +108,27 @@ async def test_a_failed_commit_rolls_back_and_releases_the_write_lock(tmp_path):
     await store.close()
 
 
+async def test_transport_ops_on_one_connection_do_not_interleave_transactions(tmp_path):
+    # the async worker claims on its main loop while in-flight tasks ack/nack on the
+    # same transport: one op's BEGIN IMMEDIATE must never land inside another's
+    import asyncio
+
+    transport = await AsyncSqliteTransport.create(str(tmp_path / "q.db"))
+    for group in ("g1", "g2", "g3"):
+        await transport.publish(group, Event(kind="E"))
+    first = await transport.claim("w", 30.0)
+
+    results = await asyncio.gather(
+        transport.claim("w", 30.0), transport.ack(first), transport.claim("w", 30.0), return_exceptions=True
+    )
+
+    assert not [r for r in results if isinstance(r, Exception)]
+    claimed = {r.group_id for r in results if r is not None}
+    assert claimed == {"g1", "g2", "g3"} - {first.group_id}
+    assert not transport._conn.in_transaction
+    await transport.close()
+
+
 async def test_async_sqlite_distributed_pipeline():
     defn = definition_from_dsl(FLAT, "M")
     store = await AsyncSqliteStore.create(":memory:")

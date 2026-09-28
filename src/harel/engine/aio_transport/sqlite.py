@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any, Callable, Optional
 
@@ -13,11 +14,16 @@ class AsyncSqliteTransport:
     """Async mirror of `SqliteTransport` over `aiosqlite`. `claim` runs inside
     `BEGIN IMMEDIATE` so SQLite's global write-lock serializes claims (race-free per-group
     exclusivity with plain SQL); the lease (`lock_expiry`) recovers a crashed worker's
-    message. Build with `await AsyncSqliteTransport.create(path)`."""
+    message. Build with `await AsyncSqliteTransport.create(path)`.
+
+    A SQLite transaction belongs to the connection, not to the coroutine: `_lock` makes each
+    method exclusive on the connection, so one coroutine's `BEGIN IMMEDIATE` never lands
+    inside (or rolls back) another's transaction."""
 
     def __init__(self, conn: Any, clock: Callable[[], float] = time.time) -> None:
         self._conn = conn
         self._clock = clock
+        self._lock = asyncio.Lock()
 
     @classmethod
     async def create(
@@ -42,14 +48,19 @@ class AsyncSqliteTransport:
         return cls(conn, clock)
 
     async def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
-        await self._conn.execute(
-            "INSERT INTO messages (group_id, event) VALUES (?, ?)", (group_id, event.model_dump_json())
-        )
-        await self._conn.execute(
-            "INSERT OR IGNORE INTO groups (group_id, priority) VALUES (?, ?)", (group_id, priority)
-        )
+        async with self._lock:
+            await self._conn.execute(
+                "INSERT INTO messages (group_id, event) VALUES (?, ?)", (group_id, event.model_dump_json())
+            )
+            await self._conn.execute(
+                "INSERT OR IGNORE INTO groups (group_id, priority) VALUES (?, ?)", (group_id, priority)
+            )
 
     async def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
+        async with self._lock:
+            return await self._claim_locked(worker_id, visibility, min_priority)
+
+    async def _claim_locked(self, worker_id: str, visibility: float, min_priority: int) -> Optional[Lease]:
         now = self._clock()
         await self._conn.execute("BEGIN IMMEDIATE")
         try:
@@ -77,34 +88,37 @@ class AsyncSqliteTransport:
             )
             await self._conn.execute("COMMIT")
             return Lease(seq, group_id, Event.model_validate_json(event))
-        except Exception:
+        except BaseException:
             await self._conn.execute("ROLLBACK")
             raise
 
     async def ack(self, lease: Lease) -> None:
-        await self._conn.execute("BEGIN IMMEDIATE")
-        try:
-            await self._conn.execute("DELETE FROM messages WHERE seq = ?", (lease.seq,))
-            await self._conn.execute(
-                "DELETE FROM groups WHERE group_id = ? AND NOT EXISTS "
-                "(SELECT 1 FROM messages WHERE group_id = ?)",
-                (lease.group_id, lease.group_id),
-            )
-            await self._conn.execute("COMMIT")
-        except Exception:
-            await self._conn.execute("ROLLBACK")
-            raise
+        async with self._lock:
+            await self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                await self._conn.execute("DELETE FROM messages WHERE seq = ?", (lease.seq,))
+                await self._conn.execute(
+                    "DELETE FROM groups WHERE group_id = ? AND NOT EXISTS "
+                    "(SELECT 1 FROM messages WHERE group_id = ?)",
+                    (lease.group_id, lease.group_id),
+                )
+                await self._conn.execute("COMMIT")
+            except BaseException:
+                await self._conn.execute("ROLLBACK")
+                raise
 
     async def nack(self, lease: Lease, delay: float = 0.0) -> None:
-        if delay > 0:
-            await self._conn.execute(
-                "UPDATE messages SET locked_by = ?, lock_expiry = ? WHERE seq = ?",
-                (_PARKED, self._clock() + delay, lease.seq),
-            )
-        else:
-            await self._conn.execute(
-                "UPDATE messages SET locked_by = NULL, lock_expiry = NULL WHERE seq = ?", (lease.seq,)
-            )
+        async with self._lock:
+            if delay > 0:
+                await self._conn.execute(
+                    "UPDATE messages SET locked_by = ?, lock_expiry = ? WHERE seq = ?",
+                    (_PARKED, self._clock() + delay, lease.seq),
+                )
+            else:
+                await self._conn.execute(
+                    "UPDATE messages SET locked_by = NULL, lock_expiry = NULL WHERE seq = ?", (lease.seq,)
+                )
 
     async def close(self) -> None:
-        await self._conn.close()
+        async with self._lock:
+            await self._conn.close()
