@@ -22,8 +22,9 @@ from harel.engine.resolve import ResolveError
 from harel.engine.store import DictStore, ExecutionStore, TimerOp
 from harel.spec.states import Event
 
-# events the parent Execution handles itself (not broadcast to its regions)
-_CONTROL = {"Start", "Reset", "Cancel", "SetState", "Finished"}
+# events the parent Execution handles itself (not broadcast to its regions). A `Timeout` is
+# addressed to the Execution whose state armed the timer — a fork's own `timeout` included.
+_CONTROL = {"Start", "Reset", "Cancel", "SetState", "Finished", "Timeout"}
 
 logger = logging.getLogger(__name__)
 
