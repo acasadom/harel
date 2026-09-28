@@ -163,11 +163,13 @@ class SqliteStore:
                 raise StoreConflict(exe.id, expected=old, found=found[0] if found else None)
 
     def save(self, exe: Execution) -> None:
+        old = exe.version
         try:
             self._write(exe)
             self._conn.commit()
-        except StoreConflict:
+        except BaseException:
             self._conn.rollback()
+            exe.version = old
             raise
 
     def commit(
@@ -179,6 +181,7 @@ class SqliteStore:
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,
     ) -> None:
+        old = exe.version
         try:
             self._write(exe)
             for target_id, event in emits:
@@ -210,8 +213,11 @@ class SqliteStore:
             if trace is not None:
                 self._write_trace(exe.id, trace)
             self._conn.commit()
-        except StoreConflict:
+        except BaseException:
+            # any failure, not just a lost CAS: an open transaction would keep the
+            # database's write lock and let a later commit persist this half-write
             self._conn.rollback()
+            exe.version = old
             raise
 
     def is_processed(self, execution_id: str, event_id: str) -> bool:

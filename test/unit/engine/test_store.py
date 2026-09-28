@@ -40,6 +40,24 @@ def test_sequential_saves_increment_version(store):
     assert store.load(e.id).version == 3
 
 
+def test_sqlite_failed_commit_rolls_back_and_releases_the_write_lock(tmp_path):
+    # an error other than StoreConflict mid-commit (an unserializable spawn context,
+    # after the Execution row was already written) must roll the whole transaction
+    # back and leave the in-memory version untouched, so a retry is not a false conflict
+    store = SqliteStore(tmp_path / "stm.db")
+    e = Execution(definition_id="d")
+
+    with pytest.raises(TypeError):
+        store.commit(e, [], spawns=(("child", "", {"bad": object()}),))
+
+    assert not store._conn.in_transaction
+    assert e.version == 0
+    assert store.load(e.id) is None
+    store.commit(e, [])  # the retry succeeds
+    assert store.load(e.id).version == 1
+    store.close()
+
+
 def test_stale_write_raises_conflict(tmp_path):
     # SqliteStore-only: load() deserializes a fresh copy, so two callers can hold
     # the same row at the same version (the real concurrent-writer scenario). The

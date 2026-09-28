@@ -67,6 +67,68 @@ async def test_async_durable_roundtrip_over_sqlite():
     await store.close()
 
 
+async def test_concurrent_commits_on_one_store_do_not_interleave_transactions(tmp_path):
+    # the async worker drives many coroutines over ONE store (one connection): two
+    # creating the same Execution id must resolve as one winner + one StoreConflict,
+    # never interleave inside a single SQLite transaction
+    import asyncio
+
+    from harel.engine.store import StoreConflict
+
+    store = await AsyncSqliteStore.create(str(tmp_path / "stm.db"))
+    a = Execution(id="same", definition_id="M")
+    b = Execution(id="same", definition_id="M")
+
+    results = await asyncio.gather(store.commit(a, []), store.commit(b, []), return_exceptions=True)
+
+    assert sorted(type(r).__name__ for r in results) == ["NoneType", "StoreConflict"]
+    assert any(isinstance(r, StoreConflict) for r in results)
+    assert not store._conn.in_transaction
+    assert (await store.load("same")).version == 1
+    await store.close()
+
+
+async def test_a_failed_commit_rolls_back_and_releases_the_write_lock(tmp_path):
+    # an error other than StoreConflict mid-commit (here: an unserializable spawn
+    # context, after the Execution row was already written) must roll the whole
+    # transaction back — otherwise the connection keeps the write lock and a later
+    # commit would persist the half-written state
+    store = await AsyncSqliteStore.create(str(tmp_path / "stm.db"))
+    exe = Execution(id="x", definition_id="M")
+
+    with pytest.raises(TypeError):
+        await store.commit(exe, [], spawns=(("child", "", {"bad": object()}),))
+
+    assert not store._conn.in_transaction
+    assert exe.version == 0
+    assert await store.load("x") is None
+    other = await AsyncSqliteStore.create(str(tmp_path / "stm.db"))
+    await other.commit(Execution(id="y", definition_id="M"), [])  # write lock is free
+    await other.close()
+    await store.close()
+
+
+async def test_transport_ops_on_one_connection_do_not_interleave_transactions(tmp_path):
+    # the async worker claims on its main loop while in-flight tasks ack/nack on the
+    # same transport: one op's BEGIN IMMEDIATE must never land inside another's
+    import asyncio
+
+    transport = await AsyncSqliteTransport.create(str(tmp_path / "q.db"))
+    for group in ("g1", "g2", "g3"):
+        await transport.publish(group, Event(kind="E"))
+    first = await transport.claim("w", 30.0)
+
+    results = await asyncio.gather(
+        transport.claim("w", 30.0), transport.ack(first), transport.claim("w", 30.0), return_exceptions=True
+    )
+
+    assert not [r for r in results if isinstance(r, Exception)]
+    claimed = {r.group_id for r in results if r is not None}
+    assert claimed == {"g1", "g2", "g3"} - {first.group_id}
+    assert not transport._conn.in_transaction
+    await transport.close()
+
+
 async def test_async_sqlite_distributed_pipeline():
     defn = definition_from_dsl(FLAT, "M")
     store = await AsyncSqliteStore.create(":memory:")
