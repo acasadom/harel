@@ -35,6 +35,7 @@ from harel.definition.model import (
     NodeKind,
     Selector,
     chain,
+    is_descendant,
     lca,
     resolve_relative,
 )
@@ -205,14 +206,26 @@ def _nested(scope: Node, rel: list[Node], predicate, allow_parent: bool):
     return None
 
 
-def _resolve(defn: Definition, exe: Execution, predicate, allow_parent: bool):
-    root = defn.index[exe.root_path]
-    assert exe.active_path is not None
-    active = defn.index[exe.active_path]
+def _resolve_between(defn: Definition, root: Node, active: Node, predicate, allow_parent: bool):
+    """Core of `_resolve`, taking `root`/`active` as plain `Node`s instead of
+    reading `exe.root_path`/`exe.active_path` — so a check can be evaluated at an
+    arbitrary node without pointing a possibly-shared `Execution` there first
+    (see `_would_be_a_sink`). `root` must be an ancestor-or-self of `active` (the
+    same precondition `_resolve` already has via `exe.root_path`/`active_path`
+    always satisfying it); callers that can't guarantee this (an arbitrary node
+    from elsewhere in the same Definition, not necessarily this Execution's own
+    branch) must check `is_descendant` first — `chain()` otherwise raises."""
     if active is root:
         return None
     rel = chain(root, active)[1:]  # [top child of root, ..., active]
     return _nested(root, rel, predicate, allow_parent)
+
+
+def _resolve(defn: Definition, exe: Execution, predicate, allow_parent: bool):
+    root = defn.index[exe.root_path]
+    assert exe.active_path is not None
+    active = defn.index[exe.active_path]
+    return _resolve_between(defn, root, active, predicate, allow_parent)
 
 
 def _event_pred(event: Event):
@@ -277,18 +290,74 @@ def has_error_handler(defn: Definition, exe: Execution, event: Event) -> bool:
     return _resolve(defn, exe, _event_pred(event), allow_parent=True) is not None
 
 
+def _would_be_a_sink(defn: Definition, exe: Execution, target: Node) -> bool:
+    """Whether `target` would immediately act as a sink if the machine reached it
+    right now. A composite (has children) or an `invoke` state is never a sink —
+    the machine would descend into it (or fork/spawn) rather than park there, the
+    same reason `definition.validate`'s `_is_terminal` refuses those (mirrored
+    here, since `_drain` never even reaches its own transition check for one of
+    these: it forks/invokes/descends first). A target outside this Execution's
+    own branch (rooted at `exe.root_path`) — reachable in the shared Definition
+    but not a place this Execution could ever actually be — is refused the same
+    way, rather than letting `chain()` raise trying to resolve it.
+
+    Otherwise mirrors `_drain`'s own "anything to wait for" check
+    (`_resolve(..., allow_parent=False)`), evaluated at `target` via
+    `_resolve_between` — not by pointing `exe.active_path` at `target` and calling
+    `_resolve` — so this never mutates a `exe` that a concurrent worker may be
+    reading or writing at the same time, and can never diverge from what the
+    engine will actually do once it gets there. Own scope only, like `_drain`'s
+    check; does not consider a transition an ANCESTOR scope declares sourced from
+    a descendant (a validated Definition never relies on that for a Cancel
+    target — see `_check_cancel_target` in `definition.validate` — so this is a
+    pragmatic, exact-if-narrower runtime mirror of that static rule, not a
+    replacement for running `validate()`)."""
+    if target.children or target.invoke is not None:
+        return False
+    root = defn.index[exe.root_path]
+    if not is_descendant(target, root):
+        return False
+    return _resolve_between(defn, root, target, _any_pred, allow_parent=False) is None
+
+
 def has_cancel_handler(defn: Definition, exe: Execution, event: Event) -> bool:
     """Whether the active configuration has its own `Cancel` transition for `event`
-    (in scope, with parent fallback, honouring its guard — mirrors `has_error_handler`).
-    The control plane uses this to choose cooperative cancel (let the machine clean
-    up) over forceful terminate; `event` carries the caller's `reason` payload, which
-    a guard (`on Cancel where reason == ...`) may match on. Guard-aware so this
-    predicts `process`'s own resolution exactly: a guard that fails here would also
-    fail when the injected `Cancel` is actually processed, so there is no daylight
-    between "decided cooperative" and "found a transition to take"."""
+    that is actually safe to take cooperatively (in scope, with parent fallback,
+    honouring its guard — mirrors `has_error_handler`). The control plane uses
+    this to choose cooperative cancel (let the machine clean up) over forceful
+    terminate; `event` carries the caller's `reason` payload, which a guard
+    (`on Cancel where reason == ...`) may match on. Guard-aware so this predicts
+    `process`'s own resolution exactly: a guard that fails here would also fail
+    when the injected `Cancel` is actually processed, so there is no daylight
+    between "decided cooperative" and "found a transition to take".
+
+    A validated Definition already guarantees `on Cancel` resolves directly to a
+    terminal (`definition.validate`'s `cancel_target_not_terminal` rule) — this
+    re-checks it here too, at the one call site that matters, so an unvalidated
+    Definition gets the same safety instead of a silent, timing-dependent window
+    where a second `cancel()` could force CANCELLED onto an in-progress
+    cooperative cleanup. A selector-based Cancel transition can't have its target
+    resolved without running the selector action (impossible here — this
+    function is pure, no IO), so every possible branch (and the `else`) is
+    checked statically instead, the same way `_check_cancel_target` validates a
+    selector in `definition.validate`."""
     if exe.active_path is None:
         return False
-    return _resolve(defn, exe, _event_pred(event), allow_parent=True) is not None
+    found = _resolve(defn, exe, _event_pred(event), allow_parent=True)
+    if found is None:
+        return False
+    scope, t = found
+    if t.target is not None:
+        return _would_be_a_sink(defn, exe, t.target)
+    if t.selector is not None:
+        names = list(t.selector.mapper.values())
+        if t.selector.default is not None:
+            names.append(t.selector.default)
+        for name in names:
+            resolved = resolve_relative(scope, name)
+            if resolved is None or not _would_be_a_sink(defn, exe, resolved):
+                return False
+    return True
 
 
 # --- LCA-based enter/exit (UML semantics: own hook per entered/exited level) ---
