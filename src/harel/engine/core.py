@@ -598,9 +598,73 @@ def start(defn: Definition, exe: Execution) -> Step:
     yield from _drain(defn, exe)
 
 
+def is_valid_reposition_target(defn: Definition, exe: Execution, target_path: str) -> bool:
+    """Whether `target_path` is safe to park `exe.active_path` at directly, without
+    going through any normal transition: a **leaf** — not a composite, which would
+    leave the machine parked without ever descending into its initial/history
+    child, and not nested inside an **orthogonal** ancestor, since the engine
+    always parks AT an orthogonal node and represents each branch as its own child
+    Execution (see `_fork`); a leaf nested under one bypasses that entirely, with
+    no sibling region ever spawned, and `exe.children` — empty, since the fork
+    never ran — would then look vacuously "fully joined" forever the moment any
+    single such leaf reaches a sink. Also within this Execution's own branch
+    (rooted at `exe.root_path`): a leaf in a sibling branch resolves in the shared
+    Definition (`defn.index` isn't scoped per-Execution) but isn't an ancestor of
+    `exe.root_path`, and `_drain`'s `chain(root, active)` asserts exactly that,
+    uncaught (not a RunAction/RunSelector, so the driver's action-error handling
+    never sees it either).
+
+    Mirrors `control._validate_redrive_target` and its async twin
+    `aio.control._validate_redrive_target` (same three checks; those raise a
+    caller-facing `ValueError` per check instead of returning a single bool, since
+    `redrive` is control-plane-invoked and wants a precise reason back) — if this
+    invariant ever changes, update all three.
+
+    One combined walk up from `target_path`'s parent: `is_descendant` and the
+    orthogonal-ancestor check both traverse the same `.parent` chain, so this does
+    it once instead of twice — reaching `root` proves descendance; finding an
+    ORTHOGONAL ancestor first refuses regardless of whether `root` is still ahead."""
+    node = defn.index.get(target_path)
+    if node is None or node.is_composite:
+        return False
+    root = defn.index[exe.root_path]
+    cur = node.parent
+    while cur is not None:
+        if cur.kind is NodeKind.ORTHOGONAL:
+            return False
+        if cur is root:
+            return True
+        cur = cur.parent
+    return False  # walked off the top without ever reaching root -> not a descendant
+
+
 def set_state(defn: Definition, exe: Execution, path: str) -> Step:
     """Restore a position by address (SetState): does not run the state's enter,
-    just positions and drains automatic transitions."""
+    just positions and drains automatic transitions. A low-level repositioning
+    primitive — `redrive` (with its own validation and CAS retry) is the safe,
+    control-plane way to repair a dead-lettered execution; this is what it would
+    otherwise have to be built on, kept around for tooling/tests that need the raw
+    capability. Still refuses (no-op) the ways it could corrupt or orphan the
+    record regardless of who's calling it: an unsafe target (see
+    `is_valid_reposition_target` — not a leaf, outside this Execution's own
+    branch, or nested inside an orthogonal ancestor); an execution with live
+    unfinished children (teleporting away would orphan them — the same hazard
+    `redrive` already guards against); or one that isn't currently `RUNNING` —
+    unlike `Reset` (deliberately allowed from DONE/FAILED too — its whole point is
+    restarting from scratch) SetState repositions to an arbitrary *mid-flow* state
+    while keeping history/context intact, so resurrecting an already-finished or
+    dead-lettered execution into an arbitrary live position is exactly the
+    unguarded power `redrive` exists to gate — this refuses it outright rather
+    than reimplementing `redrive`'s safeguards here. That excludes CANCELLING too:
+    yanking the position away mid cooperative-cancel cleanup abandons it
+    half-done, the same hazard a duplicate Cancel/Reset arriving in that window
+    has."""
+    if not is_valid_reposition_target(defn, exe, path):
+        return
+    if not _joined(exe):
+        return
+    if exe.status is not Status.RUNNING:
+        return
     exe.deferred.clear()
     exe.active_path = path
     exe.status = Status.RUNNING
@@ -609,17 +673,32 @@ def set_state(defn: Definition, exe: Execution, path: str) -> Step:
 
 def process(defn: Definition, exe: Execution, event: Event) -> Step:
     if event.kind == "Reset":
-        # if parked on a spawn site (orthogonal / invoke / fan-out), abandon its live
-        # children by bumping the site's entry seq — a restart must spawn FRESH children.
-        # The pre-Reset child Executions still exist in the store; reusing their ids would
-        # let the relay's idempotent create skip them (they never re-run / re-emit
-        # `Finished`) and the join would deadlock. Mirrors `_leave_regions` on a normal exit.
+        # restarting from scratch is deliberately allowed from RUNNING, DONE
+        # (restart after completion) and FAILED (an alternative to `redrive` — "forget
+        # everything and start over" rather than resume from a chosen point) alike;
+        # see test_reset_regions.py / test_outcomes.py / test_action_error.py. The one
+        # status this must refuse is CANCELLING: a Reset arriving mid cooperative-
+        # cancel cleanup would abandon that cleanup half-done, the same hazard a
+        # duplicate/racing Cancel has (see control.py's cooperative-cancel docs).
+        if exe.status is Status.CANCELLING:
+            return
+        # if parked on a spawn site (orthogonal / invoke / fan-out), bump its entry
+        # seq (a restart must spawn FRESH children — the relay's idempotent create
+        # would otherwise skip the pre-Reset ones, they'd never re-run or re-emit
+        # `Finished`, and the join would deadlock) and cancel any still-live ones
+        # (fire-and-forget) rather than silently abandoning them: Reset discards
+        # `exe.children` wholesale below, so without this they'd keep running
+        # orphaned, never told to stop, until they finish or time out on their own.
+        # Reuses the exact same normal-exit primitive, `_leave_regions`, instead of
+        # a bespoke bump+cancel here — one implementation, scoped by `_region_of`
+        # to children actually spawned by this site, not a blanket sweep of
+        # `exe.children` that would need to stay manually in sync with it.
         if exe.active_path is not None:
             site = defn.index.get(exe.active_path)
             if site is not None and (
                 site.kind in _ORTHOGONAL or site.invoke is not None or site.invoke_each is not None
             ):
-                exe.invoke_seq[site.full_path] = exe.invoke_seq.get(site.full_path, 0) + 1
+                yield from _leave_regions(exe, site)
         exe.children.clear()
         exe.context.clear()
         exe.history.clear()
