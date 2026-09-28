@@ -113,8 +113,8 @@ terminated-> CANCELLED
 
 | Command | Effect |
 | ------- | ------ |
-| `cancel(reason=…)` | cooperative if the model has `on Cancel`, else forceful |
-| `terminate()` | forceful `CANCELLED` now — no cleanup, no hooks |
+| `cancel(reason=…)` | cooperative if the model has `on Cancel`, else forceful; always forceful on a `FAILED` execution |
+| `terminate()` | forceful `CANCELLED` now — no cleanup, no hooks; on a `FAILED` execution, abandons the dead letter |
 | `suspend()` | `RUNNING → SUSPENDED`, reversible (backlog parked) |
 | `resume()` | `SUSPENDED → RUNNING`, continues where it stopped |
 | `redrive(target_path)` | `FAILED → RUNNING`, repositioned at `target_path` |
@@ -196,6 +196,12 @@ Two things to note:
   exited cleanly earlier in the same cascade did — that partial, inconsistent history is
   discarded rather than risking a later history re-entry landing on the pre-crash child instead
   of wherever you just redrove to.
+
+A dead letter you will *not* redrive is closed with `terminate()`: `FAILED → CANCELLED`, with
+`error` kept as the record of why it died (and any live regions terminated along with it).
+`cancel()` on a `FAILED` execution does the same — it never takes the cooperative path, even if
+the state it died in models `on Cancel`, because the dead-lettered position is not a trustworthy
+resting state to run the model's cleanup from.
 
 `redrive` also refuses (`ValueError`):
 

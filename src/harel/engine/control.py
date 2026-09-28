@@ -8,9 +8,11 @@ waiting behind the FIFO backlog of domain events.
 
 Two cancellation modes, decided by the machine itself:
 
-- **Forceful** (`terminate`, and `cancel` of a state with no `Cancel` transition):
-  status -> CANCELLED immediately. No hooks run. The backlog drains as no-ops
-  (the engine ignores domain events while not RUNNING).
+- **Forceful** (`terminate`, `cancel` of a state with no `Cancel` transition, and
+  `cancel` of a dead-lettered `FAILED` execution): status -> CANCELLED
+  immediately. No hooks run. The backlog drains as no-ops (the engine ignores
+  domain events while not RUNNING). On a `FAILED` execution this abandons the
+  dead letter; `error` is kept.
 - **Cooperative** (`cancel` of a state that models `on: Cancel`): the machine
   owns its cleanup. The execution goes to CANCELLING and a `Cancel` event is
   enqueued *in the same commit* (transactional outbox — no dual-write). The
@@ -81,14 +83,11 @@ def _commit_status(
     active_path: Optional[str] = None,
     clear_error: bool = False,
     clear_history: bool = False,
-    emit_cancel: bool = False,
-    cancel_data: Optional[dict] = None,
 ) -> None:
-    """CAS the Execution to `new_status` (and, if `emit_cancel`, enqueue a `Cancel`
-    event for itself in the same commit, carrying the caller's `cancel_data` as an
-    opaque payload), retrying on a concurrent writer. `require_status`, when given,
-    is re-checked on every attempt (not just before the loop) — a no-op once it no
-    longer holds, e.g. a concurrent writer already moved the Execution on. `validate`,
+    """CAS the Execution to `new_status`, retrying on a concurrent writer.
+    `require_status`, when given, is re-checked on every attempt (not just before
+    the loop) — a no-op once it no longer holds, e.g. a concurrent writer already
+    moved the Execution on. `validate`,
     when given, is also called fresh on every attempt (against the just-loaded `exe`)
     and may raise to abort — e.g. a business-rule precondition (`redrive`'s "no live
     children") that a concurrent writer could otherwise invalidate between the first
@@ -114,11 +113,8 @@ def _commit_status(
             exe.error = None
         if clear_history:
             exe.history.clear()
-        emits: list[tuple[Optional[str], Event]] = (
-            [(exe.id, Event(kind="Cancel", data=dict(cancel_data or {})))] if emit_cancel else []
-        )
         try:
-            store.commit(exe, emits)
+            store.commit(exe, [])
             return
         except StoreConflict:
             continue
@@ -159,17 +155,31 @@ def cancel(
     execution already finished (`DONE`/`CANCELLED`) — a validator rule requires
     `on Cancel` to resolve directly to a terminal, so the cooperative path always
     completes in the same step the injected `Cancel` is processed; there is no
-    window where a second `cancel()` could find the execution "mid cleanup"."""
-    exe = store.load(execution_id)
-    if exe is None:
-        raise KeyError(execution_id)
-    if exe.status in _TERMINAL:
-        return
-    if engine.has_cancel_handler(defn, exe, Event(kind="Cancel", data=dict(reason or {}))):
-        _commit_status(store, execution_id, Status.CANCELLING, emit_cancel=True, cancel_data=reason)
+    window where a second `cancel()` could find the execution "mid cleanup".
+
+    A dead-lettered (`FAILED`) execution is always terminated forcefully: its
+    position is not a trustworthy resting state (an `on_exit` failure can leave it
+    on a composite mid-cascade), so running the model's cleanup from it is unsafe.
+    The cooperative decision and its write are one CAS attempt: on a concurrent
+    write (a worker failing the execution, or moving it elsewhere) the decision is
+    re-made against the fresh record rather than applied to a stale one."""
+    for _ in range(_RETRIES):
+        exe = store.load(execution_id)
+        if exe is None:
+            raise KeyError(execution_id)
+        if exe.status in _TERMINAL:
+            return
+        cancel_event = Event(kind="Cancel", data=dict(reason or {}))
+        if exe.status is Status.FAILED or not engine.has_cancel_handler(defn, exe, cancel_event):
+            terminate(store, execution_id)
+            return
+        exe.status = Status.CANCELLING
+        try:
+            store.commit(exe, [(exe.id, cancel_event)])
+        except StoreConflict:
+            continue
         _propagate(store, execution_id, Status.CANCELLED)
-    else:
-        terminate(store, execution_id)
+        return
 
 
 def suspend(store: ExecutionStore, execution_id: str) -> None:
