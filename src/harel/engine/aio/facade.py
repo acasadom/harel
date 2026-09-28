@@ -142,6 +142,9 @@ class _AsyncStoreAdapter:
     async def delete_timer(self, execution_id, path, fire_at):
         return self._s.delete_timer(execution_id, path, fire_at)
 
+    async def purge(self, execution_id, expected_version):
+        return self._s.purge(execution_id, expected_version)
+
     async def close(self):
         return self._s.close()
 

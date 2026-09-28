@@ -9,6 +9,7 @@ from typing import Any, Optional
 from harel.engine.execution import Execution
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
 from harel.engine.store._base import DEFAULT_TRACE_MAX
+from harel.engine.store.dynamodb import _PURGE_PARTITIONS
 from harel.spec.states import Event
 
 
@@ -384,6 +385,65 @@ class AsyncDynamoDBStore:
         except self._ClientError as exc:
             if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
                 raise  # the guard didn't match (stale sweep) — a no-op, as intended
+
+    async def purge(self, execution_id: str, expected_version: int) -> bool:
+        try:
+            await self._db.delete_item(
+                TableName=self._t("executions"),
+                Key=self._raw({"id": execution_id}),
+                ConditionExpression="version = :v",
+                ExpressionAttributeValues={":v": {"N": str(expected_version)}},
+            )
+            deleted = True
+        except self._ClientError as exc:
+            if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                raise
+            resp = await self._db.get_item(
+                TableName=self._t("executions"),
+                Key=self._raw({"id": execution_id}),
+                ProjectionExpression="id",
+            )
+            if "Item" in resp:
+                return False  # moved on: touch nothing
+            deleted = False
+        # not atomic with the Execution delete — see DynamoDBStore.purge
+        for table, sort_key in _PURGE_PARTITIONS:
+            await self._delete_keys(table, await self._partition_keys(table, sort_key, execution_id))
+        for table, attr in (("outbox", "target_id"), ("spawns", "parent_id")):
+            rows = await self._scan(
+                table,
+                FilterExpression="#a = :v",
+                ExpressionAttributeNames={"#a": attr},
+                ExpressionAttributeValues={":v": {"S": execution_id}},
+                ProjectionExpression="seq",
+            )
+            await self._delete_keys(table, [self._raw({"seq": r["seq"]}) for r in rows])
+        return deleted
+
+    async def _partition_keys(self, table: str, sort_key: str, execution_id: str) -> list[dict]:
+        kwargs: dict[str, Any] = {
+            "TableName": self._t(table),
+            "KeyConditionExpression": "execution_id = :e",
+            "ExpressionAttributeValues": {":e": {"S": execution_id}},
+            "ProjectionExpression": "execution_id, #sk",
+            "ExpressionAttributeNames": {"#sk": sort_key},
+        }
+        keys: list[dict] = []
+        while True:
+            resp = await self._db.query(**kwargs)
+            keys.extend(resp.get("Items", []))
+            start = resp.get("LastEvaluatedKey")
+            if not start:
+                return keys
+            kwargs["ExclusiveStartKey"] = start
+
+    async def _delete_keys(self, table: str, keys: list[dict]) -> None:
+        for i in range(0, len(keys), 25):
+            pending = {self._t(table): [{"DeleteRequest": {"Key": k}} for k in keys[i : i + 25]]}
+            while pending:
+                pending = (await self._db.batch_write_item(RequestItems=pending)).get(
+                    "UnprocessedItems"
+                ) or {}
 
     async def close(self) -> None:
         # release only a client we own (created via create()); an injected client is the

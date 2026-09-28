@@ -133,6 +133,11 @@ class AsyncDurableRunner:
         assert loaded is not None
         return loaded
 
+    async def purge(self, execution_id: str, *, archive: Optional[Callable[[dict], Any]] = None) -> bool:
+        """Permanently delete a finished execution tree, archiving it first if `archive`
+        is given — see `control.purge`. False if it no longer exists."""
+        return await control.purge(self.store, execution_id, archive=archive)
+
     async def redrive(self, execution_id: str, target_path: str) -> Execution:
         """Force a FAILED `execution_id` back to RUNNING at `target_path` (a leaf
         the caller picks — see `control.redrive`). Use once the bug that dead-

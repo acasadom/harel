@@ -33,24 +33,32 @@ test-stack: ## Run each backend's tests directly against the real stack (needs D
 	    test uv run pytest -m stack \
 	    test/integration/test_postgres_store.py \
 	    test/integration/test_async_postgres.py \
-	    "test/integration/test_store_listing.py::test_postgres_listing" -v || EXIT=1; \
+	    "test/integration/test_store_listing.py::test_postgres_listing" \
+	    "test/integration/test_store_purge.py::test_postgres_purge" \
+	    "test/integration/test_store_purge.py::test_async_postgres_purge" -v || EXIT=1; \
 	echo "=== rqlite ===" && \
 	$$DC -e STM_STORE_BACKEND=rqlite -e STM_TRANSPORT_BACKEND=rqlite \
 	    test uv run pytest -m stack \
 	    test/integration/test_rqlite_store.py \
 	    test/integration/test_async_rqlite.py \
-	    "test/integration/test_store_listing.py::test_rqlite_listing" -v || EXIT=1; \
+	    "test/integration/test_store_listing.py::test_rqlite_listing" \
+	    "test/integration/test_store_purge.py::test_rqlite_purge" \
+	    "test/integration/test_store_purge.py::test_async_rqlite_purge" -v || EXIT=1; \
 	echo "=== mongo ===" && \
 	$$DC -e STM_STORE_BACKEND=mongo -e STM_TRANSPORT_BACKEND=mongo \
 	    test uv run pytest -m stack \
 	    test/integration/test_mongo_store.py \
 	    test/integration/test_async_mongo.py \
-	    "test/integration/test_store_listing.py::test_mongo_listing" -v || EXIT=1; \
+	    "test/integration/test_store_listing.py::test_mongo_listing" \
+	    "test/integration/test_store_purge.py::test_mongo_purge" \
+	    "test/integration/test_store_purge.py::test_async_mongo_purge" -v || EXIT=1; \
 	echo "=== dynamodb+sqs ===" && \
 	$$DC -e STM_STORE_BACKEND=dynamodb -e STM_TRANSPORT_BACKEND=sqs \
 	    test uv run pytest -m stack \
 	    test/integration/test_dynamodb_store.py \
-	    "test/integration/test_store_listing.py::test_dynamodb_listing" -v || EXIT=1; \
+	    "test/integration/test_store_listing.py::test_dynamodb_listing" \
+	    "test/integration/test_store_purge.py::test_dynamodb_purge" \
+	    "test/integration/test_store_purge.py::test_async_dynamodb_purge" -v || EXIT=1; \
 	docker compose -f deploy/docker-compose.yml down -v; \
 	exit $$EXIT
 

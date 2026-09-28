@@ -34,6 +34,9 @@ class DictStore:
         self.trace_max = DEFAULT_TRACE_MAX
         self._seq = 0
         self._spawn_seq = 0
+        # ids purged while a caller may still hold the (shared, mutable) object: a later save
+        # of that stale object must conflict instead of silently re-inserting it
+        self._purged: set[str] = set()
 
     # --- execution trace -------------------------------------------------------------
     # The opt-in execution timeline: the Driver passes one step per event to `commit`,
@@ -80,6 +83,10 @@ class DictStore:
         # (a genuine concurrent writer); the common same-object case always wins.
         if prev is not None and prev is not exe and prev.version != exe.version:
             raise StoreConflict(exe.id, expected=exe.version, found=prev.version)
+        if prev is None and exe.id in self._purged:
+            if exe.version != 0:
+                raise StoreConflict(exe.id, expected=exe.version, found=None)
+            self._purged.discard(exe.id)
         exe.version += 1
         self._by_id[exe.id] = exe
 
@@ -130,6 +137,21 @@ class DictStore:
     def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None:
         if self._timers.get((execution_id, path)) == fire_at:
             del self._timers[(execution_id, path)]
+
+    def purge(self, execution_id: str, expected_version: int) -> bool:
+        exe = self._by_id.get(execution_id)
+        if exe is not None:
+            if exe.version != expected_version:
+                return False
+            del self._by_id[execution_id]
+            self._purged.add(execution_id)
+        self._processed = {p for p in self._processed if p[0] != execution_id}
+        self._timers = {k: v for k, v in self._timers.items() if k[0] != execution_id}
+        self._outbox = [e for e in self._outbox if e.target_id != execution_id]
+        self._spawns = [s for s in self._spawns if s.parent_id != execution_id]
+        self._trace.pop(execution_id, None)
+        self._trace_idx.pop(execution_id, None)
+        return exe is not None
 
     def close(self) -> None:
         pass  # nothing to release; the dict lives with the process

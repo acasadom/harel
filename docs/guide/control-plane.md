@@ -213,3 +213,63 @@ resting state to run the model's cleanup from.
   regions (the engine always parks `active_path` *at* the fork itself and spawns one child
   Execution per region). Target a leaf before the fork instead and let the model's own
   transition re-fork it normally.
+
+## Purge
+
+Nothing above ever removes an execution: a finished one stays in the store — with its dedupe
+records, trace and any leftover timers — for good. `purge` permanently deletes a finished
+execution **tree**: the root, every region/`invoke` descendant, and everything the store keeps
+for them. Pass an `archive` to keep a copy somewhere else first:
+
+```python
+import os
+import tempfile
+
+from harel import JsonlArchive, definition_from_dsl, DurableRunner, DictStore, Event
+
+JOB = """
+event Finish {}
+machine job {
+  initial Working
+  state Working {}
+  final Done success {}
+  from Working to Done on Finish
+}
+"""
+
+defn = definition_from_dsl(JOB, "job")
+store = DictStore()
+runner = DurableRunner(store, {defn.id: defn})
+
+exe = runner.create(defn.id)
+runner.process(exe.id, Event(kind="Finish"))
+
+path = os.path.join(tempfile.mkdtemp(), "archive.jsonl")
+print("purged:  ", runner.purge(exe.id, archive=JsonlArchive(path)))
+print("in store:", store.load(exe.id))
+print("archived:", sum(1 for _ in open(path)), "tree")
+print("again:   ", runner.purge(exe.id))
+```
+
+```text
+purged:   True
+in store: None
+archived: 1 tree
+again:    False
+```
+
+- **Only finished trees.** Every member must be `DONE` or `CANCELLED`, else `ValueError`. A
+  `FAILED` dead letter is waiting for a `redrive`, so abandoning it is a deliberate step:
+  `terminate()` it first (its `error` is kept, and archived with it).
+- **Only roots.** A region or `invoke` child belongs to its parent's join; purging the root
+  removes the whole tree, so a child id is refused.
+- **The archiver runs first.** It receives `{"root_id", "executions", "traces"}` — the tree root
+  first, plus each member's trace — before anything is deleted, so an archiver that raises
+  aborts the purge. `JsonlArchive(path)` appends one line per tree and fsyncs it; any callable
+  (or, on an async runner, coroutine function) taking that dict works the same way.
+- **Safe against a concurrent change.** Descendants are deleted first and the root last, each
+  only if unchanged since it was checked. A member that moved on meanwhile (a `Reset` revived
+  the tree) raises `StoreConflict` and stops the purge with the root still in place; running
+  `purge` again resumes it. A retry may hand the archiver the same `root_id` twice.
+- A stale copy of a purged execution (a worker that loaded it before the purge) can't recreate
+  it: its next commit is a `StoreConflict`, and any queued event for it is dropped.

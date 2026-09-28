@@ -268,6 +268,14 @@ class DistributedRunner:
 
         facade.run(self._async.resume, execution_id)
 
+    def purge(self, execution_id: str, *, archive: Optional[Callable[[dict], Any]] = None) -> bool:
+        """Permanently delete a finished execution tree (root, regions, invokes and all
+        their store rows), passing it to `archive` first if given. Refuses a child or a
+        tree with a member not DONE/CANCELLED. False if it no longer exists."""
+        from harel.engine.aio import facade
+
+        return facade.run(self._async.purge, execution_id, archive=archive)
+
     def redrive(self, execution_id: str, target_path: str) -> None:
         """Force a dead-lettered (FAILED) `execution_id` back to RUNNING at
         `target_path` (a leaf state you choose). No-op if not FAILED."""

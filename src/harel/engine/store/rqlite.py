@@ -7,6 +7,7 @@ from typing import Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.store._base import (
+    _PURGE_COMPANIONS_SQL,
     DEFAULT_TRACE_MAX,
     OutboxEntry,
     SpawnEntry,
@@ -155,17 +156,24 @@ class RqliteStore:
         exe.version = old + 1  # bump BEFORE dumping so the stored JSON carries the new version
         new = exe.version
         data = exe.model_dump_json()
-        # the upsert applies only WHERE version=old; every other write is guarded on
-        # the row holding our `data` — so a CAS miss leaves the whole txn a no-op
+        # the CAS write: a brand-new Execution (old == 0) inserts only if the id is free; any
+        # other version updates only WHERE version=old — never an insert, so a stale copy of
+        # a purged Execution can't recreate it. Every other write is guarded on the row
+        # holding our `data`, so a CAS miss leaves the whole txn a no-op.
         statements: list = [
             [
-                "INSERT INTO executions (id, definition_id, data, version) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET data = excluded.data, version = excluded.version "
-                "WHERE executions.version = ?",
+                "INSERT OR IGNORE INTO executions (id, definition_id, data, version) VALUES (?, ?, ?, ?)",
                 exe.id,
                 exe.definition_id,
                 data,
                 new,
+            ]
+            if old == 0
+            else [
+                "UPDATE executions SET data = ?, version = ? WHERE id = ? AND version = ?",
+                data,
+                new,
+                exe.id,
                 old,
             ]
         ]
@@ -342,5 +350,20 @@ class RqliteStore:
             ]
         )
 
+    def purge(self, execution_id: str, expected_version: int) -> bool:
+        results = self._execute(_purge_statements(execution_id, expected_version), transaction=True)
+        return results[0].get("rows_affected", 0) == 1
+
     def close(self) -> None:
         self._session.close()
+
+
+def _purge_statements(execution_id: str, expected_version: int) -> list:
+    """One transactional request (rqlite has no interactive transactions): the CAS delete,
+    then every companion delete guarded on the Execution now being absent — so a version
+    mismatch leaves the whole request a no-op, and an already-purged id is still swept."""
+    gone = " AND NOT EXISTS (SELECT 1 FROM executions WHERE id = ?)"
+    return [
+        ["DELETE FROM executions WHERE id = ? AND version = ?", execution_id, expected_version],
+        *[[sql + gone, execution_id, execution_id] for sql in _PURGE_COMPANIONS_SQL],
+    ]

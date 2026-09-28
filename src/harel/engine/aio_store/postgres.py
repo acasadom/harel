@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 from harel.engine.execution import Execution
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
-from harel.engine.store._base import _PG_COMMIT_FN, _PG_SCHEMA_LOCK, DEFAULT_TRACE_MAX
+from harel.engine.store._base import _PG_COMMIT_FN, _PG_SCHEMA_LOCK, _PURGE_COMPANIONS_SQL, DEFAULT_TRACE_MAX
 from harel.spec.states import Event
 
 
@@ -280,6 +280,24 @@ class AsyncPostgresStore:
                     (execution_id, path, fire_at),
                 )
             await conn.commit()
+
+    async def purge(self, execution_id: str, expected_version: int) -> bool:
+        # an exception leaves the transaction to the pool, which rolls back a returned connection
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "DELETE FROM executions WHERE id = %s AND version = %s", (execution_id, expected_version)
+                )
+                deleted = cur.rowcount
+                if not deleted:
+                    await cur.execute("SELECT 1 FROM executions WHERE id = %s", (execution_id,))
+                    if await cur.fetchone() is not None:
+                        await conn.rollback()
+                        return False  # moved on: touch nothing
+                for sql in _PURGE_COMPANIONS_SQL:
+                    await cur.execute(sql.replace("?", "%s"), (execution_id,))
+            await conn.commit()
+        return bool(deleted)
 
     async def close(self) -> None:
         await self._pool.close()

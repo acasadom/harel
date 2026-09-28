@@ -7,6 +7,7 @@ public API is re-exported here so callers stay decoupled from the internal
 module layout.
 """
 
+from harel.archive import JsonlArchive
 from harel.definition.validate import Issue, ValidationError, validate, validate_or_raise
 from harel.dsl import DslError, definition_from_dsl, definition_from_dsl_file
 from harel.dsl.resolve import FileResolver, ModuleResolver, SourceResolver
@@ -21,6 +22,7 @@ from harel.spec.states import Action, Event, EventFilter, LogEvent, Selector, Tr
 from harel.viz.plantuml import render
 
 __all__ = [
+    "JsonlArchive",
     "Action",
     "Event",
     "EventFilter",

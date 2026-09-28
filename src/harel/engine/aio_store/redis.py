@@ -8,6 +8,7 @@ from typing import Any, Optional
 from harel.engine.execution import Execution
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
 from harel.engine.store._base import _COMMIT_CAS_LUA, DEFAULT_TRACE_MAX
+from harel.engine.store.redis import _timer_owner
 from harel.spec.states import Event
 
 
@@ -178,6 +179,39 @@ class AsyncRedisStore:
         score = await self._r.zscore(self._k("timers"), member)
         if score is not None and float(score) == fire_at:
             await self._r.zrem(self._k("timers"), member)
+
+    async def purge(self, execution_id: str, expected_version: int) -> bool:
+        key = self._k(f"exe:{execution_id}")
+        async with self._r.pipeline() as pipe:
+            try:
+                await pipe.watch(key)
+                current = await pipe.get(key)
+                if current is not None and json.loads(current)["version"] != expected_version:
+                    await pipe.unwatch()
+                    return False  # moved on: touch nothing
+                members = await pipe.zrange(self._k("timers"), 0, -1)
+                timers = [m for m in members if _timer_owner(m) == execution_id]
+                outbox_rows = (await pipe.hgetall(self._k("outbox"))).items()
+                outbox = [s for s, v in outbox_rows if json.loads(v)["t"] == execution_id]
+                spawn_rows = (await pipe.hgetall(self._k("spawns"))).items()
+                spawns = [s for s, v in spawn_rows if json.loads(v)["p"] == execution_id]
+                pipe.multi()
+                pipe.delete(
+                    key,
+                    self._k(f"processed:{execution_id}"),
+                    self._k(f"trace:{execution_id}"),
+                    self._k(f"trace:seq:{execution_id}"),
+                )
+                if timers:
+                    pipe.zrem(self._k("timers"), *timers)
+                if outbox:
+                    pipe.hdel(self._k("outbox"), *outbox)
+                if spawns:
+                    pipe.hdel(self._k("spawns"), *spawns)
+                await pipe.execute()
+                return current is not None
+            except self._WatchError:
+                return False  # a concurrent writer moved it on
 
     async def close(self) -> None:
         await self._r.aclose()
