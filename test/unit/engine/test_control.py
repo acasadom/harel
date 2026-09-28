@@ -438,6 +438,35 @@ def test_redrive_over_the_distributed_runner(backend):
     assert revived.status is Status.RUNNING and revived.active_path == "A" and revived.error is None
 
 
+async def test_async_redrive_clears_history_same_as_the_sync_control_plane():
+    # aio.control.redrive is the sync control-plane's async mirror — its own
+    # docstring says so — so it must clear stale history the same way: a level
+    # whose own on_exit raised never recorded its own history entry, even though
+    # a descendant that exited cleanly earlier in the same cascade did, so a
+    # partial, inconsistent history is discarded rather than kept.
+    from harel.engine.aio import control as aio_control
+    from harel.engine.aio_store import AsyncDictStore
+    from harel.engine.execution import Execution
+
+    defn = definition_from_dsl(DEAD_LETTERS, "M")
+    store = AsyncDictStore()
+    exe = Execution(
+        definition_id=defn.id,
+        status=Status.FAILED,
+        active_path="A",
+        history={"": "A"},
+        error="RuntimeError: boom",
+    )
+    await store.save(exe)
+
+    await aio_control.redrive(store, defn, exe.id, "A")
+
+    revived = await store.load(exe.id)
+    assert revived.status is Status.RUNNING
+    assert revived.error is None
+    assert revived.history == {}
+
+
 def test_redrive_rejects_a_target_outside_the_executions_own_branch():
     """A region spawned by an orthogonal fork is its own Execution, rooted at the
     branch's path (e.g. `root_path='Fork.A'`). A target outside that branch would
