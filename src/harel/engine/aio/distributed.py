@@ -24,7 +24,7 @@ from harel.definition.model import Definition
 from harel.engine.aio import control
 from harel.engine.aio.driver import _AsyncRuntimeDriver
 from harel.engine.distributed import _defn_for, _register_submachines, _resolve_machine
-from harel.engine.execution import Execution, Status
+from harel.engine.execution import Execution, Status, stamp
 from harel.engine.resolve import MachineResolver
 from harel.engine.runtime import _CONTROL
 from harel.engine.store import StoreConflict
@@ -92,6 +92,7 @@ class AsyncTransportDriver(_AsyncRuntimeDriver):
         if event.kind not in _CONTROL and live:
             for child in live:
                 await self.transport.publish(child.id, event, priority=child.priority)
+            stamp(exe, self._clock())
             await self.store.commit(exe, [], processed_event_id=event.id)
             enqueued = False  # broadcast went straight to the transport; nothing in the outbox
         else:
@@ -361,6 +362,7 @@ class AsyncDistributedRunner:
         if start_on_create:
             await self._persist_start(exe)
         else:
+            stamp(exe, self._clock())
             await self.store.save(exe)
         return exe
 
@@ -383,6 +385,7 @@ class AsyncDistributedRunner:
         pick up (see `route`'s comment on orphan draining) — raising here would cost
         the caller the very id they'd need to retry via `start(execution_id)`."""
         event = Event(kind="Start", data=dict(data or {}))
+        stamp(exe, self._clock())
         await self.store.commit(exe, [(exe.id, event)])
         try:
             await self.transport.publish(exe.id, event, priority=exe.priority)
@@ -477,17 +480,17 @@ class AsyncDistributedRunner:
 
     async def cancel(self, execution_id: str, *, reason: Optional[dict] = None) -> None:
         driver, exe = await self._driver_for(execution_id)
-        await control.cancel(self.store, driver.defn, execution_id, reason=reason)
+        await control.cancel(self.store, driver.defn, execution_id, reason=reason, clock=self._clock)
         await driver._flush(primary_priority={execution_id: exe.priority})
 
     async def terminate(self, execution_id: str) -> None:
-        await control.terminate(self.store, execution_id)
+        await control.terminate(self.store, execution_id, clock=self._clock)
 
     async def suspend(self, execution_id: str) -> None:
-        await control.suspend(self.store, execution_id)
+        await control.suspend(self.store, execution_id, clock=self._clock)
 
     async def resume(self, execution_id: str) -> None:
-        await control.resume(self.store, execution_id)
+        await control.resume(self.store, execution_id, clock=self._clock)
 
     async def purge(self, execution_id: str, *, archive: Optional[Callable[[dict], Any]] = None) -> bool:
         """Permanently delete a finished execution tree, archiving it first if `archive`
@@ -498,4 +501,4 @@ class AsyncDistributedRunner:
         """Force a FAILED `execution_id` back to RUNNING at `target_path` (a leaf
         the caller picks — see `control.redrive`)."""
         driver, _exe = await self._driver_for(execution_id)
-        await control.redrive(self.store, driver.defn, execution_id, target_path)
+        await control.redrive(self.store, driver.defn, execution_id, target_path, clock=self._clock)

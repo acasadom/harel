@@ -121,7 +121,7 @@ class SqliteStore:
         rows = self._conn.execute(
             "SELECT id, definition_id, version, json_extract(data,'$.status'), "
             "json_extract(data,'$.outcome'), json_extract(data,'$.active_path'), "
-            "json_extract(data,'$.parent_id') FROM executions "
+            "json_extract(data,'$.parent_id'), json_extract(data,'$.finished_at') FROM executions "
             f"WHERE {' AND '.join(where)} ORDER BY id LIMIT ? OFFSET ?",
             (*params, limit + 1, off),  # fetch one extra to know if there's a next page
         ).fetchall()
@@ -134,6 +134,7 @@ class SqliteStore:
                 outcome=r[4],
                 active_path=r[5],
                 parent_id=r[6],
+                finished_at=r[7],
             )
             for r in rows[:limit]
         ]

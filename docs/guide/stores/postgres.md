@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS executions
 | --- | --- | --- |
 | `id` | TEXT, **PRIMARY KEY** | the `Execution.id` (a uuid hex). One row per Execution. |
 | `definition_id` | TEXT NOT NULL | the id of the `Definition` this Execution runs — a broken-out column so `list_executions` can filter by it without parsing the blob. |
-| `data` | TEXT NOT NULL | the **full Execution serialized** — `exe.model_dump_json()`. Holds everything: `status`, `outcome`, `error`, `active_path`, `history`, `context`, `children` (the join counter), `parent_id`/`child_id`, `invoke_seq`, `definition_fqn`, and `version`. Treated as an opaque blob except where the listing path casts it to `jsonb` and reaches in with `->>` for the summary projection. |
+| `data` | TEXT NOT NULL | the **full Execution serialized** — `exe.model_dump_json()`. Holds everything: `status`, `outcome`, `error`, `active_path`, `history`, `context`, `children` (the join counter), `parent_id`/`child_id`, `invoke_seq`, `definition_fqn`, `created_at`/`updated_at`/`finished_at`, and `version`. Treated as an opaque blob except where the listing path casts it to `jsonb` and reaches in with `->>` for the summary projection. |
 | `version` | INT NOT NULL | the **CAS token** — a broken-out copy of `Execution.version`. A write succeeds only if the stored `version` still equals the one the Execution was loaded at; the CAS compares this column (not the JSON) so it is a cheap indexed scalar. |
 
 ### `outbox` — the transactional event outbox
@@ -376,7 +376,8 @@ and the scalars pulled out with `->>`:
 
 ```text
 "SELECT id, definition_id, version, data::jsonb->>'status', "
-"data::jsonb->>'outcome', data::jsonb->>'active_path', data::jsonb->>'parent_id' "
+"data::jsonb->>'outcome', data::jsonb->>'active_path', data::jsonb->>'parent_id', "
+"(data::jsonb->>'finished_at')::float8 "
 "FROM executions WHERE {' AND '.join(where)} ORDER BY id LIMIT %s OFFSET %s"
 ```
 
@@ -419,6 +420,26 @@ re-schedule of the same path to a new time survives a stale sweep (the old `fire
 matches, the DELETE is a no-op).
 
 `close()` calls `self._conn.close()`.
+
+## `purge`
+
+`purge(execution_id, expected_version)` is one transaction on the connection (the async twin: on
+one pooled connection) — the same shared statements as the SQLite family, with `%s` placeholders:
+
+```text
+DELETE FROM executions WHERE id = %s AND version = %s        -- the CAS
+-- 0 rows and the id still exists -> it moved on: roll back, return False
+DELETE FROM processed_events WHERE execution_id = %s
+DELETE FROM trace            WHERE execution_id = %s
+DELETE FROM timers           WHERE execution_id = %s
+DELETE FROM outbox           WHERE target_id    = %s
+DELETE FROM spawns           WHERE parent_id    = %s
+COMMIT
+```
+
+Any error rolls it back. It returns True if the Execution was deleted. If no row exists under the id at all, the companion deletes still run (a no-op, or the leftovers of an earlier interrupted purge) and it returns False. The control plane's [purge](../control-plane.md#purge) calls it once per member of a finished tree. After a purge, a stale copy's commit — either path — finds
+no row at its version: the multi-statement path only inserts when `old == 0`, and
+`harel_commit_cas` returns false, so it raises `StoreConflict` instead of recreating the row.
 
 ## Async twin
 

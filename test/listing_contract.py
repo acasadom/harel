@@ -34,6 +34,9 @@ SEED = [
 ]
 
 
+FINISHED_AT = 1700000000.5  # projected into the summary as `finished_at`
+
+
 def seed(store, ns: str = "") -> tuple[str, str]:
     """Persist the SEED executions namespaced by `ns`; return the two definition_ids."""
     d1, d2 = f"{ns}d1", f"{ns}d2"
@@ -45,6 +48,7 @@ def seed(store, ns: str = "") -> tuple[str, str]:
                 definition_id=defs[which],
                 status=status,
                 parent_id=f"{ns}{parent}" if parent else None,
+                finished_at=FINISHED_AT if status is Status.DONE else None,
             )
         )
     return d1, d2
@@ -89,6 +93,9 @@ def assert_contract(store, *, ordered: bool, ns: str = "") -> None:
     one = store.list_executions(definition_id=d1, status=[Status.RUNNING], limit=1).items[0]
     assert one.definition_id == d1 and one.status == Status.RUNNING and one.parent_id is None
     assert not hasattr(one, "context") and not hasattr(one, "history")
+    assert one.finished_at is None
+    done = store.list_executions(definition_id=d1, status=[Status.DONE], limit=10).items
+    assert done and all(s.finished_at == FINISHED_AT for s in done)
 
     if ordered:
         # a page (scoped to d1) is sorted by id and respects the per-page bound; pagination

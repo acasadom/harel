@@ -258,7 +258,8 @@ archived: 1 tree
 again:    False
 ```
 
-- **Only finished trees.** Every member must be `DONE` or `CANCELLED`, else `ValueError`. A
+- **Only finished trees.** Every member must be `DONE` or `CANCELLED`, else `PurgeRefused` (a
+  `ValueError`). A
   `FAILED` dead letter is waiting for a `redrive`, so abandoning it is a deliberate step:
   `terminate()` it first (its `error` is kept, and archived with it).
 - **Only roots.** A region or `invoke` child belongs to its parent's join; purging the root
@@ -273,3 +274,32 @@ again:    False
   `purge` again resumes it. A retry may hand the archiver the same `root_id` twice.
 - A stale copy of a purged execution (a worker that loaded it before the purge) can't recreate
   it: its next commit is a `StoreConflict`, and any queued event for it is dropped.
+
+### Purging by age
+
+Every commit stamps three wall-clock fields on the `Execution`: `created_at` (the first commit),
+`updated_at` (the latest) and `finished_at` (when it became `DONE`/`CANCELLED` — cleared again if
+a `Reset` revives it). They come from the runner's injectable `clock` — control-plane commands
+included — so a simulated clock yields consistent timestamps; the `control` functions called
+directly (as the monitor does) default to the wall clock.
+
+`purge_finished` purges every root tree that finished more than `older_than` seconds ago — the
+same `purge` per tree, so the same rules apply — and reports what it did:
+
+```text
+from harel.engine.control import purge_finished
+
+report = purge_finished(store, older_than=30 * 86400, archive=JsonlArchive("archive.jsonl"))
+report.purged           # root ids purged
+report.skipped_undated  # finished roots with no finished_at (see include_undated)
+report.refused          # root id -> why purge refused it (a member still live, a concurrent change)
+```
+
+`statuses` narrows the candidates to `DONE` or `CANCELLED`, `limit` caps one run, and `dry_run`
+reports without deleting. Candidates are collected before anything is deleted; a tree `purge`
+refuses (`PurgeRefused`, or a `StoreConflict` from a concurrent change) is reported and skipped,
+while any other error — an archiver's included — stops the run. Executions stored before
+`finished_at` existed have none, and are skipped unless `include_undated=True`. It reads
+candidates with `list_executions`, so it takes a sync store — the `harel purge` command
+([CLI](cli.md)) wraps it over the store configured by the `STM_STORE_*` environment.
+

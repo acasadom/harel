@@ -10,6 +10,7 @@ an in-memory `run`, and the existing formatter / language server. Built on the s
     harel run      FILE [NAME] [-e KIND[:JSON] ...] [--seed JSON] [--validate]
     harel fmt      FILES... [--check|--diff]
     harel lsp
+    harel purge    --older-than AGE [--status S ...] [--archive PATH] [--dry-run] ...
 """
 
 from __future__ import annotations
@@ -164,6 +165,54 @@ def _version() -> str:
         return "0+unknown"
 
 
+_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+
+
+def _duration(text: str) -> float:
+    """Parse an age like `30d`, `12h`, `90m`, `45s`, `2w` (or plain seconds) into seconds."""
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([smhdw]?)\s*", text)
+    if match is None:
+        raise argparse.ArgumentTypeError(f"invalid age {text!r} (e.g. 30d, 12h, 90m, 45s)")
+    return float(match.group(1)) * _UNITS[match.group(2) or "s"]
+
+
+def _cmd_purge(args: argparse.Namespace) -> int:
+    from harel.archive import JsonlArchive
+    from harel.engine.control import purge_finished
+    from harel.engine.execution import Status
+    from harel.worker import build_store
+
+    try:
+        store = build_store()
+    except ValueError as exc:  # a backend setting missing from the STM_STORE_* environment
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    try:
+        report = purge_finished(
+            store,
+            older_than=args.older_than,
+            statuses=[Status[s.upper()] for s in (args.status or ["done", "cancelled"])],
+            archive=JsonlArchive(args.archive) if args.archive else None,
+            include_undated=args.include_undated,
+            limit=args.limit,
+            dry_run=args.dry_run,
+        )
+    except OSError as exc:  # the archive file can't be written: nothing further was deleted
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        store.close()
+    verb = "would purge" if args.dry_run else "purged"
+    print(f"{verb}: {len(report.purged)}")
+    for root_id in report.purged if args.verbose else ():
+        print(f"  {root_id}")
+    if report.skipped_undated:
+        print(f"skipped (no finished_at; see --include-undated): {report.skipped_undated}")
+    for root_id, reason in report.refused.items():
+        print(f"refused {root_id}: {reason}", file=sys.stderr)
+    return 1 if report.refused else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="harel", description="Durable, distributed statecharts — tooling CLI."
@@ -206,6 +255,34 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", metavar="JSON", help="initial context as a JSON object")
     p.add_argument("--validate", action="store_true", help="validate before running")
     p.set_defaults(func=_cmd_run)
+
+    p = sub.add_parser(
+        "purge",
+        help="permanently delete finished executions older than an age (store from STM_STORE_* env)",
+    )
+    p.add_argument(
+        "--older-than",
+        required=True,
+        type=_duration,
+        metavar="AGE",
+        help="finished at least this long ago: 30d, 12h, 90m, 45s, 2w",
+    )
+    p.add_argument(
+        "--status",
+        action="append",
+        choices=["done", "cancelled"],
+        help="only roots in this status (repeatable; default: both)",
+    )
+    p.add_argument("--archive", metavar="PATH", help="append each tree to this JSONL file before deleting it")
+    p.add_argument("--dry-run", action="store_true", help="report what would be purged, delete nothing")
+    p.add_argument("--limit", type=int, metavar="N", help="purge at most N trees")
+    p.add_argument(
+        "--include-undated",
+        action="store_true",
+        help="also purge finished roots with no finished_at (written before it was recorded)",
+    )
+    p.add_argument("-v", "--verbose", action="store_true", help="list the purged root ids")
+    p.set_defaults(func=_cmd_purge)
 
     # `fmt` and `lsp` are passthroughs handled in main() before parsing (so their
     # own flags, e.g. `--check`, reach the underlying tools untouched); declared here

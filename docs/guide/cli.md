@@ -12,6 +12,7 @@ harel run      FILE [NAME] [-e KIND[:JSON]] # drive a machine with events (in-me
 harel fmt      FILES... [--check|--diff]    # format .stm files
 harel lsp                                   # start the DSL language server (stdio)
 harel monitor  [--definitions-dir DIR]      # the monitoring TUI (needs the `tui` extra) — see Monitor
+harel purge    --older-than AGE [...]       # delete finished executions older than AGE (real store)
 harel --version
 ```
 
@@ -70,6 +71,31 @@ status: DONE  outcome: success
 paths like `pkg.mod.fn`, run it from your project root) and from the `.stm` file's own
 directory. Seed the initial context with `--seed '{"items": [...]}'`, and add `--validate` to
 check the machine before running.
+
+## Purging finished executions
+
+`harel purge` permanently deletes the finished execution trees (root, regions, invokes and all
+their store rows) whose root finished at least `AGE` ago — `30d`, `12h`, `90m`, `45s`, `2w`. It
+works on the **real store**, configured from the same `STM_STORE_*` environment as the worker and
+the monitor, so run it as a scheduled job alongside the workers rather than inside them:
+
+```text
+$ harel purge --older-than 30d --dry-run          # report only
+would purge: 1284
+$ harel purge --older-than 30d --archive /backups/harel.jsonl
+purged: 1284
+```
+
+- `--archive PATH` appends each tree to a JSONL file (one fsynced line per tree) before deleting it.
+- `--status done` / `--status cancelled` narrows the candidates (default: both). `FAILED` dead
+  letters are never purged — `terminate` one to abandon it first.
+- `--limit N` caps one run; `-v` lists the purged root ids.
+- Executions written before `finished_at` was recorded carry none, and are skipped (and counted)
+  unless `--include-undated`.
+- A tree that can't be purged (a member still live, or changed concurrently) is reported on
+  stderr and skipped; the exit code is 1 if any was.
+
+See [purge](control-plane.md#purge) for the semantics.
 
 `fmt` and `lsp` are passthroughs: `harel fmt --check **/*.stm` and `harel lsp` behave exactly
 like the standalone `harel-fmt` / `harel-lsp` entry points.

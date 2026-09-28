@@ -184,6 +184,15 @@ point: if the model re-scheduled the same `(execution_id, path)` to a *new* time
 sweep reading it and deleting it, the stored `fire_at` no longer matches, the delete is a
 no-op, and the freshly re-armed timer survives a stale sweep.
 
+### `purge(execution_id, expected_version) -> bool`
+
+Removes the Execution if it is still at `expected_version` (else returns False and touches
+nothing), plus its `_processed` pairs, `_timers`, `_trace`/`_trace_idx`, the `_outbox` entries
+addressed to it and the `_spawns` it issued. Because `load` hands out the stored object itself, a
+caller may still hold it after the purge; the id is remembered in `_purged` so a later `save` of
+that object (version > 0) raises `StoreConflict` instead of re-inserting it. A brand-new Execution
+(version 0) may reuse the id. See [purge](../control-plane.md#purge).
+
 ### Trace: `_record_trace` / `append_trace` / `read_trace`
 
 ```text

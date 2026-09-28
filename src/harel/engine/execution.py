@@ -84,6 +84,26 @@ class Execution(pydantic.BaseModel):
     #                                  fan-out): the per-entry seq in the deterministic child ids,
     #                                  so re-entering the same state in a loop spawns fresh children
 
+    # --- wall-clock bookkeeping (epoch seconds; None on records written before it existed) --
+    created_at: Optional[float] = None  # first commit
+    updated_at: Optional[float] = None  # latest commit
+    finished_at: Optional[float] = None  # when it became DONE/CANCELLED; cleared if revived
+
+
+_FINISHED = (Status.DONE, Status.CANCELLED)
+
+
+def stamp(exe: Execution, now: float) -> None:
+    """Set the bookkeeping timestamps for a commit about to happen at `now`. Called by every
+    writer just before `store.commit`/`save`, with the runner's clock where it has one."""
+    if exe.created_at is None:
+        exe.created_at = now
+    exe.updated_at = now
+    if exe.status not in _FINISHED:
+        exe.finished_at = None
+    elif exe.finished_at is None:
+        exe.finished_at = now
+
 
 class ExecutionSummary(pydantic.BaseModel):
     """A lightweight projection of an `Execution` for list/monitor views: every field is
@@ -98,6 +118,7 @@ class ExecutionSummary(pydantic.BaseModel):
     active_path: Optional[str] = None
     version: int = 0
     parent_id: Optional[str] = None  # None => a root; set => an orthogonal region / invoke child
+    finished_at: Optional[float] = None
 
     @classmethod
     def of(cls, exe: "Execution") -> "ExecutionSummary":
@@ -110,6 +131,7 @@ class ExecutionSummary(pydantic.BaseModel):
             active_path=exe.active_path,
             version=exe.version,
             parent_id=exe.parent_id,
+            finished_at=exe.finished_at,
         )
 
     @classmethod
@@ -124,6 +146,7 @@ class ExecutionSummary(pydantic.BaseModel):
             active_path=raw.get("active_path"),
             version=version,
             parent_id=raw.get("parent_id"),
+            finished_at=raw.get("finished_at"),
         )
 
 

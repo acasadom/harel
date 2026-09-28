@@ -440,6 +440,24 @@ near-empty table is cheap, and it needs no secondary index or partition-key prob
 deliberately accepted cost of the document model here.
 ```
 
+## `purge`
+
+`purge(execution_id, expected_version)` first deletes the Execution item with
+`ConditionExpression="version = :v"`; a failed condition with the item still present means it
+moved on, and nothing else is touched. Then it removes the companions:
+
+```text
+Query processed / trace / timers by partition key execution_id -> BatchWriteItem deletes (25 each,
+                                                                  re-sending UnprocessedItems)
+Scan outbox (target_id = id) and spawns (parent_id = id)      -> BatchWriteItem deletes
+```
+
+This is **not** one transaction — `TransactWriteItems` caps at 100 items, and the dedupe and trace
+partitions of a long-lived Execution are unbounded. The Execution goes first, so a crash midway
+only leaves unreachable rows; a retry (the Execution already absent) still removes them.
+It returns True if the Execution was deleted. If no row exists under the id at all, the companion deletes still run (a no-op, or the leftovers of an earlier interrupted purge) and it returns False. The control plane's [purge](../control-plane.md#purge) calls it once per member of a finished tree. A stale copy's later commit fails its `version = :ov` condition, so it can't be
+recreated.
+
 ## Async twin
 
 [`aio_store/dynamodb.py`](https://github.com/acasadom/harel/blob/main/src/harel/engine/aio_store/dynamodb.py) is `AsyncDynamoDBStore` —

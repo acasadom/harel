@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS executions
 | --- | --- | --- |
 | `id` | TEXT, **PRIMARY KEY** | the `Execution.id` (a uuid hex). One row per Execution. |
 | `definition_id` | TEXT NOT NULL | the id of the `Definition` this Execution runs — a broken-out column so `list_executions` can filter by it without parsing the blob. |
-| `data` | TEXT NOT NULL | the **full Execution serialized**, `exe.model_dump_json()`. Holds everything: `status`, `outcome`, `error`, `active_path`, `history`, `context`, `children` (the join counter), `parent_id`/`child_id`, `invoke_seq`, `definition_fqn`, and `version`. The store treats it as an opaque blob except where it reaches inside with `json_extract` for the summary projection. |
+| `data` | TEXT NOT NULL | the **full Execution serialized**, `exe.model_dump_json()`. Holds everything: `status`, `outcome`, `error`, `active_path`, `history`, `context`, `children` (the join counter), `parent_id`/`child_id`, `invoke_seq`, `definition_fqn`, `created_at`/`updated_at`/`finished_at`, and `version`. The store treats it as an opaque blob except where it reaches inside with `json_extract` for the summary projection. |
 | `version` | INTEGER NOT NULL | the **optimistic-concurrency token** — a broken-out copy of `Execution.version`. A write succeeds only if the stored `version` still matches the one the Execution was loaded at; the CAS uses this column (not the JSON) so the comparison is a cheap indexed scalar. |
 
 `data` is the source of truth for the Execution; `definition_id` and `version` are denormalized
@@ -361,7 +361,7 @@ columns:
 ```text
 SELECT id, definition_id, version, json_extract(data,'$.status'),
        json_extract(data,'$.outcome'), json_extract(data,'$.active_path'),
-       json_extract(data,'$.parent_id') FROM executions
+       json_extract(data,'$.parent_id'), json_extract(data,'$.finished_at') FROM executions
 WHERE <conditions> ORDER BY id LIMIT ? OFFSET ?
 ```
 
@@ -427,6 +427,27 @@ the stale sweep instead of being silently dropped. It commits on its own.
 ### `close`
 
 `self._conn.close()` — releases the connection.
+
+## `purge`
+
+`purge(execution_id, expected_version)` permanently deletes one Execution and every row keyed by
+it, in **one transaction** — the same all-or-nothing unit as `commit`:
+
+```text
+DELETE FROM executions WHERE id = ? AND version = ?        -- the CAS
+-- 0 rows and the id still exists -> it moved on: roll back, return False
+DELETE FROM processed_events WHERE execution_id = ?
+DELETE FROM trace            WHERE execution_id = ?
+DELETE FROM timers           WHERE execution_id = ?
+DELETE FROM outbox           WHERE target_id    = ?
+DELETE FROM spawns           WHERE parent_id    = ?
+COMMIT
+```
+
+Any error rolls the whole transaction back. It returns True if the Execution was deleted. If no row exists under the id at all, the companion deletes still run (a no-op, or the leftovers of an earlier interrupted purge) and it returns False. The control plane's [purge](../control-plane.md#purge) calls it once per member of a finished tree.
+Afterwards a commit of a stale copy of the Execution finds no row at its version and raises
+`StoreConflict` (`_write` inserts only when `old == 0`), so a purged Execution is never recreated.
+The async twin runs the same transaction under its connection lock.
 
 ## Async twin (`aio_store/sqlite.py`)
 

@@ -109,26 +109,26 @@ class AsyncDurableRunner:
         if exe is None:
             raise KeyError(execution_id)
         driver = self._driver(exe.definition_id)
-        await control.cancel(self.store, driver.defn, execution_id, reason=reason)
+        await control.cancel(self.store, driver.defn, execution_id, reason=reason, clock=self._clock)
         await driver.recover()  # deliver the injected Cancel inline (runs the cleanup)
         loaded = await self.store.load(execution_id)
         assert loaded is not None
         return loaded
 
     async def terminate(self, execution_id: str) -> Execution:
-        await control.terminate(self.store, execution_id)
+        await control.terminate(self.store, execution_id, clock=self._clock)
         loaded = await self.store.load(execution_id)
         assert loaded is not None
         return loaded
 
     async def suspend(self, execution_id: str) -> Execution:
-        await control.suspend(self.store, execution_id)
+        await control.suspend(self.store, execution_id, clock=self._clock)
         loaded = await self.store.load(execution_id)
         assert loaded is not None
         return loaded
 
     async def resume(self, execution_id: str) -> Execution:
-        await control.resume(self.store, execution_id)
+        await control.resume(self.store, execution_id, clock=self._clock)
         loaded = await self.store.load(execution_id)
         assert loaded is not None
         return loaded
@@ -146,7 +146,7 @@ class AsyncDurableRunner:
         if exe is None:
             raise KeyError(execution_id)
         driver = self._driver(exe.definition_id)
-        await control.redrive(self.store, driver.defn, execution_id, target_path)
+        await control.redrive(self.store, driver.defn, execution_id, target_path, clock=self._clock)
         loaded = await self.store.load(execution_id)
         assert loaded is not None
         return loaded
