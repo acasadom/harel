@@ -135,6 +135,8 @@ class Definition:
     events: dict[str, EventType] = field(default_factory=dict)  # declared event types (empty => unchecked)
     submachines: dict[str, "Definition"] = field(default_factory=dict)  # synthetic FQN -> inline `invoke`
     #                                                                     target Definition (QML-style)
+    ttl: Optional[int] = None  # seconds a root execution may go without a domain event before it
+    #                            is expired (`Expired`); None = no inactivity limit
 
     def get(self, path: str) -> Optional[Node]:
         return self.index.get(path)

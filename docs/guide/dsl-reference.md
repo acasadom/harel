@@ -32,6 +32,7 @@ on exit <action>            # hook: on leaving
 on activity <action>        # hook: event arrived with no transition
 timeout 900                 # arm a durable timer (seconds)
 timeout context key         # …with the delay read from context[key]
+ttl 3600                    # machine only: expire after this long without a domain event
 outcome <label>             # this terminal's verdict (final is sugar over this)
 carry k1, k2                # context keys a region propagates on Finished
 defer EventA, EventB        # hold these events while unhandled here; re-deliver on a state that handles them
@@ -56,6 +57,13 @@ On an `orthogonal` node, `cancel_on_failure` ends the block as soon as any regio
 non-success terminal (the join resolves via its `else`), and a `timeout` on the node bounds the
 whole parallel block. Both **cancel** the regions still running (fire-and-forget); a clean join
 cancels nothing.
+
+`ttl` (machine level only — a `DslError` on a state, fragment or inline `invoke` body) bounds
+how long a **root** execution may go without receiving a domain event. Each one restarts the
+budget; the machine's own `Timeout`s don't. When it runs out the engine delivers `Expired`: an
+`on Expired` in scope takes the execution straight to a terminal, and without one it ends
+forcefully, `CANCELLED` with outcome `expired`. A region or `invoke` child never carries a
+`ttl`; an event broadcast to the regions still counts for the root.
 
 See: [deferred events](../tutorial/15-deferred-events), [actions](../tutorial/02-actions),
 [outcomes](../tutorial/03-outcomes), [hierarchy](../tutorial/06-hierarchy),
@@ -137,8 +145,8 @@ See: [fragments](../tutorial/09-fragments), [imports](../tutorial/10-imports),
 
 ## Reserved events
 
-`Start`, `Finished`, `Timeout`, `Cancel`, `Reset`, `SetState`, `Returned`, `error` are the
-engine's own events — don't use these names for your domain events. (`CancelOrder`, not `Cancel`,
+`Start`, `Finished`, `Timeout`, `Cancel`, `Reset`, `SetState`, `Returned`, `error`, `Expired`
+are the engine's own events — don't use these names for your domain events. (`CancelOrder`, not `Cancel`,
 for a domain "cancel".)
 
 `Cancel` in particular is the control plane's own teardown signal (see
@@ -150,6 +158,11 @@ the injected `Cancel` is processed — it never leaves the execution parked mid-
 for a refund confirmation later, ...) is modelling business cancellation, and belongs on its own
 event name (`CancelOrder`), handled with ordinary transitions, free to take as many steps as it
 needs — with no relation to `cancel()` at all.
+
+`Expired` (the machine's `ttl` running out — see [timers](../tutorial/07-timers)) is held to the
+same rule as `Cancel`: `harel validate` rejects an `on Expired` whose target is not a terminal,
+and the engine won't take an unsafe one at runtime (it ends the execution forcefully instead). An
+`on Expired` in a machine with no `ttl` never fires, and is a validation warning.
 
 `on error` fires when a state's action **raises**: the engine synthesises an `error` event
 carrying the exception's `type` and `message` (so `on error where type == "TimeoutError"` routes

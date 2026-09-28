@@ -27,7 +27,7 @@ from harel.engine.distributed import _defn_for, _register_submachines, _resolve_
 from harel.engine.execution import Execution, Status, stamp
 from harel.engine.resolve import MachineResolver
 from harel.engine.runtime import _CONTROL
-from harel.engine.store import StoreConflict
+from harel.engine.store import StoreConflict, TimerOp
 from harel.engine.transport import Lease
 from harel.spec.states import Event
 
@@ -92,8 +92,13 @@ class AsyncTransportDriver(_AsyncRuntimeDriver):
         if event.kind not in _CONTROL and live:
             for child in live:
                 await self.transport.publish(child.id, event, priority=child.priority)
+            timers: tuple[TimerOp, ...] = ()
+            delay = engine.ttl_delay(self.defn, exe)  # the broadcast is activity for exe's `ttl`
+            if delay is not None:
+                exe.expires_at = self._clock() + delay
+                timers = (TimerOp("schedule", engine.TTL_PATH, exe.expires_at),)
             stamp(exe, self._clock())
-            await self.store.commit(exe, [], processed_event_id=event.id)
+            await self.store.commit(exe, [], processed_event_id=event.id, timers=timers)
             enqueued = False  # broadcast went straight to the transport; nothing in the outbox
         else:
             enqueued = await self._run(exe, engine.process(self.defn, exe, event), event_id=event.id)

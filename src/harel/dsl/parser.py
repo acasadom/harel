@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from lark import Lark, Token, Transformer, v_args
-from lark.exceptions import LarkError, UnexpectedCharacters, UnexpectedEOF, UnexpectedInput
+from lark.exceptions import LarkError, UnexpectedCharacters, UnexpectedEOF, UnexpectedInput, VisitError
 
 _OPS = {"==": "eq", "!=": "ne", "<": "lt", "<=": "le", ">": "gt", ">=": "ge", "in": "in"}
 _KIND_TYPE = {"orthogonal": "OrthogonalState"}
@@ -115,6 +115,17 @@ def _lit(tok: Token) -> Any:
     if tok.type == "BOOL":
         return s == "true"
     return float(s) if ("." in s or "e" in s or "E" in s) else int(s)
+
+
+def _refuse_ttl(cfg: dict, where: str, meta: Any = None) -> None:
+    """`ttl` bounds a whole execution's inactivity, so it belongs to a `machine` only: a
+    state, fragment or inline `invoke` body never runs as a root execution."""
+    if "ttl" in cfg:
+        raise DslError(
+            f"`ttl` is only allowed at the machine level, not on {where}",
+            line=getattr(meta, "line", None),
+            column=getattr(meta, "column", None),
+        )
 
 
 def _coerce(v: Any) -> Any:
@@ -307,6 +318,9 @@ class _ToProgram(Transformer):
     def timeout(self, spec):
         return ("timeout", spec)
 
+    def ttl(self, n):
+        return ("ttl", int(n))
+
     def outcome(self, label):
         return ("outcome", str(label))
 
@@ -322,7 +336,9 @@ class _ToProgram(Transformer):
     def inline_machine(self, *items):
         # an inline submachine body -> a machine config dict (built as its own
         # Definition with a synthetic FQN by the builder)
-        return self._assemble(items)
+        cfg = self._assemble(items)
+        _refuse_ttl(cfg, "an inline `invoke` target, which always runs as a child")
+        return cfg
 
     def invoke(self, *children):
         # children (any order): an FQN (str), an `invoke_for` (tuple), an inline body
@@ -343,6 +359,7 @@ class _ToProgram(Transformer):
         # sugar: a terminal state with its verdict inline (`final Done success`);
         # any items are hooks (on enter/exit). Desugars to a leaf state + outcome.
         cfg = self._assemble(items)
+        _refuse_ttl(cfg, f"state {name}", meta)
         cfg["outcome"] = str(outcome)
         cfg["__pos__"] = (meta.line, meta.column)
         return ("state", str(name), cfg)
@@ -420,6 +437,7 @@ class _ToProgram(Transformer):
     @v_args(inline=True, meta=True)
     def state_decl(self, meta, kind, name, *items):
         cfg = self._assemble(items)
+        _refuse_ttl(cfg, f"state {name}", meta)
         cfg["__pos__"] = (meta.line, meta.column)
         if str(kind) in _KIND_TYPE:
             cfg["type"] = _KIND_TYPE[str(kind)]
@@ -441,6 +459,7 @@ class _ToProgram(Transformer):
         params = rest[0] if rest and isinstance(rest[0], list) else []
         items = rest[1:] if params else rest
         cfg = self._assemble(items)
+        _refuse_ttl(cfg, f"fragment {name}", meta)
         if params:
             cfg["__params__"] = params
         cfg["__pos__"] = (meta.line, meta.column)
@@ -518,4 +537,12 @@ def parse(text: str) -> Program:
         raise _syntax_error(text, e) from e
     except LarkError as e:
         raise DslError(f"DSL syntax error: {e}") from e
-    return _ToProgram().transform(tree)
+    try:
+        return _ToProgram().transform(tree)
+    except VisitError as e:
+        if isinstance(e.orig_exc, DslError):
+            err = e.orig_exc
+            if err.line is not None and err.context is None:
+                err.context = _caret(text, err.line, err.column)
+            raise err from None
+        raise

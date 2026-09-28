@@ -5,6 +5,7 @@ Re-exports the engine's public surface from `core` so callers can use
 `from harel import engine; engine.RunAction`)."""
 
 from harel.engine.core import (
+    TTL_PATH,
     ActionResult,
     CancelTimer,
     ChildSpec,
@@ -24,6 +25,7 @@ from harel.engine.core import (
     set_state,
     start,
     timeout_event,
+    ttl_delay,
 )
 
 __all__ = [
@@ -38,6 +40,7 @@ __all__ = [
     "ScheduleTimer",
     "SpawnChildren",
     "Step",
+    "TTL_PATH",
     "error_event",
     "has_cancel_handler",
     "has_error_handler",
@@ -46,4 +49,5 @@ __all__ = [
     "set_state",
     "start",
     "timeout_event",
+    "ttl_delay",
 ]

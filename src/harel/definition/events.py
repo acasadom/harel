@@ -21,7 +21,7 @@ FIELD_TYPES = ("string", "int", "float", "bool", "any")
 # Events the engine itself emits/consumes. They never need declaring and the
 # validator never flags them as unknown.
 RESERVED_EVENTS = frozenset(
-    {"Timeout", "Finished", "Cancel", "Reset", "SetState", "Start", "Returned", "error"}
+    {"Timeout", "Finished", "Cancel", "Reset", "SetState", "Start", "Returned", "error", "Expired"}
 )
 
 

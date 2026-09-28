@@ -60,7 +60,10 @@ Distinct problems, each a structured `Issue` (`severity`, `code`, `path`, `messa
 - an `on Cancel` transition resolves directly to a terminal — `Cancel` is the [control
   plane](../guide/control-plane)'s own teardown signal, not a business event, so its cleanup
   must finish in the same step the injected `Cancel` is processed. Model a multi-step or
-  asynchronous cancellation as an ordinary domain event instead (e.g. `CancelOrder`).
+  asynchronous cancellation as an ordinary domain event instead (e.g. `CancelOrder`). `on
+  Expired` is held to the same rule;
+- `ttl` is positive, and a warning for an `on Expired` in a machine with no `ttl` (it never
+  fires).
 
 ## Fix it, and fail the build on errors
 

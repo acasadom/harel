@@ -350,3 +350,30 @@ def test_a_forks_own_timeout_reaches_the_fork_not_its_live_regions():
     final = store.load(exe.id)
     assert final.status is Status.DONE
     assert final.active_path == "Elsewhere"
+
+
+def test_a_timer_due_while_suspended_fires_once_resumed_in_process():
+    # the worker path parks a suspended execution's messages; the in-process sweep leaves
+    # its due timers armed the same way instead of consuming them into a no-op
+    source = """
+    machine M {
+       initial W
+       state W { timeout 60 }
+       final TimedOut cancelled {}
+       from W to TimedOut on Timeout
+    }
+    """
+    defn = definition_from_dsl(source, "M", validate=True)
+    clock = [0.0]
+    store = DictStore()
+    runner = DurableRunner(store, {defn.id: defn}, clock=lambda: clock[0])
+    exe = runner.create(defn.id)
+    runner.suspend(exe.id)
+
+    clock[0] = 61.0
+    assert runner.fire_due_timers() == 0
+    assert store.load(exe.id).active_path == "W"
+
+    runner.resume(exe.id)
+    assert runner.fire_due_timers() == 1
+    assert store.load(exe.id).active_path == "TimedOut"

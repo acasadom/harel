@@ -250,6 +250,7 @@ def build_definition(
         index=index,
         events=_build_events(config),
         submachines=submachines,
+        ttl=config.get("ttl"),
     )
     if validate:
         from harel.definition.validate import validate_or_raise
