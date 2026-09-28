@@ -420,5 +420,70 @@ class DynamoDBStore:
             if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
                 raise  # the guard didn't match (stale sweep) — a no-op, as intended
 
+    def purge(self, execution_id: str, expected_version: int) -> bool:
+        try:
+            self._db.delete_item(
+                TableName=self._t("executions"),
+                Key=self._raw({"id": execution_id}),
+                ConditionExpression="version = :v",
+                ExpressionAttributeValues={":v": {"N": str(expected_version)}},
+            )
+            deleted = True
+        except self._ClientError as exc:
+            if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                raise
+            resp = self._db.get_item(
+                TableName=self._t("executions"),
+                Key=self._raw({"id": execution_id}),
+                ProjectionExpression="id",
+            )
+            if "Item" in resp:
+                return False  # moved on: touch nothing
+            deleted = False
+        # Not in the same transaction as the Execution delete: TransactWriteItems caps at 100
+        # items and the dedupe/trace rows are unbounded. The Execution goes first, so a crash
+        # here only leaves unreachable rows, which a retry (Execution absent) still removes.
+        for table, sort_key in _PURGE_PARTITIONS:
+            self._delete_keys(table, self._partition_keys(table, sort_key, execution_id))
+        for table, attr in (("outbox", "target_id"), ("spawns", "parent_id")):
+            rows = self._scan(
+                table,
+                FilterExpression="#a = :v",
+                ExpressionAttributeNames={"#a": attr},
+                ExpressionAttributeValues={":v": {"S": execution_id}},
+                ProjectionExpression="seq",
+            )
+            self._delete_keys(table, [self._raw({"seq": r["seq"]}) for r in rows])
+        return deleted
+
+    def _partition_keys(self, table: str, sort_key: str, execution_id: str) -> list[dict]:
+        """Every raw key in `table` whose partition is `execution_id` (Query, all pages)."""
+        kwargs: dict[str, Any] = {
+            "TableName": self._t(table),
+            "KeyConditionExpression": "execution_id = :e",
+            "ExpressionAttributeValues": {":e": {"S": execution_id}},
+            "ProjectionExpression": "execution_id, #sk",
+            "ExpressionAttributeNames": {"#sk": sort_key},
+        }
+        keys: list[dict] = []
+        while True:
+            resp = self._db.query(**kwargs)
+            keys.extend(resp.get("Items", []))
+            start = resp.get("LastEvaluatedKey")
+            if not start:
+                return keys
+            kwargs["ExclusiveStartKey"] = start
+
+    def _delete_keys(self, table: str, keys: list[dict]) -> None:
+        """Delete items by raw key, 25 per BatchWriteItem, re-sending any unprocessed."""
+        for i in range(0, len(keys), 25):
+            pending = {self._t(table): [{"DeleteRequest": {"Key": k}} for k in keys[i : i + 25]]}
+            while pending:
+                pending = self._db.batch_write_item(RequestItems=pending).get("UnprocessedItems") or {}
+
     def close(self) -> None:
         self._db.close()
+
+
+# (table, sort key) of the per-Execution partitions that `purge` empties
+_PURGE_PARTITIONS = (("processed", "event_id"), ("trace", "idx"), ("timers", "path"))

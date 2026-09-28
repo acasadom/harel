@@ -9,6 +9,7 @@ from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, S
 from harel.engine.store._base import (
     _PG_COMMIT_FN,
     _PG_SCHEMA_LOCK,
+    _PURGE_COMPANIONS_SQL,
     DEFAULT_TRACE_MAX,
     OutboxEntry,
     SpawnEntry,
@@ -314,6 +315,26 @@ class PostgresStore:
                 (execution_id, path, fire_at),
             )
         self._conn.commit()
+
+    def purge(self, execution_id: str, expected_version: int) -> bool:
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM executions WHERE id = %s AND version = %s", (execution_id, expected_version)
+                )
+                deleted = cur.rowcount
+                if not deleted:
+                    cur.execute("SELECT 1 FROM executions WHERE id = %s", (execution_id,))
+                    if cur.fetchone() is not None:
+                        self._conn.rollback()
+                        return False  # moved on: touch nothing
+                for sql in _PURGE_COMPANIONS_SQL:
+                    cur.execute(sql.replace("?", "%s"), (execution_id,))
+            self._conn.commit()
+            return bool(deleted)
+        except BaseException:
+            self._conn.rollback()
+            raise
 
     def close(self) -> None:
         self._conn.close()

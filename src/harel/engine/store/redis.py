@@ -214,5 +214,49 @@ class RedisStore:
     def ack_outbox(self, seq: int) -> None:
         self._r.hdel(self._k("outbox"), str(seq))
 
+    def purge(self, execution_id: str, expected_version: int) -> bool:
+        key = self._k(f"exe:{execution_id}")
+        with self._r.pipeline() as pipe:
+            try:
+                pipe.watch(key)
+                current = pipe.get(key)
+                if current is not None and json.loads(current)["version"] != expected_version:
+                    pipe.unwatch()
+                    return False  # moved on: touch nothing
+                timers = [m for m in pipe.zrange(self._k("timers"), 0, -1) if _timer_owner(m) == execution_id]
+                outbox = [
+                    s
+                    for s, v in pipe.hgetall(self._k("outbox")).items()
+                    if json.loads(v)["t"] == execution_id
+                ]
+                spawns = [
+                    s
+                    for s, v in pipe.hgetall(self._k("spawns")).items()
+                    if json.loads(v)["p"] == execution_id
+                ]
+                pipe.multi()
+                pipe.delete(
+                    key,
+                    self._k(f"processed:{execution_id}"),
+                    self._k(f"trace:{execution_id}"),
+                    self._k(f"trace:seq:{execution_id}"),
+                )
+                if timers:
+                    pipe.zrem(self._k("timers"), *timers)
+                if outbox:
+                    pipe.hdel(self._k("outbox"), *outbox)
+                if spawns:
+                    pipe.hdel(self._k("spawns"), *spawns)
+                pipe.execute()
+                return current is not None
+            except self._WatchError:
+                return False  # a concurrent writer moved it on
+
     def close(self) -> None:
         self._r.close()
+
+
+def _timer_owner(member: Any) -> str:
+    """The execution id of a `timers` sorted-set member (`{execution_id}\\x00{path}`)."""
+    text = member.decode() if isinstance(member, (bytes, bytearray)) else member
+    return text.partition("\x00")[0]

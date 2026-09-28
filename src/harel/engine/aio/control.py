@@ -11,10 +11,12 @@ propagated to orthogonal regions, with optimistic-concurrency retry), awaited ag
 from __future__ import annotations
 
 import asyncio
+import inspect
 from typing import Any, Callable, Optional
 
 from harel import engine
 from harel.definition.model import Definition, NodeKind, is_descendant
+from harel.engine.control import _archive_bundle, _check_purgeable
 from harel.engine.execution import Execution, Status
 from harel.engine.store import StoreConflict
 from harel.spec.states import Event
@@ -164,6 +166,45 @@ def _validate_redrive_target(defn: Definition, exe: Execution, target_path: str)
         cur = cur.parent
     if any(not cs.finished for cs in exe.children.values()):
         raise ValueError("redrive refused: execution has unfinished children (cancel/terminate them first)")
+
+
+async def _collect_tree(store: Any, root: Execution) -> tuple[list[Execution], list[str]]:
+    tree, missing, i = [root], [], 0
+    while i < len(tree):
+        for cid in tree[i].children:
+            child = await store.load(cid)
+            if child is None:
+                missing.append(cid)
+            else:
+                tree.append(child)
+        i += 1
+    return tree, missing
+
+
+async def purge(store: Any, execution_id: str, *, archive: Optional[Callable[[dict], Any]] = None) -> bool:
+    """Async mirror of `harel.engine.control.purge` — see its docstring. `archive` may
+    be a plain function or a coroutine function."""
+    root = await store.load(execution_id)
+    if root is None:
+        return False
+    tree, missing = await _collect_tree(store, root)
+    _check_purgeable(root, tree)
+    if archive is not None:
+        traces = {e.id: await store.read_trace(e.id) for e in tree}
+        result = archive(_archive_bundle(root, tree, traces))
+        if inspect.isawaitable(result):
+            await result
+    for exe in reversed(tree[1:]):
+        await _purge_one(store, exe)
+    for cid in missing:
+        await store.purge(cid, 0)  # sweep what an interrupted purge left behind (version unused when absent)
+    await _purge_one(store, root)
+    return True
+
+
+async def _purge_one(store: Any, exe: Execution) -> None:
+    if not await store.purge(exe.id, exe.version):
+        raise StoreConflict(exe.id, expected=exe.version, found=None)
 
 
 async def redrive(store: Any, defn: Definition, execution_id: str, target_path: str) -> None:

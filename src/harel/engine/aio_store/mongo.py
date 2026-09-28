@@ -216,5 +216,16 @@ class AsyncMongoStore:
         key = f"timers.{self._enc(path)}"
         await self._exes.update_one({"_id": execution_id, key: fire_at}, {"$unset": {key: ""}})
 
+    async def purge(self, execution_id: str, expected_version: int) -> bool:
+        # see MongoStore.purge: the one document carries everything keyed by the Execution
+        res = await self._exes.delete_one({"_id": execution_id, "version": expected_version})
+        if not res.deleted_count and await self._exes.find_one({"_id": execution_id}, {"_id": 1}) is not None:
+            return False  # moved on: touch nothing
+        await self._counters.delete_one({"_id": "trace:" + execution_id})
+        await self._exes.update_many(
+            {"outbox.target_id": execution_id}, {"$pull": {"outbox": {"target_id": execution_id}}}
+        )
+        return bool(res.deleted_count)
+
     async def close(self) -> None:
         self._client.close()

@@ -269,5 +269,17 @@ class MongoStore:
         key = f"timers.{self._enc(path)}"
         self._exes.update_one({"_id": execution_id, key: fire_at}, {"$unset": {key: ""}})
 
+    def purge(self, execution_id: str, expected_version: int) -> bool:
+        # the document holds the Execution with its dedupe/trace/timers and the spawn intents
+        # (and emits) it issued, so one conditional delete_one removes them atomically
+        res = self._exes.delete_one({"_id": execution_id, "version": expected_version})
+        if not res.deleted_count and self._exes.find_one({"_id": execution_id}, {"_id": 1}) is not None:
+            return False  # moved on: touch nothing
+        self._counters.delete_one({"_id": "trace:" + execution_id})
+        self._exes.update_many(
+            {"outbox.target_id": execution_id}, {"$pull": {"outbox": {"target_id": execution_id}}}
+        )
+        return bool(res.deleted_count)
+
     def close(self) -> None:
         self._client.close()

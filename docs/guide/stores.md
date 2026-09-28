@@ -24,6 +24,7 @@ a twin under `harel/engine/aio_store/` (same data model, awaited IO):
 | `due_timers(now)` / `delete_timer(id, path, fire_at)` | the timer sweep |
 | `read_trace(id)` / `append_trace(id, entry)` | the opt-in execution timeline (see below) |
 | `list_executions(...)` | a page of lightweight summaries for the monitor |
+| `purge(id, expected_version)` | permanently delete one Execution and every row keyed by it (dedupe, trace, timers, outbox entries addressed to it, spawn intents it issued), iff still at `expected_version` — see [purge](control-plane.md#purge) |
 | `close()` | release the connection/client |
 
 Everything `commit` writes lives in **one transaction** (or one atomic request), which is the

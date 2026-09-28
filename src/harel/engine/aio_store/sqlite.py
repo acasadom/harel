@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 from harel.engine.execution import Execution
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
-from harel.engine.store._base import DEFAULT_TRACE_MAX
+from harel.engine.store._base import _PURGE_COMPANIONS_SQL, DEFAULT_TRACE_MAX
 from harel.spec.states import Event
 
 
@@ -240,6 +240,26 @@ class AsyncSqliteStore:
             "DELETE FROM timers WHERE execution_id = ? AND path = ? AND fire_at = ?",
             (execution_id, path, fire_at),
         )
+
+    async def purge(self, execution_id: str, expected_version: int) -> bool:
+        async with self._lock:
+            try:
+                cur = await self._conn.execute(
+                    "DELETE FROM executions WHERE id = ? AND version = ?", (execution_id, expected_version)
+                )
+                deleted = cur.rowcount
+                if not deleted:
+                    found = await self._conn.execute("SELECT 1 FROM executions WHERE id = ?", (execution_id,))
+                    if await found.fetchone():
+                        await self._conn.rollback()
+                        return False  # moved on: touch nothing
+                for sql in _PURGE_COMPANIONS_SQL:
+                    await self._conn.execute(sql, (execution_id,))
+                await self._conn.commit()
+                return bool(deleted)
+            except BaseException:
+                await self._conn.rollback()
+                raise
 
     async def close(self) -> None:
         async with self._lock:

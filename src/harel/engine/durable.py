@@ -16,7 +16,7 @@ a running event loop is refused with a clear error).
 from __future__ import annotations
 
 import time
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from harel.definition.model import Definition
 from harel.engine.aio import facade
@@ -94,6 +94,12 @@ class DurableRunner:
     def resume(self, execution_id: str) -> Execution:
         """Resume a suspended `execution_id`, continuing where it stopped."""
         return facade.run(self._async.resume, execution_id)
+
+    def purge(self, execution_id: str, *, archive: Optional[Callable[[dict], Any]] = None) -> bool:
+        """Permanently delete a finished execution tree (root, regions, invokes and all
+        their store rows), passing it to `archive` first if given. Refuses a child or a
+        tree with a member not DONE/CANCELLED. False if it no longer exists."""
+        return facade.run(self._async.purge, execution_id, archive=archive)
 
     def redrive(self, execution_id: str, target_path: str) -> Execution:
         """Force a dead-lettered (FAILED) `execution_id` back to RUNNING at

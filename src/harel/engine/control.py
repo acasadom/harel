@@ -287,3 +287,86 @@ def redrive(store: ExecutionStore, defn: Definition, execution_id: str, target_p
         clear_error=True,
         clear_history=True,
     )
+
+
+# statuses a purged tree may be in: finished for good. FAILED is a dead letter awaiting
+# redrive, so it must be deliberately abandoned with `terminate` first.
+_PURGEABLE = (Status.DONE, Status.CANCELLED)
+
+
+def _check_purgeable(root: Execution, tree: list[Execution]) -> None:
+    """Pure precondition for `purge` (shared with the async control plane): `root` is a
+    root, and every member of its tree is finished. Raises `ValueError`."""
+    if root.parent_id is not None:
+        raise ValueError(
+            f"purge refused: {root.id!r} is a child of {root.parent_id!r} — purge its root, "
+            f"which removes the whole tree"
+        )
+    live = [e for e in tree if e.status not in _PURGEABLE]
+    if live:
+        listed = ", ".join(f"{e.id} ({e.status.name})" for e in live)
+        hint = (
+            " — terminate a dead letter to abandon it" if any(e.status is Status.FAILED for e in live) else ""
+        )
+        raise ValueError(f"purge refused: not finished: {listed}{hint}")
+
+
+def _archive_bundle(root: Execution, tree: list[Execution], traces: dict[str, list[dict]]) -> dict:
+    """What `purge` hands the archiver: the whole tree, root first, plus each trace."""
+    return {
+        "root_id": root.id,
+        "executions": [e.model_dump(mode="json") for e in tree],
+        "traces": traces,
+    }
+
+
+def _collect_tree(store: ExecutionStore, root: Execution) -> tuple[list[Execution], list[str]]:
+    """The root and every descendant (regions, invokes, fan-out instances), root first
+    and each level before the next; plus the ids of children no longer stored."""
+    tree, missing, i = [root], [], 0
+    while i < len(tree):
+        for cid in tree[i].children:
+            child = store.load(cid)
+            if child is None:
+                missing.append(cid)
+            else:
+                tree.append(child)
+        i += 1
+    return tree, missing
+
+
+def purge(
+    store: ExecutionStore, execution_id: str, *, archive: Optional[Callable[[dict], None]] = None
+) -> bool:
+    """Permanently delete a finished execution tree — the root, every region/invoke
+    descendant, and everything the store keys by them (dedupe, trace, timers, pending
+    outbox/spawns). Returns False if no such execution exists (already purged).
+
+    Refuses (`ValueError`) a child (purge its root), or a tree with any member not
+    `DONE`/`CANCELLED` — a `FAILED` dead letter must be abandoned with `terminate()`
+    first. `archive`, when given, receives the tree (see `_archive_bundle`) before
+    anything is deleted, so a failing archiver aborts the purge; it may see the same
+    root again if a purge is retried.
+
+    Descendants go first and the root last, each deleted only if unchanged since it was
+    checked: a member that moved on concurrently (e.g. a `Reset` revived it) raises
+    `StoreConflict` and stops the purge. Because the root is still there, re-running
+    `purge` resumes it and also sweeps the leftovers of children already deleted."""
+    root = store.load(execution_id)
+    if root is None:
+        return False
+    tree, missing = _collect_tree(store, root)
+    _check_purgeable(root, tree)
+    if archive is not None:
+        archive(_archive_bundle(root, tree, {e.id: store.read_trace(e.id) for e in tree}))
+    for exe in reversed(tree[1:]):
+        _purge_one(store, exe)
+    for cid in missing:
+        store.purge(cid, 0)  # sweep what an interrupted purge left behind (version unused when absent)
+    _purge_one(store, root)
+    return True
+
+
+def _purge_one(store: ExecutionStore, exe: Execution) -> None:
+    if not store.purge(exe.id, exe.version):
+        raise StoreConflict(exe.id, expected=exe.version, found=None)

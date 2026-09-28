@@ -8,6 +8,7 @@ from typing import Any, Iterable, Optional, Union
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.store._base import (
+    _PURGE_COMPANIONS_SQL,
     DEFAULT_TRACE_MAX,
     OutboxEntry,
     SpawnEntry,
@@ -277,6 +278,25 @@ class LibsqlStore:
             (execution_id, path, fire_at),
         )
         self._conn.commit()
+
+    def purge(self, execution_id: str, expected_version: int) -> bool:
+        try:
+            deleted = self._conn.execute(
+                "DELETE FROM executions WHERE id = ? AND version = ?", (execution_id, expected_version)
+            ).rowcount
+            if (
+                not deleted
+                and self._conn.execute("SELECT 1 FROM executions WHERE id = ?", (execution_id,)).fetchone()
+            ):
+                self._conn.rollback()
+                return False  # moved on: touch nothing
+            for sql in _PURGE_COMPANIONS_SQL:
+                self._conn.execute(sql, (execution_id,))
+            self._conn.commit()
+            return bool(deleted)
+        except BaseException:
+            self._conn.rollback()
+            raise
 
     def close(self) -> None:
         self._conn.close()

@@ -70,6 +70,17 @@ BEGIN
 END; $$ LANGUAGE plpgsql;
 """
 
+# The rows keyed by one Execution in the SQL-family schema (shared by the sqlite/libsql/rqlite/
+# postgres backends, sync + async): `purge` deletes them in the same transaction as the
+# Execution row. `?` placeholders; the Postgres backends swap in `%s`.
+_PURGE_COMPANIONS_SQL = (
+    "DELETE FROM processed_events WHERE execution_id = ?",
+    "DELETE FROM trace WHERE execution_id = ?",
+    "DELETE FROM timers WHERE execution_id = ?",
+    "DELETE FROM outbox WHERE target_id = ?",
+    "DELETE FROM spawns WHERE parent_id = ?",
+)
+
 # one advisory-lock key for all harel schema setup (tables + functions), so concurrent
 # connections opening at once serialize their CREATE OR REPLACE FUNCTION (avoids pg_proc clashes).
 _PG_SCHEMA_LOCK = 7723019
@@ -219,6 +230,10 @@ class ExecutionStore(Protocol):
         at-least-once delivery)."""
         ...
 
+    def read_trace(self, execution_id: str) -> list[dict]:
+        """The execution's recorded trace steps, oldest first (empty if none)."""
+        ...
+
     def pending_outbox(self) -> list[OutboxEntry]:
         """Undelivered outbox entries, oldest first."""
         ...
@@ -242,6 +257,19 @@ class ExecutionStore(Protocol):
     def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None:
         """Remove the timer for `(execution_id, path)` — but only if it still holds
         `fire_at` (so a concurrent re-schedule to a new time survives a stale sweep)."""
+        ...
+
+    def purge(self, execution_id: str, expected_version: int) -> bool:
+        """Permanently delete the Execution and everything keyed by it — its dedupe
+        records, trace, timers, pending outbox entries addressed to it and pending
+        spawn intents it issued — iff the stored row is still at `expected_version`.
+        Returns True if it was deleted. Returns False, touching nothing, if the row
+        moved on (a concurrent writer; the caller re-checks). If no Execution is stored
+        under `execution_id`, leftover rows keyed by it are still removed (a retry after
+        a crash mid-purge on a backend without a single transaction) and False is
+        returned. After a purge, a commit of a stale copy of the Execution raises
+        `StoreConflict` rather than recreating it; only a brand-new Execution (version
+        0) may reuse the id."""
         ...
 
     def close(self) -> None:

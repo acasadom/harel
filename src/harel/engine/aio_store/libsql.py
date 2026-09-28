@@ -116,6 +116,10 @@ class AsyncLibsqlStore:
         async with self._lock:
             await asyncio.to_thread(self._s.delete_timer, execution_id, path, fire_at)
 
+    async def purge(self, execution_id: str, expected_version: int) -> bool:
+        async with self._lock:
+            return await asyncio.to_thread(self._s.purge, execution_id, expected_version)
+
     async def close(self) -> None:
         async with self._lock:
             await asyncio.to_thread(self._s.close)

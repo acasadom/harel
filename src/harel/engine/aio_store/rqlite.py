@@ -8,6 +8,7 @@ from typing import Any, Optional
 from harel.engine.execution import Execution
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
 from harel.engine.store._base import DEFAULT_TRACE_MAX
+from harel.engine.store.rqlite import _purge_statements
 from harel.spec.states import Event
 
 
@@ -121,15 +122,21 @@ class AsyncRqliteStore:
         exe.version = old + 1
         new = exe.version
         data = exe.model_dump_json()
+        # insert only a brand-new Execution, otherwise CAS-update — see RqliteStore.commit
         statements: list = [
             [
-                "INSERT INTO executions (id, definition_id, data, version) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(id) DO UPDATE SET data = excluded.data, version = excluded.version "
-                "WHERE executions.version = ?",
+                "INSERT OR IGNORE INTO executions (id, definition_id, data, version) VALUES (?, ?, ?, ?)",
                 exe.id,
                 exe.definition_id,
                 data,
                 new,
+            ]
+            if old == 0
+            else [
+                "UPDATE executions SET data = ?, version = ? WHERE id = ? AND version = ?",
+                data,
+                new,
+                exe.id,
                 old,
             ]
         ]
@@ -294,6 +301,10 @@ class AsyncRqliteStore:
                 ]
             ]
         )
+
+    async def purge(self, execution_id: str, expected_version: int) -> bool:
+        results = await self._execute(_purge_statements(execution_id, expected_version), transaction=True)
+        return results[0].get("rows_affected", 0) == 1
 
     async def close(self) -> None:
         await self._client.aclose()

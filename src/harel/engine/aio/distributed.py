@@ -489,6 +489,11 @@ class AsyncDistributedRunner:
     async def resume(self, execution_id: str) -> None:
         await control.resume(self.store, execution_id)
 
+    async def purge(self, execution_id: str, *, archive: Optional[Callable[[dict], Any]] = None) -> bool:
+        """Permanently delete a finished execution tree, archiving it first if `archive`
+        is given — see `control.purge`. False if it no longer exists."""
+        return await control.purge(self.store, execution_id, archive=archive)
+
     async def redrive(self, execution_id: str, target_path: str) -> None:
         """Force a FAILED `execution_id` back to RUNNING at `target_path` (a leaf
         the caller picks — see `control.redrive`)."""
