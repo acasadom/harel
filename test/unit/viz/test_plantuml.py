@@ -56,3 +56,17 @@ def test_composite_and_named_guards_are_rendered():
     assert "A --> B: E\\n[(y > 1 and y < 5) or z == 'go']" in text
     assert "A --> C: E\\n[status == 'paid' and not (n in [1, 2] or retry == true)]" in text
     assert "A --> D: E\\n[(tier == 'gold' or spend > 1000) and region == 'eu']" in text
+
+
+def test_choose_and_set_are_rendered():
+    from pathlib import Path
+
+    source = (Path(__file__).parents[2] / "data" / "context.stm").read_text()
+    text = render(definition_from_dsl(source, "job"))
+    assert "state Working_choose<<choice>>" in text
+    assert (
+        "Working --> Working_choose: Fail\\n/ context.attempts = context.attempts + 1, context.last_code = event.code"
+        in text
+    )
+    assert "Working_choose --> GaveUp: [context.attempts >= 3]" in text
+    assert "Working_choose --> Cooling: else" in text

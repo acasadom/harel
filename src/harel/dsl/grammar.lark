@@ -38,10 +38,11 @@ param_list: "(" param ("," param)* ")"
 param:      NAME ":" PARAM_KIND
 PARAM_KIND: "action" | "state" | "guard" | "value" | "event"
 
-?item: initial | on_enter | on_exit | on_activity | timeout | ttl | outcome | carry | defer | nohistory
+?item: initial | on_enter | on_exit | on_activity | timeout | ttl | context_decl | outcome | carry | defer
+     | nohistory
      | cancel_on_failure
      | invoke | invoke_with
-     | use_stmt | state_decl | final_decl | selector_trans | join_trans | transition
+     | use_stmt | state_decl | final_decl | selector_trans | choice_trans | join_trans | transition
 
 initial:     "initial" ref
 on_enter:    "on" "enter"    action
@@ -54,6 +55,8 @@ timeout_spec: INT             -> timeout_literal
             | NAME            -> timeout_param
 // machine level only: seconds without a domain event before the execution is expired
 ttl:         "ttl" INT
+// machine level only: the typed fields of the execution context (same field syntax as an event)
+context_decl: "context" "{" field_decl* "}"
 outcome:     "outcome" ref
 // context keys this (region) state propagates on its `Finished` (besides `outcome`)
 carry:       "carry" ref ("," ref)*
@@ -88,7 +91,9 @@ arg_value:    NAME             -> a_name
 // every transition is `from SRC to DEST ...`; a selector replaces `to DEST` with
 // `select FN { ... }` (the destination is computed), so each concrete edge — direct
 // or a selector branch — is still `... to <state>` (one meaning for `to`)
-transition:     "from" ref "to" ref trigger?
+transition:     "from" ref "to" ref trigger? assign_clause?
+// a guarded choice: the first `when` whose guard holds wins, else the `else` target
+choice_trans:   "from" ref "choose" trigger? assign_clause? "{" when_branch+ else_branch? "}"
 selector_trans: "from" ref "select" action enum_decl? trigger? "{" branch+ else_branch? "}"
 // sugar: orthogonal-join aggregation — route by whether all/any region succeeded
 join_trans:     "from" ref "join" "all" "to" ref "else" "to" ref -> join_all
@@ -96,6 +101,16 @@ join_trans:     "from" ref "join" "all" "to" ref "else" "to" ref -> join_all
 enum_decl:      "returns" "{" value ("," value)* "}"
 branch:         value "to" ref
 else_branch:    "else" "to" ref
+when_branch:    "when" predicate "to" ref
+
+// context assignments on a transition: `set context.n = context.n + 1, context.last = event.id`.
+// A right-hand side is a reference, a literal, or ONE arithmetic operation over two of them.
+assign_clause:  "set" assignment ("," assignment)*
+assignment:     DOTTED "=" expr
+?expr:          operand | operand ARITH operand -> arith
+?operand:       DOTTED -> op_ref
+              | value  -> op_lit
+ARITH:          "+" | "-" | "*" | "/"
 trigger:        "on" kinds ("where" predicate)?
 kinds:          ref ("|" ref)*
 
@@ -108,7 +123,8 @@ kinds:          ref ("|" ref)*
 // guard (composable with the rest: `where ok and status == "x"`)
 ?atom:      comparison | guard_atom | "(" predicate ")"
 guard_atom: NAME
-comparison: ref OP value
+// the left side is a bare field (the event's), or a namespaced `event.x` / `context.x`
+comparison: (ref | DOTTED) OP value
 OP: "==" | "!=" | "<=" | ">=" | "<" | ">" | "in"
 
 // --- actions & values ------------------------------------------------------

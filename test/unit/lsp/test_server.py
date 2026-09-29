@@ -140,3 +140,26 @@ def test_definition_is_scope_aware_for_repeated_state_names():
     # "Done" at the root (line 9) -> outer final (line index 8)
     outer = definition(ls, _params(lsp.DefinitionParams, 9, src.splitlines()[9].index("Done")))
     assert outer.range.start.line == 8
+
+
+CONTEXT_DOC = (
+    "event Go {}\nmachine M {\n  context { attempts: int  owner: string? }\n  initial A\n  state A {}\n"
+    "  final B success {}\n  from A to B on Go where context.attempts > 1\n}\n"
+)
+
+
+def test_completion_after_context_offers_the_declared_fields_even_mid_edit():
+    # typing `where context.att` — the document doesn't parse yet
+    src = CONTEXT_DOC.replace("context.attempts > 1", "context.att")
+    line = 6
+    col = src.splitlines()[line].index("context.att") + len("context.att")
+    out = completion(_LS(src), _params(lsp.CompletionParams, line, col))
+    labels = {i.label for i in out.items}
+    assert {"attempts", "owner"} <= labels
+    assert "machine" not in labels
+
+
+def test_hover_on_a_context_reference_shows_its_type():
+    col = CONTEXT_DOC.splitlines()[6].index("context.attempts") + 9
+    h = hover(_LS(CONTEXT_DOC), _params(lsp.HoverParams, 6, col))
+    assert h is not None and "`context.attempts`: int" in h.contents.value

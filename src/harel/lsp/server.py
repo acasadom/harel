@@ -43,6 +43,7 @@ _COMPLETION_KIND = {
     "guard": lsp.CompletionItemKind.Variable,
     "fragment": lsp.CompletionItemKind.Module,
     "machine": lsp.CompletionItemKind.Class,
+    "context": lsp.CompletionItemKind.Field,
 }
 
 

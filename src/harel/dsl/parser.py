@@ -117,15 +117,53 @@ def _lit(tok: Token) -> Any:
     return float(s) if ("." in s or "e" in s or "E" in s) else int(s)
 
 
-def _refuse_ttl(cfg: dict, where: str, meta: Any = None) -> None:
-    """`ttl` bounds a whole execution's inactivity, so it belongs to a `machine` only: a
-    state, fragment or inline `invoke` body never runs as a root execution."""
-    if "ttl" in cfg:
+# namespaces a predicate may read: the triggering event's data (also the bare form) and
+# the execution context
+_NAMESPACES = ("event", "context")
+
+
+def _namespaced(ref: str, meta: Any) -> tuple[str, str]:
+    """Split a dotted reference into (namespace, field): `context.attempts`, `event.status`.
+    One field below the namespace only — no nested paths."""
+    source, _, field = ref.partition(".")
+    where = {"line": getattr(meta, "line", None), "column": getattr(meta, "column", None)}
+    if source not in _NAMESPACES:
         raise DslError(
-            f"`ttl` is only allowed at the machine level, not on {where}",
-            line=getattr(meta, "line", None),
-            column=getattr(meta, "column", None),
+            f"unknown namespace {source!r} in {ref!r}: use `event.<field>` or `context.<field>`", **where
         )
+    if "." in field:
+        raise DslError(f"{ref!r}: a reference names one field of `{source}`, not a nested path", **where)
+    return source, field
+
+
+# declarations about a whole execution, allowed on a `machine` only: a state, fragment or
+# inline `invoke` body never runs as a root execution. config key -> DSL keyword
+_MACHINE_ONLY = {"ttl": "ttl", "context_schema": "context"}
+
+
+def _tagged(item: Any, tag: str) -> bool:
+    return isinstance(item, tuple) and bool(item) and item[0] == tag
+
+
+def _with_trigger_and_set(t: dict, rest: tuple) -> dict:
+    """Attach a transition's optional trigger (`on ... where ...`) and assignments (`set`)."""
+    trig = next((r for r in rest if isinstance(r, dict)), None)
+    if trig is not None:
+        t["on_event"] = trig
+    assigns = next((r[1] for r in rest if _tagged(r, "set")), None)
+    if assigns is not None:
+        t["set"] = assigns
+    return t
+
+
+def _refuse_machine_only(cfg: dict, where: str, meta: Any = None) -> None:
+    for key, keyword in _MACHINE_ONLY.items():
+        if key in cfg:
+            raise DslError(
+                f"`{keyword}` is only allowed at the machine level, not on {where}",
+                line=getattr(meta, "line", None),
+                column=getattr(meta, "column", None),
+            )
 
 
 def _coerce(v: Any) -> Any:
@@ -152,6 +190,11 @@ def _pred_to_dict(node: tuple) -> dict:
         return merged
     if tag == "any":
         return {"any": [_pred_to_dict(c) for c in node[1]]}
+    if tag == "nsleaf":
+        # a leaf over a namespace other than the event's data: never merged into the flat
+        # `field__op` dict (which is event-only), so it always lands in the composable tree
+        _, source, fld, op, value = node
+        return {"__ref__": {"source": source, "field": fld, "op": _OPS[op], "value": value}}
     if tag == "guardref":
         return {"__guard__": node[1]}  # a named-guard marker the loader resolves
     return {"not": _pred_to_dict(node[1])}  # neg
@@ -216,7 +259,13 @@ class _ToProgram(Transformer):
         return ("event", str(name), dict(fields), (meta.line, meta.column))
 
     # --- predicates ---
-    def comparison(self, fld, op, value):
+    @v_args(inline=True, meta=True)
+    def comparison(self, meta, fld, op, value):
+        if isinstance(fld, Token) and fld.type == "DOTTED":
+            source, field = _namespaced(str(fld), meta)
+            if source == "context":
+                return ("nsleaf", source, field, str(op), _coerce(value))
+            fld = field  # `event.x` is a synonym of the bare `x`
         return ("leaf", str(fld), str(op), _coerce(value))
 
     def all_expr(self, *children):
@@ -241,11 +290,48 @@ class _ToProgram(Transformer):
 
     # --- transitions ---
     @v_args(inline=True, meta=True)
-    def transition(self, meta, src, tgt, trig=None):
+    def transition(self, meta, src, tgt, *rest):
         t: dict = {"from": str(src), "to": str(tgt), "__pos__": (meta.line, meta.column)}
-        if trig is not None:
-            t["on_event"] = trig
-        return ("transition", t)
+        return ("transition", _with_trigger_and_set(t, rest))
+
+    @v_args(inline=True, meta=True)
+    def choice_trans(self, meta, src, *rest):
+        branches = [{"when": pred, "to": tgt} for tag, pred, tgt in (r for r in rest if _tagged(r, "when"))]
+        choice: dict = {"branches": branches}
+        default = next((r[1] for r in rest if _tagged(r, "else")), None)
+        if default is not None:
+            choice["default"] = default
+        t: dict = {"from": str(src), "choice": choice, "__pos__": (meta.line, meta.column)}
+        return ("transition", _with_trigger_and_set(t, rest))
+
+    def when_branch(self, pred, tgt):
+        return ("when", _pred_to_dict(pred), str(tgt))
+
+    # --- assignments (`set`) ---
+    @v_args(inline=True, meta=True)
+    def assignment(self, meta, target, expr):
+        source, field = _namespaced(str(target), meta)
+        if source != "context":
+            raise DslError(
+                f"`set` writes the execution context: {str(target)!r} must be `context.<field>`",
+                line=meta.line,
+                column=meta.column,
+            )
+        return {"field": field, "expr": expr}
+
+    def assign_clause(self, *assignments):
+        return ("set", list(assignments))
+
+    @v_args(inline=True, meta=True)
+    def op_ref(self, meta, ref):
+        source, field = _namespaced(str(ref), meta)
+        return {"ref": {"source": source, "field": field}}
+
+    def op_lit(self, value):
+        return {"lit": _coerce(value)}
+
+    def arith(self, left, op, right):
+        return {"arith": {"op": str(op), "left": left, "right": right}}
 
     def branch(self, value, tgt):
         # the engine looks a selector result up by str(result); a bool maps via
@@ -321,6 +407,9 @@ class _ToProgram(Transformer):
     def ttl(self, n):
         return ("ttl", int(n))
 
+    def context_decl(self, *fields):
+        return ("context_schema", dict(fields))
+
     def outcome(self, label):
         return ("outcome", str(label))
 
@@ -338,7 +427,7 @@ class _ToProgram(Transformer):
         # an inline submachine body -> a machine config dict (built as its own
         # Definition with a synthetic FQN by the builder)
         cfg = self._assemble(items)
-        _refuse_ttl(cfg, "an inline `invoke` target, which always runs as a child", meta)
+        _refuse_machine_only(cfg, "an inline `invoke` target, which always runs as a child", meta)
         return cfg
 
     def invoke(self, *children):
@@ -360,7 +449,7 @@ class _ToProgram(Transformer):
         # sugar: a terminal state with its verdict inline (`final Done success`);
         # any items are hooks (on enter/exit). Desugars to a leaf state + outcome.
         cfg = self._assemble(items)
-        _refuse_ttl(cfg, f"state {name}", meta)
+        _refuse_machine_only(cfg, f"state {name}", meta)
         cfg["outcome"] = str(outcome)
         cfg["__pos__"] = (meta.line, meta.column)
         return ("state", str(name), cfg)
@@ -438,7 +527,7 @@ class _ToProgram(Transformer):
     @v_args(inline=True, meta=True)
     def state_decl(self, meta, kind, name, *items):
         cfg = self._assemble(items)
-        _refuse_ttl(cfg, f"state {name}", meta)
+        _refuse_machine_only(cfg, f"state {name}", meta)
         cfg["__pos__"] = (meta.line, meta.column)
         if str(kind) in _KIND_TYPE:
             cfg["type"] = _KIND_TYPE[str(kind)]
@@ -460,7 +549,7 @@ class _ToProgram(Transformer):
         params = rest[0] if rest and isinstance(rest[0], list) else []
         items = rest[1:] if params else rest
         cfg = self._assemble(items)
-        _refuse_ttl(cfg, f"fragment {name}", meta)
+        _refuse_machine_only(cfg, f"fragment {name}", meta)
         if params:
             cfg["__params__"] = params
         cfg["__pos__"] = (meta.line, meta.column)

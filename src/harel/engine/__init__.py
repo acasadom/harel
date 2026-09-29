@@ -7,10 +7,12 @@ Re-exports the engine's public surface from `core` so callers can use
 from harel.engine.core import (
     TTL_PATH,
     ActionResult,
+    Assigned,
     CancelTimer,
     ChildSpec,
     Effect,
     Emit,
+    ExpressionError,
     Hook,
     RunAction,
     RunSelector,
@@ -30,10 +32,12 @@ from harel.engine.core import (
 
 __all__ = [
     "ActionResult",
+    "Assigned",
     "CancelTimer",
     "ChildSpec",
     "Effect",
     "Emit",
+    "ExpressionError",
     "Hook",
     "RunAction",
     "RunSelector",

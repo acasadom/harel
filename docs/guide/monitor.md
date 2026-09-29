@@ -41,8 +41,8 @@ join outcome), and a collapsible **DSL source** panel underneath (the machine's 
 default — needs `--definitions-dir`). The right column is a status header, a row of control buttons,
 and a navigable **execution timeline** over a per-step **detail**.
 
-Navigate the timeline (`↑/↓`) and each step shows its **event in, transition, guards, actions, and
-context before → after**; the step's target state is marked in the tree (a `◀` marker) so you can
+Navigate the timeline (`↑/↓`) and each step shows its **event in, transition, guards, actions, what
+a `set` wrote, and context before → after**; the step's target state is marked in the tree (a `◀` marker) so you can
 see both the live state and the one you're inspecting. Control-plane actions are both **keys and
 buttons** (the buttons enable/disable per status):
 

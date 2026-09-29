@@ -149,3 +149,16 @@ def test_composite_and_named_guards_are_rendered() -> None:
     assert "A --> B : E<br/>[(y > 1 and y < 5) or z == 'go']" in lines
     assert "A --> C : E<br/>[status == 'paid' and not (n in [1, 2] or retry == true)]" in lines
     assert "A --> D : E<br/>[(tier == 'gold' or spend > 1000) and region == 'eu']" in lines
+
+
+def test_choose_and_set_are_rendered() -> None:
+    source = (Path(__file__).parents[2] / "data" / "context.stm").read_text()
+    lines = _lines(source, "job")
+    assert "state Working__choose <<choice>>" in lines
+    assert (
+        "Working --> Working__choose : Fail<br/>/ context.attempts = context.attempts + 1, "
+        "context.last_code = event.code"
+    ) in lines
+    assert "Working__choose --> GaveUp : [context.attempts >= 3]" in lines
+    assert "Working__choose --> Cooling : else" in lines
+    assert "Working --> Done : Recovered<br/>[context.attempts == 0]" in lines

@@ -29,7 +29,7 @@ from harel.definition.model import (
     Transition,
     resolve_relative,
 )
-from harel.viz._guards import guard_text
+from harel.viz._guards import branch_text, effect_text, guard_text
 
 _INDENT = "  "
 _HOOKS = (("on_enter", "on enter"), ("on_activity", "on activity"), ("on_exit", "on exit"))
@@ -86,9 +86,27 @@ def _filter_text(ef: Optional[EventFilter]) -> Optional[str]:
     return f"{ef.kind}<br/>[{guard}]" if guard else ef.kind
 
 
-def _edge_suffix(ef: Optional[EventFilter]) -> str:
-    label = _filter_text(ef)
-    return f" : {label}" if label else ""
+def _edge_suffix(ef: Optional[EventFilter], assignments: tuple = ()) -> str:
+    """` : Event<br/>[guard]<br/>/ effect` — the UML `event [guard] / effect` label."""
+    parts = [p for p in (_filter_text(ef), effect_text(assignments)) if p]
+    if len(parts) == 2:
+        return f" : {parts[0]}<br/>/ {parts[1]}"
+    if parts and ef is None:
+        return f" : / {parts[0]}"
+    return f" : {parts[0]}" if parts else ""
+
+
+def _emit_choice(source: Node, t: Transition, pad: str, out: list[str]) -> None:
+    choice = t.choice
+    assert choice is not None
+    src = _nid(source)
+    node = f"{src}__choose"
+    out.append(f"{pad}state {node} <<choice>>")
+    out.append(f"{pad}{src} --> {node}{_edge_suffix(t.event_filter, t.assignments)}")
+    for guard, target in choice.branches:
+        out.append(f"{pad}{node} --> {_nid(target)} : [{branch_text(guard)}]")
+    if choice.default is not None:
+        out.append(f"{pad}{node} --> {_nid(choice.default)} : else")
 
 
 def _emit_selector(comp: Node, source: Node, t: Transition, pad: str, out: list[str]) -> None:
@@ -113,9 +131,13 @@ def _emit_transitions(comp: Node, pad: str, out: list[str]) -> None:
     for child in comp.children:
         for t in (t for t in comp.transitions if t.source is child):
             if t.target is not None:
-                out.append(f"{pad}{_nid(child)} --> {_nid(t.target)}{_edge_suffix(t.event_filter)}")
+                out.append(
+                    f"{pad}{_nid(child)} --> {_nid(t.target)}{_edge_suffix(t.event_filter, t.assignments)}"
+                )
             elif t.selector is not None:
                 _emit_selector(comp, child, t, pad, out)
+            elif t.choice is not None:
+                _emit_choice(child, t, pad, out)
 
 
 def _emit_leaf(node: Node, pad: str, out: list[str]) -> None:

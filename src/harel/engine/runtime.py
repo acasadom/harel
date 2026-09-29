@@ -44,12 +44,18 @@ def _action_name(action: ActionRef) -> str:
 
 
 def _trace_step(
-    event: Optional[Event], from_path: Optional[str], exe: Execution, actions: list[str], ts: float
+    event: Optional[Event],
+    from_path: Optional[str],
+    exe: Execution,
+    actions: list[str],
+    ts: float,
+    assigned: Optional[dict] = None,
 ) -> dict:
     """Build one execution-trace step: what drove the event, the transition, the actions that
-    ran, and the resulting context (`context_out` only — the monitor derives `context_in` from
-    the prior step). `event=None` is the initial start (`Start`)."""
-    return {
+    ran, the context values a `set` wrote (`assigned`, only when there were any — the stated
+    reason for those changes), and the resulting context (`context_out` only — the monitor
+    derives `context_in` from the prior step). `event=None` is the initial start (`Start`)."""
+    step = {
         "event_kind": event.kind if event is not None else "Start",
         "event_data": dict(event.data) if (event is not None and event.data) else {},
         "from_path": from_path,
@@ -58,6 +64,9 @@ def _trace_step(
         "context_out": dict(exe.context),
         "timestamp": ts,
     }
+    if assigned:
+        step["assigned"] = dict(assigned)
+    return step
 
 
 class _Proxy:
@@ -154,8 +163,12 @@ class _SyncDriver:
         tracing is enabled, one timeline step (transition + actions + context_out) is
         recorded in the same `commit` (`event=None` is the initial start)."""
         from_path = exe.active_path
-        emits, timer_ops, spawns, actions = self._drive(exe, gen)
-        step = _trace_step(event, from_path, exe, actions, self._clock()) if self._trace_enabled else None
+        emits, timer_ops, spawns, actions, assigned = self._drive(exe, gen)
+        step = (
+            _trace_step(event, from_path, exe, actions, self._clock(), assigned)
+            if self._trace_enabled
+            else None
+        )
         stamp(exe, self._clock())
         self.store.commit(
             exe,
@@ -166,13 +179,33 @@ class _SyncDriver:
             trace=step,
         )
 
+    def _expression_error(self, exe: Execution, exc: Exception, original_exc: Optional[Exception]):
+        """The engine couldn't evaluate a model expression (a `set`): routed exactly like an
+        action error — to an `on error` in scope (`_error` + the error event carry it),
+        else the runner's policy. It is raised before the transition leaves any state, so
+        recovery starts from where the execution was. Partial effects are dropped."""
+        if original_exc is not None:  # already recovering: no second attempt
+            exc.__cause__ = original_exc
+            self._on_action_error(exe, exc)
+            return [], [], [], [], {}
+        defn = self._definition_for(exe)
+        ev = engine.error_event(exc)
+        if engine.has_error_handler(defn, exe, ev):
+            exe.context["_error"] = dict(ev.data)
+            return self._drive(exe, engine.process(defn, exe, ev), original_exc=exc)
+        self._on_action_error(exe, exc)
+        return [], [], [], [], {}
+
     def _drive(
         self, exe: Execution, gen, original_exc: Optional[Exception] = None
-    ) -> tuple[list[tuple[Optional[str], Event]], list[TimerOp], list[tuple[str, str, dict]], list[str]]:
+    ) -> tuple[
+        list[tuple[Optional[str], Event]], list[TimerOp], list[tuple[str, str, dict]], list[str], dict
+    ]:
         emits: list[tuple[Optional[str], Event]] = []
         timer_ops: list[TimerOp] = []
         spawns: list[tuple[str, str, dict]] = []
         actions: list[str] = []
+        assigned: dict = {}  # context values a `set` wrote this step (for the trace)
         proxy = self._proxy(exe)
         action_index = 0  # per-event counter -> a deterministic, replay-stable idempotency key
         try:
@@ -199,7 +232,7 @@ class _SyncDriver:
                             # a thread pool, where Python's implicit context isn't reliable).
                             exc.__cause__ = original_exc
                             self._on_action_error(exe, exc)
-                            return [], [], [], []
+                            return [], [], [], [], {}
                         if isinstance(effect, engine.RunAction) and effect.hook is engine.Hook.EXIT:
                             # `on_exit` must always succeed (mirrors `AsyncDriver._drive`):
                             # leaving a state applies real, un-undoable side effects, and
@@ -208,7 +241,7 @@ class _SyncDriver:
                             # the same failure. A raise here is always a bug: no `on error`
                             # lookup, straight to the runner policy.
                             self._on_action_error(exe, exc)
-                            return [], [], [], []
+                            return [], [], [], [], {}
                         # if the model has an `on error` transition for the current config,
                         # route to it (exception in context._error + the error event data);
                         # else fall back to the runner's policy (fail the exe / re-raise).
@@ -219,7 +252,7 @@ class _SyncDriver:
                             exe.context["_error"] = dict(ev.data)
                             return self._drive(exe, engine.process(defn, exe, ev), original_exc=exc)
                         self._on_action_error(exe, exc)  # base: re-raises; runtime: fails the exe
-                        return [], [], [], []
+                        return [], [], [], [], {}
                     effect = gen.send(engine.ActionResult(value=ret))
                 elif isinstance(effect, engine.SpawnChildren):
                     # the fork's children are enqueued (committed atomically with the
@@ -240,6 +273,9 @@ class _SyncDriver:
                     fire_at = self._clock() + delay
                     timer_ops.append(TimerOp("schedule", effect.path, fire_at))
                     effect = gen.send(fire_at)
+                elif isinstance(effect, engine.Assigned):
+                    assigned.update(effect.values)
+                    effect = gen.send(None)
                 elif isinstance(effect, engine.CancelTimer):
                     timer_ops.append(TimerOp("cancel", effect.path))
                     effect = gen.send(None)
@@ -247,7 +283,9 @@ class _SyncDriver:
                     effect = gen.send(None)
         except StopIteration:
             pass
-        return emits, timer_ops, spawns, actions
+        except engine.ExpressionError as exc:
+            return self._expression_error(exe, exc, original_exc)
+        return emits, timer_ops, spawns, actions, assigned
 
     def _create_spawn(self, entry) -> None:
         """Create + start one pending child Execution, idempotently: if the child

@@ -21,8 +21,11 @@ from typing import Any, Optional
 from harel.definition.events import EventType, FieldSpec
 from harel.definition.model import (
     ActionRef,
+    Assign,
+    Choice,
     Definition,
     EventFilter,
+    Expr,
     Node,
     NodeKind,
     Predicate,
@@ -76,7 +79,10 @@ def _build_action(data: Any, global_context: Optional[dict]) -> Optional[ActionR
     )
 
 
-_COMBINATORS = {"all", "any", "not"}
+# keys of a predicate dict that build the composable tree; any other key is a flat
+# `field__op` leaf over the event's data. `__ref__` is a leaf over another namespace
+# (the execution context), which the flat dict can't express.
+_COMBINATORS = {"all", "any", "not", "__ref__"}
 
 
 def _parse_predicate(data: dict) -> Optional[Predicate]:
@@ -91,6 +97,12 @@ def _parse_predicate(data: dict) -> Optional[Predicate]:
         elif key == "not":
             child = _parse_predicate(val)
             nodes.append(Predicate(node="not", children=[child] if child is not None else []))
+        elif key == "__ref__":
+            nodes.append(
+                Predicate(
+                    node="leaf", field=val["field"], op=val["op"], value=val["value"], source=val["source"]
+                )
+            )
         else:
             name, op = key.split("__") if "__" in key else (key, "eq")
             nodes.append(Predicate(node="leaf", field=name, op=op, value=val))
@@ -204,8 +216,9 @@ def _build_transition(scope: Node, raw: dict, global_context: Optional[dict]) ->
     pos = raw.get("__pos__")  # (line, column) from the DSL loader, for located errors
     to = raw.get("to")
     sel = raw.get("selector")
-    if to is None and sel is None:
-        raise BuildError("invalid transition: both target and selector are undefined", pos)
+    choice = raw.get("choice")
+    if to is None and sel is None and choice is None:
+        raise BuildError("invalid transition: it has no target, selector or choice", pos)
 
     source = descend(scope, raw["from"])
     if source is None:
@@ -222,6 +235,40 @@ def _build_transition(scope: Node, raw: dict, global_context: Optional[dict]) ->
         target=target,
         event_filter=_build_event_filter(raw["on_event"]) if raw.get("on_event") is not None else None,
         selector=_build_selector(sel, global_context) if sel is not None else None,
+        choice=_build_choice(scope, choice, pos) if choice is not None else None,
+        assignments=tuple(Assign(field=a["field"], expr=_build_expr(a["expr"])) for a in raw.get("set", ())),
+    )
+
+
+def _build_choice(scope: Node, raw: dict, pos: Any) -> Choice:
+    """A `choose`: each branch's guard and target, targets resolved now (like a `to`)."""
+
+    def target(name: str) -> Node:
+        node = resolve_relative(scope, name)
+        if node is None:
+            raise BuildError(f"cannot resolve choice target {name!r} from scope {scope.full_path!r}", pos)
+        return node
+
+    branches = []
+    for b in raw["branches"]:
+        guard = _parse_predicate(b["when"])
+        if guard is None:
+            raise BuildError("a `when` branch needs a guard", pos)
+        branches.append((guard, target(b["to"])))
+    default = raw.get("default")
+    return Choice(branches=branches, default=target(default) if default is not None else None)
+
+
+def _build_expr(raw: dict) -> Expr:
+    """An assignment's right-hand side: `{ref: {source, field}}`, `{lit: value}` or
+    `{arith: {op, left, right}}`."""
+    if "ref" in raw:
+        return Expr(kind="ref", source=raw["ref"]["source"], field=raw["ref"]["field"])
+    if "lit" in raw:
+        return Expr(kind="lit", value=raw["lit"])
+    arith = raw["arith"]
+    return Expr(
+        kind="arith", op=arith["op"], left=_build_expr(arith["left"]), right=_build_expr(arith["right"])
     )
 
 
@@ -251,6 +298,7 @@ def build_definition(
         events=_build_events(config),
         submachines=submachines,
         ttl=config.get("ttl"),
+        context_schema={f: _build_field_spec(s) for f, s in (config.get("context_schema") or {}).items()},
     )
     if validate:
         from harel.definition.validate import validate_or_raise

@@ -20,6 +20,7 @@ import time
 from typing import Any, Callable, Optional
 
 from harel import engine
+from harel.definition.events import check_context
 from harel.definition.model import Definition
 from harel.engine.aio import control
 from harel.engine.aio.driver import _AsyncRuntimeDriver
@@ -358,6 +359,12 @@ class AsyncDistributedRunner:
             # execution_id collision so a caller retrying with a bad definition_id
             # still learns about an id collision first, not masked by this check.
             raise KeyError(f"unknown definition_id {definition_id!r}")
+        # a required field may still come with `start(data=...)` when the start is deferred
+        check_context(
+            self.definitions[definition_id].context_schema,
+            dict(context or {}),
+            check_required=start_on_create,
+        )
         exe = Execution(
             definition_id=definition_id,
             context=dict(context or {}),
@@ -429,6 +436,8 @@ class AsyncDistributedRunner:
                 exe.status.value,
             )
             return
+        defn = _defn_for(self.definitions, self.resolver, exe)
+        check_context(defn.context_schema, {**exe.context, **(data or {})})
         await self._persist_start(exe, data)
 
     async def send(self, execution_id: str, event: Event) -> None:
