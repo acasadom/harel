@@ -329,19 +329,34 @@ def _check_cancel_target(node: Node, t: Transition, issues: list[Issue]) -> None
             resolved = resolve_relative(node, name)
             if resolved is not None:
                 targets.append(resolved)
+    root = _execution_root_of(node)
     for kind in kinds:
         code, remedy = _TEARDOWN_EVENTS[kind]
         for target in targets:
-            if not _is_terminal(target):
+            why = _why_not_ending(target, root)
+            if why is not None:
                 issues.append(
                     Issue(
                         code,
                         "error",
                         node.full_path,
-                        f"`on {kind}` must resolve directly to a terminal state, got "
-                        f"{target.full_path!r} which has its own outgoing transitions — {remedy}",
+                        f"`on {kind}` must resolve directly to a terminal that ends the execution, "
+                        f"got {target.full_path!r}: {why} — {remedy}",
                     )
                 )
+
+
+def _why_not_ending(target: Node, root: Node) -> Optional[str]:
+    """Why reaching `target` would NOT end `root`'s Execution in that same step, or None
+    if it would: it must be a sink of this Execution whose bubble reaches `root` uncaught."""
+    if _execution_root_of(target) is not root:
+        return "it is not part of this execution"
+    if not _is_terminal(target):
+        return "it has its own outgoing transitions"
+    catcher = _catching_ancestor(target, root)
+    if catcher is not None:
+        return f"the enclosing {catcher.full_path!r} has its own transition and the execution would go on"
+    return None
 
 
 def _check_cancel_targets(defn: Definition, issues: list[Issue]) -> None:
@@ -497,25 +512,39 @@ def _execution_roots(defn: Definition) -> list[Node]:
     return roots
 
 
+def _catching_ancestor(leaf: Node, root: Node) -> Optional[Node]:
+    """The first ancestor of `leaf` below `root` with an outgoing transition of its own —
+    it catches the bubble from `leaf`'s sink and the Execution goes on (an automatic
+    transition fires, an event transition waits). None if the bubble reaches `root`."""
+    anc = leaf.parent
+    while anc is not None and anc is not root:
+        if any(t.source is anc for t in _all_transitions_from(anc)):
+            return anc
+        anc = anc.parent
+    return None
+
+
+def _execution_root_of(node: Node) -> Node:
+    """The node whose subtree runs as `node`'s own Execution: the nearest ancestor-or-self
+    that is an orthogonal region (a child of an orthogonal node), else the machine root."""
+    cur = node
+    while cur.parent is not None:
+        if cur.parent.kind in _ORTHOGONAL:
+            return cur
+        cur = cur.parent
+    return cur
+
+
 def _execution_terminals(root: Node) -> list[Node]:
     """Leaf sinks in `root`'s subtree that actually END `root`'s Execution: the
-    bubble from the leaf reaches `root` UNCAUGHT — no ancestor in between has an
-    outgoing transition (which would keep the Execution running: an automatic
-    transition fires, an event transition waits). Does NOT descend into a nested
-    orthogonal's regions (those are their own execution roots, validated apart)."""
+    bubble from the leaf reaches `root` UNCAUGHT (see `_catching_ancestor`). Does NOT
+    descend into a nested orthogonal's regions (those are their own execution roots,
+    validated apart)."""
     out: list[Node] = []
-
-    def ends_execution(leaf: Node) -> bool:
-        anc = leaf.parent
-        while anc is not None and anc is not root:
-            if any(t.source is anc for t in _all_transitions_from(anc)):
-                return False  # this composite catches the bubble; the Execution goes on
-            anc = anc.parent
-        return True
 
     def walk(node: Node) -> None:
         if not node.children:
-            if _is_terminal(node) and ends_execution(node):
+            if _is_terminal(node) and _catching_ancestor(node, root) is None:
                 out.append(node)
             return
         if node.kind in _ORTHOGONAL:

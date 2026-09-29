@@ -401,3 +401,63 @@ def test_cancel_with_an_unsafe_selector_branch_forcefully_terminates_instead():
     assert final.context["trace"] == ["we"]  # the selector never even ran
     assert final.active_path == "Working"
     assert final.status == Status.CANCELLED
+
+
+CANCEL_CAPTURED_TARGET = """
+event Go {}
+machine M {
+  initial C
+  state C {
+    initial A
+    state A {}
+    state Cleaned {}
+    from A to Cleaned on Cancel
+  }
+  state Next {}
+  final Done success {}
+  from C to Next
+  from Next to Done on Go
+}
+"""
+
+
+def test_cancel_into_a_sink_an_enclosing_state_catches_forcefully_terminates_instead():
+    # Cleaned is a leaf with no transition, but C's own `from C to Next` would catch its
+    # bubble and carry the execution on — so it's not a safe cooperative target
+    from harel.engine.durable import DurableRunner
+    from harel.engine.execution import Status
+    from harel.engine.store import DictStore
+
+    defn = definition_from_dsl(CANCEL_CAPTURED_TARGET, "M")
+    runner = DurableRunner(DictStore(), {defn.id: defn})
+    exe = runner.create(defn.id)  # parked at C.A
+
+    final = runner.cancel(exe.id)
+
+    assert final.status == Status.CANCELLED
+    assert final.active_path == "C.A"
+
+
+def test_cancel_into_a_nested_terminal_that_ends_the_execution_is_cooperative():
+    from harel.engine.durable import DurableRunner
+    from harel.engine.execution import Status
+    from harel.engine.store import DictStore
+
+    source = """
+    machine M {
+      initial C
+      state C {
+        initial A
+        state A {}
+        final Cleaned cancelled {}
+        from A to Cleaned on Cancel
+      }
+    }
+    """
+    defn = definition_from_dsl(source, "M", validate=True)
+    runner = DurableRunner(DictStore(), {defn.id: defn})
+    exe = runner.create(defn.id)
+
+    final = runner.cancel(exe.id)
+
+    assert (final.status, final.outcome) == (Status.DONE, "cancelled")  # the model's own cleanup ran
