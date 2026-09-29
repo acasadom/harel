@@ -429,7 +429,7 @@ def purge_finished(
     isn't disturbed. A root without `finished_at` is skipped unless `include_undated`. A
     candidate `purge` refuses (a member still live, or changed concurrently) is recorded in
     `refused` and the run goes on; an archiver error aborts it. `limit` caps how many roots
-    are purged; `dry_run` only reports them."""
+    are purged; `dry_run` only reports them, applying the same whole-tree check."""
     statuses = set(statuses)
     if not statuses <= set(_PURGEABLE):
         raise ValueError(f"only {', '.join(s.name for s in _PURGEABLE)} executions can be purged")
@@ -452,7 +452,18 @@ def purge_finished(
             break
     candidates = candidates[:limit]
     if dry_run:
-        report.purged = candidates
+        # the same whole-tree check `purge` makes, without deleting: a root whose tree
+        # has a member not yet finished is reported as refused, not as purgeable
+        for root_id in candidates:
+            root = store.load(root_id)
+            if root is None:
+                continue
+            try:
+                _check_purgeable(root, _collect_tree(store, root)[0])
+            except PurgeRefused as exc:
+                report.refused[root_id] = str(exc)
+            else:
+                report.purged.append(root_id)
         return report
     for root_id in candidates:
         try:

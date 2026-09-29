@@ -306,7 +306,8 @@ An execution expired by its machine's [`ttl`](../tutorial/07-timers) is finished
 removes it.
 
 `statuses` narrows the candidates to `DONE` or `CANCELLED`, `limit` caps one run, and `dry_run`
-reports without deleting. Candidates are collected before anything is deleted; a tree `purge`
+reports without deleting — applying the same whole-tree check, so it lists as `refused` what a
+real run would refuse. Candidates are collected before anything is deleted; a tree `purge`
 refuses (`PurgeRefused`, or a `StoreConflict` from a concurrent change) is reported and skipped,
 while any other error — an archiver's included — stops the run. Executions stored before
 `finished_at` existed have none, and are skipped unless `include_undated=True`. It reads
