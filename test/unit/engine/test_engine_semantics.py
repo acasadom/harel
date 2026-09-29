@@ -14,6 +14,7 @@ Semantics asserted:
 - activity runs only the active leaf's own on_activity.
 """
 
+import pytest
 from scenarios import _Runner
 
 from harel.dsl import definition_from_dsl
@@ -461,3 +462,73 @@ def test_cancel_into_a_nested_terminal_that_ends_the_execution_is_cooperative():
     final = runner.cancel(exe.id)
 
     assert (final.status, final.outcome) == (Status.DONE, "cancelled")  # the model's own cleanup ran
+
+
+# --- a guard over values that can't be compared -----------------------------------------
+UNCOMPARABLE = """
+event E {}
+machine M {
+  initial A
+  state A {}
+  final Low success {}
+  final Tree success {}
+  final Listed success {}
+  from A to Low on E where x < 3
+  from A to Tree on E where (y > 1 and y < 5) or z == "go"
+  from A to Listed on E where w in [1, 2]
+}
+"""
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"x": "abc"},  # flat predicate: str < int
+        {"x": None},  # flat predicate: None < int
+        {"y": "abc"},  # composable tree: str > int
+        {"w": 5, "x": [1]},  # `in` against a list is fine; list < int is not
+    ],
+)
+def test_a_guard_over_values_that_cant_be_compared_does_not_match(data):
+    # an uncomparable value fails the comparison like an absent field — it never raises
+    # out of the engine, which would leave the event unprocessable on every redelivery
+    from harel.engine.durable import DurableRunner
+    from harel.engine.store import DictStore
+
+    defn = definition_from_dsl(UNCOMPARABLE, "M")
+    runner = DurableRunner(DictStore(), {defn.id: defn})
+    exe = runner.create(defn.id)
+
+    after = runner.process(exe.id, Event(kind="E", data=data))
+
+    assert after.active_path == "A"
+
+
+def test_a_guard_still_matches_comparable_values():
+    from harel.engine.durable import DurableRunner
+    from harel.engine.store import DictStore
+
+    defn = definition_from_dsl(UNCOMPARABLE, "M")
+    runner = DurableRunner(DictStore(), {defn.id: defn})
+    exe = runner.create(defn.id)
+
+    assert runner.process(exe.id, Event(kind="E", data={"y": "abc", "z": "go"})).active_path == "Tree"
+
+
+def test_an_uncomparable_guard_value_is_consumed_on_the_worker_path():
+    from harel.engine.distributed import DistributedRunner
+    from harel.engine.store import DictStore
+    from harel.engine.transport import InMemoryTransport
+
+    defn = definition_from_dsl(UNCOMPARABLE, "M")
+    store = DictStore()
+    runner = DistributedRunner(store, InMemoryTransport(), {defn.id: defn})
+    exe = runner.create(defn.id)
+    worker = runner.worker()
+    while worker.step():
+        pass
+
+    runner.send(exe.id, Event(kind="E", data={"x": "abc"}))
+    assert worker.step() is True  # processed and acked, not raised
+    assert worker.step() is False  # nothing left to redeliver
+    assert store.load(exe.id).active_path == "A"
