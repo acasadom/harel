@@ -238,3 +238,17 @@ def test_cli_reports_an_unwritable_archive_cleanly(tmp_path, monkeypatch, capsys
     store = SqliteStore(db)
     assert store.load("old") is not None  # the archive failed first, so nothing was deleted
     store.close()
+
+
+def test_a_dry_run_reports_what_a_real_run_would_refuse(store):
+    # the root finished, but a region of its tree has not: a dry run must not claim it
+    store.save(Execution(id="child", definition_id="M", status=Status.FAILED, parent_id="stuck"))
+    _finished(store, "stuck", 100.0, children={"child": ChildState(root_path="R")})
+    _finished(store, "fine", 100.0)
+
+    dry = purge_finished(store, older_than=1, dry_run=True, now=1000.0)
+    assert dry.purged == ["fine"]
+    assert "not finished" in dry.refused["stuck"]
+
+    real = purge_finished(store, older_than=1, now=1000.0)
+    assert (real.purged, set(real.refused)) == (dry.purged, set(dry.refused))
