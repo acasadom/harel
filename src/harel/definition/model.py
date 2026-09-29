@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Optional, Union
 
-from harel.definition.events import EventType
+from harel.definition.events import EventType, FieldSpec
 
 
 class NodeKind(Enum):
@@ -37,9 +37,10 @@ class ActionRef:
 
 @dataclass
 class Predicate:
-    """A composable event-data predicate. Exactly one shape per node:
-    a `leaf` (field/op/value) or a combinator `all`/`any`/`not` over children
-    (`not` has a single child). Leaf op is one of eq/ne/lt/le/gt/ge/in."""
+    """A composable predicate. Exactly one shape per node: a `leaf` (field/op/value)
+    or a combinator `all`/`any`/`not` over children (`not` has a single child). Leaf op
+    is one of eq/ne/lt/le/gt/ge/in. A leaf reads `field` from its `source` namespace:
+    the triggering event's data (`event`, the default) or the execution's `context`."""
 
     node: str  # "leaf" | "all" | "any" | "not"
     # `children` first so the dataclasses `field()` call is not shadowed by the
@@ -48,14 +49,16 @@ class Predicate:
     field: Optional[str] = None
     op: Optional[str] = None
     value: Any = None
+    source: str = "event"  # "event" | "context"
 
 
 @dataclass
 class EventFilter:
     """Guard over an event. `kind` allows `A | B` alternation. `predicates` are
-    flat `field__op -> value` leaves combined with AND (back-compat + PlantUML);
-    `predicate` is an optional composable tree (`all`/`any`/`not`). Both, when
-    present, are AND-ed. A predicate on a field absent from the event fails."""
+    flat `field__op -> value` leaves over the event's data, combined with AND;
+    `predicate` is an optional composable tree (`all`/`any`/`not`), whose leaves may
+    also read the execution context. Both, when present, are AND-ed. A leaf on a field
+    absent from its namespace, or whose value can't be compared, fails."""
 
     kind: str
     predicates: dict = field(default_factory=dict)
@@ -77,14 +80,52 @@ class Selector:
 
 
 @dataclass
+class Expr:
+    """The right-hand side of an assignment — deliberately tiny: a `ref` (`source` +
+    `field`: `event.x` / `context.x`), a `lit`eral `value`, or one `arith`metic `op`
+    (`+ - * /`, numbers only) over a `left` and a `right` that are refs or literals."""
+
+    kind: str  # "ref" | "lit" | "arith"
+    source: Optional[str] = None
+    field: Optional[str] = None
+    value: Any = None
+    op: Optional[str] = None
+    left: Optional["Expr"] = None
+    right: Optional["Expr"] = None
+
+
+@dataclass
+class Assign:
+    """`set context.<field> = <expr>` on a transition."""
+
+    field: str
+    expr: Expr
+
+
+@dataclass
+class Choice:
+    """A guarded choice (`choose`): `branches` are (guard, target) pairs tried in order —
+    the first whose guard holds wins, else the `default` (`else`) target. With no branch
+    holding and no `default`, the transition doesn't fire at all. Guards read the event
+    and the execution context, like a `where`."""
+
+    branches: list[tuple[Predicate, "Node"]] = field(default_factory=list)
+    default: Optional["Node"] = None
+
+
+@dataclass
 class Transition:
     """Owned by the composite that is its scope. `source` is a node within that
-    scope; the transition applies to `source` and its descendants."""
+    scope; the transition applies to `source` and its descendants. Its destination is
+    exactly one of `target`, `selector` or `choice`. `assignments` (`set`) update the
+    context as it is taken — see `core._take`."""
 
     source: "Node"
     target: Optional["Node"] = None
     event_filter: Optional[EventFilter] = None  # None => automatic transition
     selector: Optional[Selector] = None
+    choice: Optional[Choice] = None
+    assignments: tuple[Assign, ...] = ()
 
     @property
     def is_automatic(self) -> bool:
@@ -137,6 +178,8 @@ class Definition:
     #                                                                     target Definition (QML-style)
     ttl: Optional[int] = None  # seconds a root execution may go without a domain event before it
     #                            is expired (`Expired`); None = no inactivity limit
+    context_schema: dict[str, FieldSpec] = field(default_factory=dict)  # the context's declared,
+    #                                          typed fields (empty => an untyped context)
 
     def get(self, path: str) -> Optional[Node]:
         return self.index.get(path)

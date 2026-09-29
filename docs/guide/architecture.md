@@ -100,6 +100,7 @@ The engine yields an effect and the runner sends a result back. Effects come in 
 | `SpawnChildren(specs)` | deferred | queue child-Execution creations | `gen.send(None)` |
 | `ScheduleTimer(path, delay, context_key)` | deferred | arm a durable timer | `gen.send(fire_at)` — the absolute time it scheduled |
 | `CancelTimer(path)` | deferred | disarm the timer | `gen.send(None)` |
+| `Assigned(values)` | deferred | record what a `set` wrote, for the trace | `gen.send(None)` |
 
 **Blocking** effects pause the generator until the runner sends back an `ActionResult` (this is
 how a slow action or a remote FaaS call blocks the worker). **Deferred** effects are
@@ -107,7 +108,9 @@ fire-and-forget: the runner records them and continues immediately; they are per
 on *after* the commit (see the relay below). `ScheduleTimer` is the one whose resume carries a
 value — the absolute fire time, which only the runner can compute (the engine has no clock); the
 engine keeps it where a later `Timeout` must be matched against the arming it belongs to (a
-machine's `ttl`).
+machine's `ttl`). The engine raises only one thing of its own: `ExpressionError`, when a model expression (a
+`set`) can't be evaluated — the runner routes it like an action error, to `on error` or the
+dead-letter.
 
 ```{mermaid}
 sequenceDiagram

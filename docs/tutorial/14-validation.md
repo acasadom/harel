@@ -64,7 +64,11 @@ Distinct problems, each a structured `Issue` (`severity`, `code`, `path`, `messa
   asynchronous cancellation as an ordinary domain event instead (e.g. `CancelOrder`). `on
   Expired` is held to the same rule;
 - `ttl` is positive, and a warning for an `on Expired` in a machine with no `ttl` (it never
-  fires).
+  fires);
+- with a `context { ... }` schema, every `context.x` a guard, `choose` or `set` names is declared,
+  and a `set` value fits the field's type (`/` yields a float); a `set` or `choose` guard reading
+  the event on an automatic transition — which has no event — is an error (see [the context in
+  the model](17-context)).
 
 ## Fix it, and fail the build on errors
 

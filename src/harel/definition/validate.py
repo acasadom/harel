@@ -14,12 +14,13 @@ shape of the machine being well-formed.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from harel.definition.events import RESERVED_EVENTS
 from harel.definition.model import (
     Definition,
     EventFilter,
+    Expr,
     Node,
     NodeKind,
     Predicate,
@@ -212,6 +213,8 @@ def _reachable(defn: Definition) -> set[int]:
                     tgt = resolve_relative(node, target_name)
                     if tgt is not None:
                         visit(tgt)
+            for tgt in _choice_targets(t):
+                visit(tgt)
     return seen
 
 
@@ -224,14 +227,19 @@ def _check_reachability(defn: Definition, issues: list[Issue]) -> None:
             )
 
 
-def _check_event(node: Node, ef: EventFilter, defn: Definition, issues: list[Issue]) -> None:
+def _check_event(
+    node: Node, ef: EventFilter, defn: Definition, issues: list[Issue], extra: tuple = ()
+) -> None:
     # Every referenced event must be declared (or be a RESERVED_EVENT): an undeclared
     # event is an error, so a typo can't slip through. (Reserved engine events and
     # automatic — eventless — transitions are exempt; the latter have no EventFilter.)
-    fields = _flat_fields(ef.predicates) | {leaf.field for leaf in _tree_leaves(ef.predicate) if leaf.field}
-    leaves = _flat_leaves(ef.predicates) + [
-        (leaf.field, leaf.op) for leaf in _tree_leaves(ef.predicate) if leaf.field
-    ]
+    # the event's own fields only; `context.x` leaves are checked against the context schema
+    event_leaves = [leaf for leaf in _tree_leaves(ef.predicate) if leaf.source == "event"]
+    fields = _flat_fields(ef.predicates) | {leaf.field for leaf in event_leaves if leaf.field}
+    leaves = _flat_leaves(ef.predicates) + [(leaf.field, leaf.op) for leaf in event_leaves if leaf.field]
+    for field, op in extra:  # `choose` branch guards and `set` reads of this event
+        fields.add(field)
+        leaves.append((field, op))
     for kind in (k.strip() for k in ef.kind.split("|")):
         if kind in RESERVED_EVENTS:
             continue
@@ -268,11 +276,183 @@ def _check_event(node: Node, ef: EventFilter, defn: Definition, issues: list[Iss
                 )
 
 
+def _choice_targets(t: Transition) -> list[Node]:
+    if t.choice is None:
+        return []
+    targets = [target for _, target in t.choice.branches]
+    if t.choice.default is not None:
+        targets.append(t.choice.default)
+    return targets
+
+
+def _choice_leaves(t: Transition) -> list[Predicate]:
+    """The leaves of a `choose`'s branch guards (`when`)."""
+    if t.choice is None:
+        return []
+    return [leaf for guard, _ in t.choice.branches for leaf in _tree_leaves(guard)]
+
+
+def _guard_leaves(t: Transition) -> list[Predicate]:
+    """Every composable-tree leaf a transition's guards hold: its `where` and, for a
+    `choose`, each branch's `when`."""
+    where = _tree_leaves(t.event_filter.predicate) if t.event_filter is not None else []
+    return where + _choice_leaves(t)
+
+
+def _expr_refs(expr: Optional[Expr]) -> list[Expr]:
+    """The `ref` nodes of an assignment's right-hand side."""
+    if expr is None:
+        return []
+    if expr.kind == "ref":
+        return [expr]
+    return _expr_refs(expr.left) + _expr_refs(expr.right)
+
+
+def _literal_type(value: Any) -> str:
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    if isinstance(value, str):
+        return "string"
+    return "list"
+
+
+def _expr_type(expr: Expr, defn: Definition) -> Optional[str]:
+    """The static type of a right-hand side where it is knowable (None = not knowable)."""
+    if expr.kind == "lit":
+        return _literal_type(expr.value)
+    if expr.kind == "ref":
+        spec = defn.context_schema.get(expr.field or "") if expr.source == "context" else None
+        return spec.type if spec is not None and spec.type != "any" else None
+    if expr.op == "/":
+        return "float"
+    sides = {_expr_type(e, defn) for e in (expr.left, expr.right) if e is not None}
+    if sides == {"int"}:
+        return "int"  # `+ - *` of two ints
+    if sides <= {"int", "float"} and "float" in sides:
+        return "float"
+    return None
+
+
+def _check_assignments(node: Node, t: Transition, defn: Definition, issues: list[Issue]) -> None:
+    """A transition's `set`: what it reads must be readable, what it writes must fit."""
+    for assign in t.assignments:
+        for ref in _expr_refs(assign.expr):
+            if ref.source == "context" and ref.field:
+                _check_context_ref(node, ref.field, "eq", defn, issues)
+            elif ref.source == "event" and t.event_filter is None:
+                issues.append(
+                    Issue(
+                        "event_ref_without_event",
+                        "error",
+                        node.full_path,
+                        f"`set` reads event.{ref.field} on an automatic transition, which has no event",
+                    )
+                )
+        if assign.expr.kind == "arith":
+            for operand in (assign.expr.left, assign.expr.right):
+                kind = _expr_type(operand, defn) if operand is not None else None
+                if kind in ("string", "bool", "list"):
+                    issues.append(
+                        Issue(
+                            "assign_type_mismatch",
+                            "error",
+                            node.full_path,
+                            f"`{assign.expr.op}` in `set context.{assign.field}` needs numbers, got a {kind}",
+                        )
+                    )
+        if not defn.context_schema:
+            continue
+        spec = defn.context_schema.get(assign.field)
+        if spec is None:
+            issues.append(
+                Issue(
+                    "unknown_context_field",
+                    "error",
+                    node.full_path,
+                    f"`set` writes context.{assign.field}, which the context doesn't declare",
+                )
+            )
+            continue
+        kind = _expr_type(assign.expr, defn)
+        fits = (
+            kind is None
+            or spec.type == "any"
+            or kind == spec.type
+            or (spec.type == "float" and kind == "int")
+        )
+        if not fits:
+            issues.append(
+                Issue(
+                    "assign_type_mismatch",
+                    "error",
+                    node.full_path,
+                    f"`set context.{assign.field}` ({spec.type}) is given a {kind}",
+                )
+            )
+
+
+def _check_context_ref(node: Node, field: str, op: str, defn: Definition, issues: list[Issue]) -> None:
+    """A `context.<field>` reference in the model, checked against the declared schema (a
+    machine with no `context` block has an untyped context: nothing to check)."""
+    if not defn.context_schema:
+        return
+    spec = defn.context_schema.get(field)
+    if spec is None:
+        issues.append(
+            Issue(
+                "unknown_context_field", "error", node.full_path, f"the context declares no field {field!r}"
+            )
+        )
+    elif op in _NUMERIC_OPS and spec.type in ("string", "bool"):
+        issues.append(
+            Issue(
+                "op_type_mismatch",
+                "warning",
+                node.full_path,
+                f"op {op!r} on context.{field} ({spec.type}) compares a non-ordered field",
+            )
+        )
+
+
+def _check_context_refs(defn: Definition, issues: list[Issue]) -> None:
+    for node in defn.index.values():
+        for t in node.transitions:
+            for leaf in _guard_leaves(t):
+                if leaf.source == "context" and leaf.field:
+                    _check_context_ref(node, leaf.field, leaf.op or "eq", defn, issues)
+                elif t.event_filter is None:  # a `when` over the event on an eventless `choose`
+                    issues.append(
+                        Issue(
+                            "event_ref_without_event",
+                            "error",
+                            node.full_path,
+                            f"a guard reads the event's {leaf.field!r} on an automatic transition, "
+                            "which has no event — it can never hold",
+                        )
+                    )
+            _check_assignments(node, t, defn, issues)
+
+
 def _check_events(defn: Definition, issues: list[Issue]) -> None:
     for node in defn.index.values():
         for t in node.transitions:
             if t.event_filter is not None:
-                _check_event(node, t.event_filter, defn, issues)
+                extra = [
+                    (leaf.field, leaf.op)
+                    for leaf in _choice_leaves(t)
+                    if leaf.source == "event" and leaf.field
+                ]
+                extra += [
+                    (r.field, "eq")
+                    for a in t.assignments
+                    for r in _expr_refs(a.expr)
+                    if r.source == "event" and r.field
+                ]
+                _check_event(node, t.event_filter, defn, issues, tuple(extra))
 
 
 # teardown events whose transition must land directly on a terminal: code + remedy
@@ -329,6 +509,7 @@ def _check_cancel_target(node: Node, t: Transition, issues: list[Issue]) -> None
             resolved = resolve_relative(node, name)
             if resolved is not None:
                 targets.append(resolved)
+    targets.extend(_choice_targets(t))
     root = _execution_root_of(node)
     for kind in kinds:
         code, remedy = _TEARDOWN_EVENTS[kind]
@@ -595,6 +776,7 @@ def validate(defn: Definition) -> list[Issue]:
     _check_nondeterminism(defn, issues)
     _check_reachability(defn, issues)
     _check_events(defn, issues)
+    _check_context_refs(defn, issues)
     _check_cancel_targets(defn, issues)
     _check_ttl(defn, issues)
     _check_terminal_outcomes(defn, issues)

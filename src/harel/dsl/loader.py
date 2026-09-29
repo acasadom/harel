@@ -144,6 +144,10 @@ def _resolve_trans(t: dict, ctx: _Ctx) -> dict:
     oe = t.get("on_event")
     if oe is not None:
         t = {**t, "on_event": _resolve_guards(oe, ctx)}
+    choice = t.get("choice")
+    if choice is not None:
+        branches = [{**b, "when": _resolve_guards(b["when"], ctx)} for b in choice["branches"]]
+        t = {**t, "choice": {**choice, "branches": branches}}
     return t
 
 
@@ -162,6 +166,12 @@ def _substitute_targets(cfg: dict, subst: dict[str, str]) -> dict:
                 sel = dict(t["selector"])
                 sel["mapper"] = {k: subst.get(v, v) for k, v in sel["mapper"].items()}
                 t["selector"] = sel
+            if isinstance(t.get("choice"), dict):
+                choice = dict(t["choice"])
+                choice["branches"] = [{**b, "to": subst.get(b["to"], b["to"])} for b in choice["branches"]]
+                if "default" in choice:
+                    choice["default"] = subst.get(choice["default"], choice["default"])
+                t["choice"] = choice
             out.append(t)
         cfg["transitions"] = out
     if "states" in cfg:

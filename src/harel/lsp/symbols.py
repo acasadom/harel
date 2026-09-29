@@ -64,6 +64,9 @@ KEYWORDS = [
     "bind",
     "timeout",
     "ttl",
+    "set",
+    "choose",
+    "when",
     "context",
     "outcome",
     "carry",
@@ -95,6 +98,7 @@ class SymbolIndex:
     fragments: dict[str, Symbol] = field(default_factory=dict)
     machines: dict[str, Symbol] = field(default_factory=dict)  # invoke FQN (alias-scoped) -> decl
     definitions: dict[str, Definition] = field(default_factory=dict)  # machine name -> built Definition
+    context_fields: dict[str, Symbol] = field(default_factory=dict)  # declared `context { ... }` fields
 
     def lookup(self, name: str, category: Optional[str] = None) -> Optional[Symbol]:
         """Resolve `name` to a declaration. With a `category` only that kind is
@@ -112,6 +116,8 @@ class SymbolIndex:
                 return self.fragments[name]
             if cat in ("invoke", "machine") and name in self.machines:
                 return self.machines[name]
+        if name.startswith("context."):
+            return self.context_fields.get(name[len("context.") :])
         return None
 
     def names(self, category: Optional[str]) -> list[Symbol]:
@@ -127,6 +133,8 @@ class SymbolIndex:
             return list(self.fragments.values())
         if category == "invoke":
             return list(self.machines.values())
+        if category == "context":
+            return list(self.context_fields.values())
         return (
             states + list(self.events.values()) + list(self.guards.values()) + list(self.fragments.values())
         )
@@ -236,10 +244,14 @@ def index(text: str, *, base_path: Optional[Path] = None, uri: Optional[str] = N
     try:
         prog = parse(text)
     except DslError:
+        # mid-edit (`where context.at|`) the document rarely parses; keep what the
+        # `context { ... }` blocks declare so `context.` still completes
+        _scan_context_fields(text, idx, uri)
         return idx
 
     _walk_imports(prog, base_path, idx, set())  # imported declarations (uri = their file)
     _collect_decls(prog, idx, uri)  # local declarations override (uri = the open document)
+    _scan_context_fields(text, idx, uri)
 
     for machine in prog.machines:
         try:
@@ -255,6 +267,22 @@ def index(text: str, *, base_path: Optional[Path] = None, uri: Optional[str] = N
             idx.states_by_path[full_path] = sym
             idx.states.setdefault(node.name, []).append(sym)
     return idx
+
+
+_CONTEXT_BLOCK = re.compile(r"\bcontext\s*\{([^{}]*)\}")
+_FIELD_DECL = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(string|int|float|bool|any)(\?)?")
+
+
+def _scan_context_fields(text: str, idx: SymbolIndex, uri: Optional[str]) -> None:
+    """The fields of every `context { ... }` block, read textually (no parse needed)."""
+    for block in _CONTEXT_BLOCK.finditer(text):
+        for decl in _FIELD_DECL.finditer(block.group(1)):
+            offset = block.start(1) + decl.start()
+            line = text.count("\n", 0, offset) + 1
+            column = offset - (text.rfind("\n", 0, offset) + 1) + 1
+            name, type_, optional = decl.group(1), decl.group(2), decl.group(3)
+            detail = f"`context.{name}`: {type_}{' (optional)' if optional else ''}"
+            idx.context_fields[name] = Symbol(name, "context", line, column, detail, uri)
 
 
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*")
@@ -275,6 +303,8 @@ class WordRef:
 def _category(line: str, start: int) -> Optional[str]:
     """Infer what an identifier starting at column `start` refers to, from the
     token just before it on the line (and a `|` continues an `on A | B` list)."""
+    if re.search(r"\bcontext\.[A-Za-z0-9_]*$", line[:start]):
+        return "context"  # completing the field after `context.`
     before = line[:start].rstrip()
     if before.endswith("|"):
         return "event"

@@ -1,0 +1,26 @@
+# A retrying job that keeps its own count in a typed context: guards read it,
+# `set` updates it, and `choose` routes on it.
+event Fail { code: int }
+event Recovered {}
+
+guard exhausted = context.attempts >= 3
+
+machine job {
+  context {
+    attempts: int
+    last_code: int?
+  }
+
+  initial Working
+  state Working {}
+  state Cooling {}
+  final Done success {}
+  final GaveUp failed {}
+
+  from Working choose on Fail set context.attempts = context.attempts + 1, context.last_code = event.code {
+    when exhausted to GaveUp
+    else to Cooling
+  }
+  from Cooling to Working on Recovered
+  from Working to Done on Recovered where context.attempts == 0
+}

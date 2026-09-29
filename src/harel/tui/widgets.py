@@ -89,6 +89,11 @@ def step_markup(step: TraceStep) -> str:
         parts.append("[b]guards[/]      " + ", ".join(step.guards))
     if step.actions:
         parts.append("[b]actions[/]     " + ", ".join(step.actions))
+    if step.assigned:
+        parts.append(
+            "[b]set[/]         "
+            + ", ".join(f"context.{k} = {summary.truncate(v, 30)}" for k, v in step.assigned.items())
+        )
     parts.append("[b u]context in[/]\n" + kv(step.context_in))
     parts.append("[b u]context out[/]\n" + kv(step.context_out))
     return "\n".join(parts)

@@ -103,7 +103,8 @@ Three things happen here:
 
 - **Fork.** Entering `Verifying` starts both regions at once. Under the hood each region runs
   as its own child execution over the same definition — which is exactly what makes them
-  durable and, later, distributable.
+  durable and, later, distributable. Each starts from a copy of the parent's context at the fork;
+  from then on the contexts evolve apart (a region reports back through `carry`).
 - **Broadcast.** Every domain event is delivered to *all* regions (Harel semantics). `FraudCleared`
   reaches both; `Fraud` has a transition for it and advances to `Cleared`, while `Stock`
   ignores it. The parent stays parked on `Verifying` the whole time.

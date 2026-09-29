@@ -56,3 +56,17 @@ def test_list_executions_delegates_with_filters():
         )
     page = _model(store).list_executions(status=[Status.RUNNING])
     assert sorted(s.id for s in page.items) == ["e0", "e2"]
+
+
+def test_a_trace_step_shows_what_a_set_wrote():
+    from harel.tui.trace import TraceStep
+    from harel.tui.widgets import step_markup
+
+    step = TraceStep.from_dict(
+        {"index": 1, "event_kind": "Fail", "from_path": "A", "to_path": "A", "assigned": {"attempts": 2}}
+    )
+    assert step.assigned == {"attempts": 2}
+    assert "context.attempts = 2" in step_markup(step)
+    assert "[b]set[/]" not in step_markup(
+        TraceStep.from_dict({"index": 0, "event_kind": "Start", "from_path": None, "to_path": "A"})
+    )

@@ -19,7 +19,7 @@ from harel.definition.model import (
     Transition,
     resolve_relative,
 )
-from harel.viz._guards import guard_text
+from harel.viz._guards import branch_text, effect_text, guard_text
 
 _INDENT = "  "
 _HOOKS = ("on_enter", "on_activity", "on_exit")
@@ -40,11 +40,27 @@ def _prefixed(node: Node) -> str:
     return node.full_path.replace(" ", "")
 
 
-def _filter(ef: Optional[EventFilter]) -> str:
+def _filter(ef: Optional[EventFilter], assignments: tuple = ()) -> str:
+    """`: Event\\n[guard]\\n/ effect` — the UML `event [guard] / effect` label."""
+    effect = effect_text(assignments)
     if ef is None:
-        return ""
+        return f": / {effect}" if effect else ""
     guard = guard_text(ef)
-    return f": {ef.kind}\\n[{guard}]" if guard else f": {ef.kind}"
+    label = f": {ef.kind}\\n[{guard}]" if guard else f": {ef.kind}"
+    return f"{label}\\n/ {effect}" if effect else label
+
+
+def _emit_choice(source: Node, t: Transition, pad: str, out: list[str]) -> None:
+    choice = t.choice
+    assert choice is not None
+    src = _prefixed(source)
+    node = ".".join([*src.split(".")[:-1], f"{source.name}_choose"])
+    out.append(f"{pad}state {node}<<choice>>")
+    out.append(f"{pad}{src} --> {node}{_filter(t.event_filter, t.assignments)}")
+    for guard, target in choice.branches:
+        out.append(f"{pad}{node} --> {_prefixed(target)}: [{branch_text(guard)}]")
+    if choice.default is not None:
+        out.append(f"{pad}{node} --> {_prefixed(choice.default)}: else")
 
 
 def _emit_selector(comp: Node, source: Node, t: Transition, pad: str, out: list[str]) -> None:
@@ -71,9 +87,13 @@ def _emit_transitions(comp: Node, pad: str, out: list[str]) -> None:
             continue
         for t in trans:
             if t.target is not None:
-                out.append(f"{pad}{_prefixed(child)} --> {_prefixed(t.target)}{_filter(t.event_filter)}")
+                out.append(
+                    f"{pad}{_prefixed(child)} --> {_prefixed(t.target)}{_filter(t.event_filter, t.assignments)}"
+                )
             elif t.selector is not None:
                 _emit_selector(comp, child, t, pad, out)
+            elif t.choice is not None:
+                _emit_choice(child, t, pad, out)
 
 
 def _emit(comp: Node, indent: int, end_line: str) -> list[str]:

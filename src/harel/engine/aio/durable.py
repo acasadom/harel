@@ -11,6 +11,7 @@ import time
 from typing import Any, Callable, Optional
 
 from harel import engine
+from harel.definition.events import check_context
 from harel.definition.model import Definition
 from harel.engine.aio import control
 from harel.engine.aio.driver import _AsyncRuntimeDriver
@@ -66,6 +67,7 @@ class AsyncDurableRunner:
             from harel.engine.store import ExecutionAlreadyExists
 
             raise ExecutionAlreadyExists(execution_id)
+        check_context(self._driver(definition_id).defn.context_schema, dict(context or {}))
         exe = Execution(
             definition_id=definition_id,
             context=dict(context or {}),

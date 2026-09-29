@@ -14,7 +14,7 @@ from typing import Optional
 @dataclass(frozen=True)
 class TraceStep:
     """One step of an execution's history: the event that drove it, the transition it
-    took, the actions/guards involved, and the context before and after."""
+    took, the actions/guards involved, what a `set` wrote, and the context before and after."""
 
     index: int
     event_kind: str
@@ -27,6 +27,7 @@ class TraceStep:
     event_data: dict = field(default_factory=dict)
     timestamp: Optional[float] = None
     note: str = ""
+    assigned: dict = field(default_factory=dict)  # the values a `set` wrote in this step
 
     @classmethod
     def from_dict(cls, raw: dict) -> "TraceStep":
@@ -42,6 +43,7 @@ class TraceStep:
             event_data=raw.get("event_data", {}),
             timestamp=raw.get("timestamp"),
             note=raw.get("note", ""),
+            assigned=raw.get("assigned", {}),
         )
 
     def title(self) -> str:

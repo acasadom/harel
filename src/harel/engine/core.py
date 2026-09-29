@@ -22,11 +22,13 @@ still deferred to the filters phase.
 
 from __future__ import annotations
 
+import copy
 import operator
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Generator, Optional, Union
 
+from harel.definition.events import value_fits
 from harel.definition.model import (
     ActionRef,
     Definition,
@@ -112,7 +114,22 @@ class CancelTimer:
     path: str
 
 
-Effect = Union[RunAction, RunSelector, Emit, SpawnChildren, ScheduleTimer, CancelTimer]
+@dataclass
+class Assigned:
+    """Deferred, informational effect: the context values a transition's `set` just wrote
+    (the runner records them in the execution trace — the reason the context changed)."""
+
+    values: dict
+
+
+class ExpressionError(Exception):
+    """A model expression that can't be evaluated: an assignment reading a field that isn't
+    there, arithmetic on a non-number or dividing by zero, or a value that breaks the
+    context schema. Raised from the engine before the transition leaves any state; the
+    runner routes it like an action error (`on error`, else the execution fails)."""
+
+
+Effect = Union[RunAction, RunSelector, Emit, SpawnChildren, ScheduleTimer, CancelTimer, Assigned]
 
 
 @dataclass
@@ -148,22 +165,24 @@ def _compare(op: str, actual: Any, expected: Any) -> bool:
         return False
 
 
-def _eval(pred, data: dict) -> bool:
-    """Evaluate a composable predicate tree against the event data. A leaf on a
-    field absent from the event, or whose value can't be compared, fails (it cannot be
+def _eval(pred, scopes: dict) -> bool:
+    """Evaluate a composable predicate tree. Each leaf reads its field from the namespace
+    it names in `scopes` (`event` -> the event's data, `context` -> the execution context).
+    A leaf on a field absent there, or whose value can't be compared, fails (it cannot be
     evaluated) — see `_compare`."""
     if pred.node == "leaf":
+        data = scopes[pred.source]
         return pred.field in data and _compare(pred.op, data[pred.field], pred.value)
     if pred.node == "all":
-        return all(_eval(c, data) for c in pred.children)
+        return all(_eval(c, scopes) for c in pred.children)
     if pred.node == "any":
-        return any(_eval(c, data) for c in pred.children)
+        return any(_eval(c, scopes) for c in pred.children)
     if pred.node == "not":
-        return not _eval(pred.children[0], data)
+        return not _eval(pred.children[0], scopes)
     raise ValueError(f"unknown predicate node {pred.node!r}")
 
 
-def _matches(ef: EventFilter, event: Event) -> bool:
+def _matches(ef: EventFilter, event: Event, context: Optional[dict] = None) -> bool:
     if event.kind not in [k.strip() for k in ef.kind.split("|")]:
         return False
     for key, value in ef.predicates.items():
@@ -171,7 +190,7 @@ def _matches(ef: EventFilter, event: Event) -> bool:
         # a predicate on a field absent from the event fails (cannot be evaluated)
         if name not in event.data or not _compare(op, event.data[name], value):
             return False
-    if ef.predicate is not None and not _eval(ef.predicate, event.data):
+    if ef.predicate is not None and not _eval(ef.predicate, {"event": event.data, "context": context or {}}):
         return False
     return True
 
@@ -243,8 +262,29 @@ def _resolve(defn: Definition, exe: Execution, predicate, allow_parent: bool):
     return _resolve_between(defn, root, active, predicate, allow_parent)
 
 
-def _event_pred(event: Event):
-    return lambda t: t.event_filter is not None and _matches(t.event_filter, event)
+def _event_pred(event: Event, context: dict):
+    """Matches a transition triggered by `event` whose guard holds, over the event's data
+    and the execution `context` (read, never written, while resolving) — and, for a
+    `choose`, that it has somewhere to go."""
+    return lambda t: (
+        t.event_filter is not None
+        and _matches(t.event_filter, event, context)
+        and _choice_open(t, event.data, context)
+    )
+
+
+def _choice_branch(t, event_data: dict, context: dict):
+    """The target a `choose` picks: its first branch whose guard holds, else its `default`
+    (None if neither — the transition then doesn't fire)."""
+    scopes = {"event": event_data, "context": context}
+    for guard, target in t.choice.branches:
+        if _eval(guard, scopes):
+            return target
+    return t.choice.default
+
+
+def _choice_open(t, event_data: dict, context: dict) -> bool:
+    return t.choice is None or _choice_branch(t, event_data, context) is not None
 
 
 def _resolve_at(defn: Definition, path: str, predicate):
@@ -263,6 +303,11 @@ def _resolve_at(defn: Definition, path: str, predicate):
                 return (scope, t)
         cur = cur.parent
     return None
+
+
+def _auto_pred_in(context: dict):
+    """Matches an automatic transition; a `choose` only if it has somewhere to go."""
+    return lambda t: _auto_pred(t) and _choice_open(t, {}, context)
 
 
 def _auto_pred(t) -> bool:
@@ -331,7 +376,7 @@ def has_error_handler(defn: Definition, exe: Execution, event: Event) -> bool:
     over failing the execution."""
     if exe.active_path is None or exe.status is not Status.RUNNING:
         return False
-    return _resolve(defn, exe, _event_pred(event), allow_parent=True) is not None
+    return _resolve(defn, exe, _event_pred(event, exe.context), allow_parent=True) is not None
 
 
 def _would_be_a_sink(defn: Definition, exe: Execution, target: Node) -> bool:
@@ -396,12 +441,17 @@ def _safe_teardown(defn: Definition, exe: Execution, event: Event):
     directly on a sink (every branch of a selector, checked statically); else None."""
     if exe.active_path is None:
         return None
-    found = _resolve(defn, exe, _event_pred(event), allow_parent=True)
+    found = _resolve(defn, exe, _event_pred(event, exe.context), allow_parent=True)
     if found is None:
         return None
     scope, t = found
     if t.target is not None:
         return found if _would_be_a_sink(defn, exe, t.target) else None
+    if t.choice is not None:
+        targets = [target for _, target in t.choice.branches]
+        if t.choice.default is not None:
+            targets.append(t.choice.default)
+        return found if all(_would_be_a_sink(defn, exe, n) for n in targets) else None
     if t.selector is not None:
         names = list(t.selector.mapper.values())
         if t.selector.default is not None:
@@ -428,7 +478,7 @@ def _expire(defn: Definition, exe: Execution, event: Event) -> Step:
     if found is not None:
         scope, t = found
         dest = yield from _target_of(defn, exe, scope, t, expired)
-        yield from _take(defn, exe, dest, expired)
+        yield from _take(defn, exe, dest, expired, t.assignments)
         yield from _drain(defn, exe)
         return
     site = defn.index.get(exe.active_path) if exe.active_path is not None else None
@@ -501,14 +551,17 @@ def _fork(exe: Execution, node: Node) -> Step:
     """Enter an orthogonal (AND) node: instead of descending, spawn one child
     Execution per region and stay positioned on the orthogonal node until they all
     finish (`_joined`). Regions share the parent's Definition and SEE the parent's
-    domain events (broadcast — UML semantics). Data-parallel fan-out (N independent,
-    addressed workers) is a `fan-out invoke`, not this."""
+    domain events (broadcast — UML semantics). Each region starts from a copy of the
+    parent's context as it is at the fork — so its guards and actions see what the
+    parent knew — and from then on the two evolve independently (a region reports back
+    through `carry`). Data-parallel fan-out (N independent, addressed workers) is a
+    `fan-out invoke`, not this."""
     seq = exe.invoke_seq.get(node.full_path, 0)  # per-entry seq: a re-entry spawns fresh child ids
     exe.children = {}
     specs: list[ChildSpec] = []
     for child in node.children:
         cid = f"{exe.id}:{child.full_path}:{seq}"
-        specs.append(ChildSpec(child_id=cid, root_path=child.full_path))
+        specs.append(ChildSpec(child_id=cid, root_path=child.full_path, context=copy.deepcopy(exe.context)))
         exe.children[cid] = ChildState(root_path=child.full_path, key=child.full_path)
     yield SpawnChildren(specs)
 
@@ -576,17 +629,73 @@ def _target_of(
         target = resolve_relative(scope, target_name)
         assert target is not None
         return target
+    if t.choice is not None:
+        chosen = _choice_branch(t, event.data if event is not None else {}, exe.context)
+        assert chosen is not None  # matching (`_choice_open`) already required a branch
+        return chosen
     assert t.target is not None
     return t.target
 
 
-def _take(defn: Definition, exe: Execution, target: Node, event: Optional[Event]) -> Step:
+_ARITH = {"+": operator.add, "-": operator.sub, "*": operator.mul, "/": operator.truediv}
+
+
+def _value_of(expr, scopes: dict) -> Any:
+    """Evaluate an assignment's right-hand side (see `definition.model.Expr`). Unlike a
+    guard — where "can't be evaluated" just means "doesn't hold" — an assignment has no
+    such fallback, so every failure raises `ExpressionError`."""
+    if expr.kind == "lit":
+        return copy.deepcopy(expr.value)
+    if expr.kind == "ref":
+        data = scopes[expr.source]
+        if expr.field not in data:
+            raise ExpressionError(f"{expr.source}.{expr.field} is not set")
+        return copy.deepcopy(data[expr.field])
+    left, right = _value_of(expr.left, scopes), _value_of(expr.right, scopes)
+    for side in (left, right):
+        if isinstance(side, bool) or not isinstance(side, (int, float)):
+            raise ExpressionError(f"`{expr.op}` needs numbers, got {type(side).__name__} {side!r}")
+    if expr.op == "/" and right == 0:
+        raise ExpressionError("division by zero")
+    return _ARITH[expr.op](left, right)
+
+
+def _evaluate(defn: Definition, exe: Execution, assignments: tuple, event: Optional[Event]) -> dict:
+    """The values a transition's `set` writes, every right-hand side evaluated against the
+    context and event as they are *before* any of them is applied (so one assignment
+    doesn't see another's result), and each checked against the context schema."""
+    scopes = {"event": event.data if event is not None else {}, "context": exe.context}
+    values = {}
+    for assign in assignments:
+        value = _value_of(assign.expr, scopes)
+        spec = defn.context_schema.get(assign.field)
+        if (
+            spec is not None
+            and not (value is None and not spec.required)
+            and not value_fits(spec.type, value)
+        ):
+            raise ExpressionError(
+                f"context.{assign.field} is declared {spec.type}, `set` gave {type(value).__name__} {value!r}"
+            )
+        values[assign.field] = value
+    return values
+
+
+def _take(
+    defn: Definition, exe: Execution, target: Node, event: Optional[Event], assignments: tuple = ()
+) -> Step:
     """Take a transition with UML LCA semantics: run the **own** `on_exit` of each
     level from the active leaf up to lca(leaf, target) (innermost-first), then the
     **own** `on_enter` of each level from there down to the target (outermost-
     first), then descend the target into its initial/history child. No hook is
     inherited from an ancestor. A self/local transition (target == active leaf)
-    has an empty lca chain and therefore fires nothing."""
+    has an empty lca chain and therefore fires nothing.
+
+    The transition's `assignments` (`set`) are its effect, in the UML position: an
+    `on_exit` sees the context as it was, an `on_enter` sees the assigned values. They
+    are evaluated first, though, against the context and event as the transition starts —
+    so an expression that fails (`ExpressionError`) does so before any state is left."""
+    values = _evaluate(defn, exe, assignments, event) if assignments else {}
     assert exe.active_path is not None
     source = defn.index[exe.active_path]
     pivot = lca(source, target)
@@ -604,6 +713,9 @@ def _take(defn: Definition, exe: Execution, target: Node, event: Optional[Event]
             # bump invoke_seq (re-entry spawns fresh ids) + cancel any region still running
             yield from _leave_regions(exe, node)
     exe.active_path = pivot.full_path
+    if values:
+        exe.context.update(values)
+        yield Assigned(dict(values))
     for node in chain(pivot, target)[1:]:  # entered levels, outermost-first
         # position on `node` before running its own enter (see `_descend`): otherwise
         # a raise here leaves `exe.active_path` at the pivot, which `has_error_handler`
@@ -633,7 +745,7 @@ def _next_deferred(defn: Definition, exe: Execution) -> Optional[tuple[Event, tu
     configuration. Returns (event, (scope, transition)) so the caller can route without a
     second resolve; None if no deferred event is handleable yet."""
     for i, ev in enumerate(exe.deferred):
-        found = _resolve(defn, exe, _event_pred(ev), allow_parent=True)
+        found = _resolve(defn, exe, _event_pred(ev, exe.context), allow_parent=True)
         if found is not None:
             return exe.deferred.pop(i), found
     return None
@@ -679,11 +791,11 @@ def _drain(defn: Definition, exe: Execution) -> Step:
                     return
             _expose_region_results(exe)  # surface region results for the join transition
 
-        auto = _resolve(defn, exe, _auto_pred, allow_parent=False)
+        auto = _resolve(defn, exe, _auto_pred_in(exe.context), allow_parent=False)
         if auto is not None:
             scope, t = auto
             target = yield from _target_of(defn, exe, scope, t, None)
-            yield from _take(defn, exe, target, None)
+            yield from _take(defn, exe, target, None, t.assignments)
             continue
 
         if _resolve(defn, exe, _any_pred, allow_parent=False) is not None:
@@ -691,7 +803,7 @@ def _drain(defn: Definition, exe: Execution) -> Step:
             if found is not None:
                 ev, (scope, t) = found
                 target = yield from _target_of(defn, exe, scope, t, ev)
-                yield from _take(defn, exe, target, ev)
+                yield from _take(defn, exe, target, ev, t.assignments)
                 continue
             return  # has a transition at its own scope (waiting for an event)
 
@@ -873,14 +985,14 @@ def process(defn: Definition, exe: Execution, event: Event) -> Step:
             # an execution that already reached its own, real terminal.
             return
         active = exe.status in (Status.RUNNING, Status.CANCELLING) and exe.active_path is not None
-        found = _resolve(defn, exe, _event_pred(event), allow_parent=True) if active else None
+        found = _resolve(defn, exe, _event_pred(event, exe.context), allow_parent=True) if active else None
         if found is None:
             exe.status = Status.CANCELLED
             return
         exe.status = Status.RUNNING
         scope, t = found
         dest = yield from _target_of(defn, exe, scope, t, event)
-        yield from _take(defn, exe, dest, event)
+        yield from _take(defn, exe, dest, event, t.assignments)
         yield from _drain(defn, exe)
         exe.processed_events += 1
         return
@@ -931,7 +1043,7 @@ def process(defn: Definition, exe: Execution, event: Event) -> Step:
             if cid == f"{exe.id}:{inv_path}:{seq}":
                 cs = exe.children[cid]
                 completion = Event(kind="Returned", data={"outcome": cs.outcome, **cs.result})
-                found = _resolve(defn, exe, _event_pred(completion), allow_parent=True)
+                found = _resolve(defn, exe, _event_pred(completion, exe.context), allow_parent=True)
                 if found is not None:
                     # leaving the invoke-state: bump its entry counter and drop the
                     # completed child so a later re-entry spawns a fresh submachine
@@ -939,7 +1051,7 @@ def process(defn: Definition, exe: Execution, event: Event) -> Step:
                     exe.children.pop(cid, None)
                     scope, t = found
                     dest = yield from _target_of(defn, exe, scope, t, completion)
-                    yield from _take(defn, exe, dest, completion)
+                    yield from _take(defn, exe, dest, completion, t.assignments)
                     yield from _drain(defn, exe)
             return
         # otherwise this is an orthogonal region's join: re-drain (the AND-state's
@@ -960,11 +1072,11 @@ def process(defn: Definition, exe: Execution, event: Event) -> Step:
             return
         # fire the transition of the state that timed out (by path), not the
         # innermost Timeout transition — so a composite's budget isn't shadowed.
-        found = _resolve_at(defn, path, _event_pred(event))
+        found = _resolve_at(defn, path, _event_pred(event, exe.context))
         if found is not None:
             scope, t = found
             dest = yield from _target_of(defn, exe, scope, t, event)
-            yield from _take(defn, exe, dest, event)
+            yield from _take(defn, exe, dest, event, t.assignments)
             yield from _drain(defn, exe)
             exe.processed_events += 1
         return
@@ -973,11 +1085,11 @@ def process(defn: Definition, exe: Execution, event: Event) -> Step:
     if exe.status is not Status.RUNNING:
         return
 
-    found = _resolve(defn, exe, _event_pred(event), allow_parent=True)
+    found = _resolve(defn, exe, _event_pred(event, exe.context), allow_parent=True)
     if found is not None:
         scope, t = found
         target = yield from _target_of(defn, exe, scope, t, event)
-        yield from _take(defn, exe, target, event)
+        yield from _take(defn, exe, target, event, t.assignments)
     else:
         assert exe.active_path is not None
         if event.kind in _deferred_kinds(defn, exe):

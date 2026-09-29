@@ -8,7 +8,8 @@ data across execution boundaries with **`carry`**, and exposes it to the joining
 ## `carry`: a region's return value
 
 By default a finishing region reports only its `outcome`. List extra context keys with `carry`
-and they ride along too. Here the `Fraud` region computes a `score` and carries it:
+and they ride along too — the region's own value of each key (a region's context starts as a
+copy of the parent's, so a key it never wrote carries the parent's value from the fork). Here the `Fraud` region computes a `score` and carries it:
 
 ```text
 event FraudCleared {}

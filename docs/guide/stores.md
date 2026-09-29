@@ -42,8 +42,9 @@ durable backends, which each per-backend page then spells out exactly:
 ## Execution trace (opt-in)
 
 When tracing is on (`STM_TRACE=1`, or `DurableRunner(..., trace=True)`), `commit` also appends
-one **timeline step** — event in, transition `from → to`, the actions that ran, and the
-resulting `context_out` — in the *same* transaction as the advance. It is **off by default**, so
+one **timeline step** — event in, transition `from → to`, the actions that ran, what a `set`
+wrote (`assigned`, only when there was one), and the resulting `context_out` — in the *same*
+transaction as the advance. It is **off by default**, so
 the hot path pays nothing; when on it costs ~one extra in-transaction write (~+10 µs/commit on a
 local SQLite, no extra round-trip or fsync), and `load` is unaffected (it still reads the
 snapshot — there is no event replay). Each backend keeps a **ring of the last `STM_TRACE_MAX`

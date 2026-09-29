@@ -33,6 +33,7 @@ on activity <action>        # hook: event arrived with no transition
 timeout 900                 # arm a durable timer (seconds)
 timeout context key         # …with the delay read from context[key]
 ttl 3600                    # machine only: expire after this long without a domain event
+context { n: int  who: string? }   # machine only: the context's typed fields
 outcome <label>             # this terminal's verdict (final is sugar over this)
 carry k1, k2                # context keys a region propagates on Finished
 defer EventA, EventB        # hold these events while unhandled here; re-deliver on a state that handles them
@@ -88,7 +89,23 @@ from A select fn returns {"x","y"} { … }   # declared branches (validatable)
 
 from Fork join all to X else to Y          # orthogonal-join sugar (all regions success)
 from Fork join any to X else to Y          # …at least one
+
+from A choose on Event {          # guarded choice: the first `when` that holds wins
+  when context.n > 3 to B
+  else to C                       # optional; without it, no match = the transition doesn't fire
+}
+
+from A to B on Event set context.n = context.n + 1, context.last = event.id   # assignments
 ```
+
+A `set` writes `context.<field>` from a reference (`event.x`, `context.x`), a literal, or **one**
+arithmetic operation (`+ - * /`, numbers only) over two of those. Every right side is evaluated
+against the context and event as the transition starts, and the values are applied between the
+exits and the entries (an `on exit` sees the old context, an `on enter` the new one). An expression
+that can't be evaluated — a field that isn't set, arithmetic on a non-number, division by zero, a
+value that breaks the declared type — raises an `ExpressionError`, routed like an action error
+(`on error`, else dead-letter), before any state is left. A `choose`'s guards see the context before
+its own `set`. See [the context in the model](../tutorial/17-context).
 
 See: [guards](../tutorial/04-guards), [selectors](../tutorial/05-selectors),
 [payloads](../tutorial/13-payloads), [on error](../tutorial/16-on-error).
@@ -100,12 +117,15 @@ field == value     field != value
 field <  value     field <= value
 field >  value     field >= value
 field in [a, b]
+event.field == value               # the same as the bare `field`: the event's data
+context.field == value             # the execution context
 guardName                          # a named guard, as an atom
 P and Q     P or Q     not P       # composable; parenthesize as needed
 ```
 
-A predicate on a field the event **does not carry** is **false** (not an error), and so is a
-comparison between values that can't be compared (`"abc" < 3`, `null < 3`, `x in 5`).
+A predicate on a field the event (or, for `context.x`, the context) **does not carry** is
+**false** (not an error), and so is a comparison between values that can't be compared (`"abc" <
+3`, `null < 3`, `x in 5`). A reference names one field of its namespace — no nested paths.
 
 ## Actions
 

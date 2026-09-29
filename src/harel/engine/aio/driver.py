@@ -75,8 +75,12 @@ class AsyncDriver:
         enqueued anything for the relay (outbox emits or child spawns), so the caller can skip
         the relay round-trips when there is nothing to deliver."""
         from_path = exe.active_path
-        emits, timer_ops, spawns, actions = await self._drive(exe, gen)
-        step = _trace_step(event, from_path, exe, actions, self._clock()) if self._trace_enabled else None
+        emits, timer_ops, spawns, actions, assigned = await self._drive(exe, gen)
+        step = (
+            _trace_step(event, from_path, exe, actions, self._clock(), assigned)
+            if self._trace_enabled
+            else None
+        )
         stamp(exe, self._clock())
         await self.store.commit(
             exe,
@@ -96,13 +100,33 @@ class AsyncDriver:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, functools.partial(fn, proxy, event, **inputs))
 
+    async def _expression_error(self, exe: Execution, exc: Exception, original_exc: Optional[Exception]):
+        """The engine couldn't evaluate a model expression (a `set`): routed exactly like an
+        action error — to an `on error` in scope (`_error` + the error event carry it),
+        else the runner's policy. It is raised before the transition leaves any state, so
+        recovery starts from where the execution was. Partial effects are dropped."""
+        if original_exc is not None:  # already recovering: no second attempt
+            exc.__cause__ = original_exc
+            self._on_action_error(exe, exc)
+            return [], [], [], [], {}
+        defn = self._definition_for(exe)
+        ev = engine.error_event(exc)
+        if engine.has_error_handler(defn, exe, ev):
+            exe.context["_error"] = dict(ev.data)
+            return await self._drive(exe, engine.process(defn, exe, ev), original_exc=exc)
+        self._on_action_error(exe, exc)
+        return [], [], [], [], {}
+
     async def _drive(
         self, exe: Execution, gen, original_exc: Optional[Exception] = None
-    ) -> tuple[list[tuple[Optional[str], Event]], list[TimerOp], list[tuple[str, str, dict]], list[str]]:
+    ) -> tuple[
+        list[tuple[Optional[str], Event]], list[TimerOp], list[tuple[str, str, dict]], list[str], dict
+    ]:
         emits: list[tuple[Optional[str], Event]] = []
         timer_ops: list[TimerOp] = []
         spawns: list[tuple[str, str, dict]] = []
         actions: list[str] = []
+        assigned: dict = {}  # context values a `set` wrote this step (for the trace)
         proxy = self._proxy(exe)
         action_index = 0  # per-event counter -> a deterministic, replay-stable idempotency key
         try:
@@ -129,7 +153,7 @@ class AsyncDriver:
                             # and actions run in a thread pool, so it isn't reliably preserved.
                             exc.__cause__ = original_exc
                             self._on_action_error(exe, exc)
-                            return [], [], [], []
+                            return [], [], [], [], {}
                         if isinstance(effect, engine.RunAction) and effect.hook is engine.Hook.EXIT:
                             # `on_exit` must always succeed: leaving a state applies real,
                             # un-undoable side effects (releasing a lock, cancelling regions,
@@ -138,7 +162,7 @@ class AsyncDriver:
                             # subtree — re-triggering the same failure. So a raise here is
                             # always a bug: no `on error` lookup, straight to the runner policy.
                             self._on_action_error(exe, exc)
-                            return [], [], [], []
+                            return [], [], [], [], {}
                         # if the model has an `on error` transition for the current config,
                         # route to it (exception in context._error + the error event data);
                         # else fall back to the runner's policy (fail the exe / re-raise).
@@ -148,7 +172,7 @@ class AsyncDriver:
                             exe.context["_error"] = dict(ev.data)
                             return await self._drive(exe, engine.process(defn, exe, ev), original_exc=exc)
                         self._on_action_error(exe, exc)  # base: re-raises; runtime: fails the exe
-                        return [], [], [], []
+                        return [], [], [], [], {}
                     effect = gen.send(engine.ActionResult(value=ret))
                 elif isinstance(effect, engine.SpawnChildren):
                     spawns.extend((s.child_id, s.root_path, dict(s.context)) for s in effect.specs)
@@ -165,6 +189,9 @@ class AsyncDriver:
                     fire_at = self._clock() + delay
                     timer_ops.append(TimerOp("schedule", effect.path, fire_at))
                     effect = gen.send(fire_at)
+                elif isinstance(effect, engine.Assigned):
+                    assigned.update(effect.values)
+                    effect = gen.send(None)
                 elif isinstance(effect, engine.CancelTimer):
                     timer_ops.append(TimerOp("cancel", effect.path))
                     effect = gen.send(None)
@@ -172,7 +199,9 @@ class AsyncDriver:
                     effect = gen.send(None)
         except StopIteration:
             pass
-        return emits, timer_ops, spawns, actions
+        except engine.ExpressionError as exc:
+            return await self._expression_error(exe, exc, original_exc)
+        return emits, timer_ops, spawns, actions, assigned
 
     async def _create_spawn(self, entry) -> None:
         if await self.store.load(entry.child_id) is not None:
