@@ -43,7 +43,9 @@ Done --> [*]
 
 PlantUML is good for docs and review; Mermaid (`stateDiagram-v2`) renders directly in a browser
 — which is what the live preview below uses. Both walk the tree by reference and handle the full
-language: composites carry their hooks, orthogonal regions become nested concurrent blocks.
+language: composites carry their hooks, orthogonal regions become nested concurrent blocks, and
+a transition's guard is written out under its event — `and`/`or`/`not` and named guards
+included (`Pay<br/>[(tier == 'gold' or spend > 1000) and region == 'eu']` in Mermaid).
 
 ## The language server
 
