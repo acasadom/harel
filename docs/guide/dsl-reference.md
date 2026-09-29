@@ -104,7 +104,8 @@ guardName                          # a named guard, as an atom
 P and Q     P or Q     not P       # composable; parenthesize as needed
 ```
 
-A predicate on a field the event **does not carry** is **false** (not an error).
+A predicate on a field the event **does not carry** is **false** (not an error), and so is a
+comparison between values that can't be compared (`"abc" < 3`, `null < 3`, `x in 5`).
 
 ## Actions
 

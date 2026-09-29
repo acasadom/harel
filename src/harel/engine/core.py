@@ -137,11 +137,23 @@ _OP = {
 }
 
 
+def _compare(op: str, actual: Any, expected: Any) -> bool:
+    """One comparison of a guard. Values that can't be compared (`"abc" < 3`, `None < 3`,
+    `x in 5`) make it fail, exactly like a field that is absent: a guard only holds when
+    it can be evaluated. It never raises — the engine is pure, and an exception here would
+    leave the event unprocessable on every redelivery rather than just not matching."""
+    try:
+        return bool(_OP[op](actual, expected))
+    except TypeError:
+        return False
+
+
 def _eval(pred, data: dict) -> bool:
     """Evaluate a composable predicate tree against the event data. A leaf on a
-    field absent from the event fails (it cannot be evaluated)."""
+    field absent from the event, or whose value can't be compared, fails (it cannot be
+    evaluated) — see `_compare`."""
     if pred.node == "leaf":
-        return pred.field in data and _OP[pred.op](data[pred.field], pred.value)
+        return pred.field in data and _compare(pred.op, data[pred.field], pred.value)
     if pred.node == "all":
         return all(_eval(c, data) for c in pred.children)
     if pred.node == "any":
@@ -157,7 +169,7 @@ def _matches(ef: EventFilter, event: Event) -> bool:
     for key, value in ef.predicates.items():
         name, op = key.split("__") if "__" in key else (key, "eq")
         # a predicate on a field absent from the event fails (cannot be evaluated)
-        if name not in event.data or not _OP[op](event.data[name], value):
+        if name not in event.data or not _compare(op, event.data[name], value):
             return False
     if ef.predicate is not None and not _eval(ef.predicate, event.data):
         return False
