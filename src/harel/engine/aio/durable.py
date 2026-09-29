@@ -14,7 +14,7 @@ from harel import engine
 from harel.definition.model import Definition
 from harel.engine.aio import control
 from harel.engine.aio.driver import _AsyncRuntimeDriver
-from harel.engine.execution import Execution
+from harel.engine.execution import Execution, Status
 from harel.engine.resolve import MachineResolver, ResolveError
 from harel.spec.states import Event
 
@@ -96,6 +96,8 @@ class AsyncDurableRunner:
         fired = 0
         for execution_id, path, fire_at in await self.store.due_timers(self._clock()):
             exe = await self.store.load(execution_id)
+            if exe is not None and exe.status is Status.SUSPENDED:
+                continue  # left armed: it fires once resumed (the worker path parks it the same way)
             if exe is not None and exe.definition_id in self.definitions:
                 event = engine.timeout_event(execution_id, path, fire_at)
                 await self._driver(exe.definition_id)._deliver_timeout(execution_id, event)

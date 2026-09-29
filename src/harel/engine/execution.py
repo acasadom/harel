@@ -88,6 +88,8 @@ class Execution(pydantic.BaseModel):
     created_at: Optional[float] = None  # first commit
     updated_at: Optional[float] = None  # latest commit
     finished_at: Optional[float] = None  # when it became DONE/CANCELLED; cleared if revived
+    expires_at: Optional[float] = None  # when the machine's `ttl` inactivity budget runs out, as
+    #                                     last armed (a `Timeout` for an earlier arming is stale)
 
 
 _FINISHED = (Status.DONE, Status.CANCELLED)

@@ -19,7 +19,7 @@ from harel import engine
 from harel.definition.model import Definition, NodeKind, is_descendant
 from harel.engine.control import _archive_bundle, _check_purgeable
 from harel.engine.execution import Execution, Status, stamp
-from harel.engine.store import StoreConflict
+from harel.engine.store import StoreConflict, TimerOp
 from harel.spec.states import Event
 
 _RETRIES = 5
@@ -41,6 +41,7 @@ async def _commit_status(
     active_path: Optional[str] = None,
     clear_error: bool = False,
     clear_history: bool = False,
+    rearm_ttl_of: Optional[Definition] = None,
     clock: Callable[[], float] = time.time,
 ) -> None:
     for _ in range(_RETRIES):
@@ -60,9 +61,14 @@ async def _commit_status(
             exe.error = None
         if clear_history:
             exe.history.clear()
+        timers: tuple[TimerOp, ...] = ()
+        delay = engine.ttl_delay(rearm_ttl_of, exe) if rearm_ttl_of is not None else None
+        if delay is not None:  # the machine's `ttl` restarts from this write
+            exe.expires_at = clock() + delay
+            timers = (TimerOp("schedule", engine.TTL_PATH, exe.expires_at),)
         try:
             stamp(exe, clock())
-            await store.commit(exe, [])
+            await store.commit(exe, [], timers=timers)
             return
         except StoreConflict:
             continue
@@ -238,5 +244,6 @@ async def redrive(
         active_path=target_path,
         clear_error=True,
         clear_history=True,
+        rearm_ttl_of=defn,
         clock=clock,
     )

@@ -17,7 +17,7 @@ from typing import Any, Callable, Optional
 
 from harel import engine
 from harel.definition.model import ActionRef, Definition
-from harel.engine.execution import Execution, stamp
+from harel.engine.execution import Execution, Status, stamp
 from harel.engine.resolve import ResolveError
 from harel.engine.store import DictStore, ExecutionStore, TimerOp
 from harel.spec.states import Event
@@ -129,6 +129,21 @@ class _SyncDriver:
     def get(self, execution_id: str) -> Optional[Execution]:
         return self.store.load(execution_id)
 
+    def _rearm_ttl(self, exe: Execution, event: Event) -> None:
+        """A domain event broadcast to `exe`'s live regions never runs `process` on `exe`
+        itself, but it is still activity for `exe`'s `ttl`: restart the budget."""
+        delay = engine.ttl_delay(self._definition_for(exe), exe)
+        if delay is None or self.store.is_processed(exe.id, event.id):
+            return
+        exe.expires_at = self._clock() + delay
+        stamp(exe, self._clock())
+        self.store.commit(
+            exe,
+            [],
+            processed_event_id=event.id,
+            timers=(TimerOp("schedule", engine.TTL_PATH, exe.expires_at),),
+        )
+
     def _run(
         self, exe: Execution, gen, event_id: Optional[str] = None, event: Optional[Event] = None
     ) -> None:
@@ -222,8 +237,9 @@ class _SyncDriver:
                         if effect.delay is not None
                         else float(exe.context.get(effect.context_key, 0.0))
                     )
-                    timer_ops.append(TimerOp("schedule", effect.path, self._clock() + delay))
-                    effect = gen.send(None)
+                    fire_at = self._clock() + delay
+                    timer_ops.append(TimerOp("schedule", effect.path, fire_at))
+                    effect = gen.send(fire_at)
                 elif isinstance(effect, engine.CancelTimer):
                     timer_ops.append(TimerOp("cancel", effect.path))
                     effect = gen.send(None)
@@ -311,6 +327,9 @@ class _SyncDriver:
         once (dedupe). Returns how many fired (for an idle-loop to back off on 0)."""
         fired = 0
         for execution_id, path, fire_at in self.store.due_timers(self._clock()):
+            target = self.store.load(execution_id)
+            if target is not None and target.status is Status.SUSPENDED:
+                continue  # left armed: it fires once resumed (the worker path parks it the same way)
             self._deliver_timeout(execution_id, engine.timeout_event(execution_id, path, fire_at))
             self.store.delete_timer(execution_id, path, fire_at)
             fired += 1
@@ -339,7 +358,8 @@ class _SyncDriver:
             for cid, cs in exe.children.items()
             if not cs.finished and not cs.submachine and (child := self.store.load(cid)) is not None
         ]
-        targets = live if (event.kind not in _CONTROL and live) else [exe]
+        broadcast = event.kind not in _CONTROL and bool(live)
+        targets = live if broadcast else [exe]
         for target in targets:
             if self.store.is_processed(target.id, event.id):
                 continue  # dedupe: at-least-once delivery may re-deliver an event
@@ -349,6 +369,8 @@ class _SyncDriver:
                 event_id=event.id,
                 event=event,
             )
+        if broadcast:
+            self._rearm_ttl(exe, event)
         self._flush()
 
 

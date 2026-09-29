@@ -38,7 +38,7 @@ param_list: "(" param ("," param)* ")"
 param:      NAME ":" PARAM_KIND
 PARAM_KIND: "action" | "state" | "guard" | "value" | "event"
 
-?item: initial | on_enter | on_exit | on_activity | timeout | outcome | carry | defer | nohistory
+?item: initial | on_enter | on_exit | on_activity | timeout | ttl | outcome | carry | defer | nohistory
      | cancel_on_failure
      | invoke | invoke_with
      | use_stmt | state_decl | final_decl | selector_trans | join_trans | transition
@@ -52,6 +52,8 @@ timeout:      "timeout" timeout_spec
 timeout_spec: INT             -> timeout_literal
             | "context" ref   -> timeout_context
             | NAME            -> timeout_param
+// machine level only: seconds without a domain event before the execution is expired
+ttl:         "ttl" INT
 outcome:     "outcome" ref
 // context keys this (region) state propagates on its `Finished` (besides `outcome`)
 carry:       "carry" ref ("," ref)*

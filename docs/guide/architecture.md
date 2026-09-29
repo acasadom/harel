@@ -85,7 +85,7 @@ engine reads a Definition + an Execution and mutates the Execution in place.
 
 ```python
 # docs-test: skip
-Step = Generator[Effect, Optional[ActionResult], None]   # core.py
+Step = Generator[Effect, Union[ActionResult, float, None], None]   # core.py
 ```
 
 ## The effect protocol — how pure meets stateful
@@ -98,13 +98,16 @@ The engine yields an effect and the runner sends a result back. Effects come in 
 | `RunSelector(node, selector, event)` | **blocking** | call the selector fn, map result → target | `gen.send(ActionResult(value=ret))` |
 | `Emit(event, to)` | deferred | enqueue the event (outbox) | `gen.send(None)` |
 | `SpawnChildren(specs)` | deferred | queue child-Execution creations | `gen.send(None)` |
-| `ScheduleTimer(path, delay, context_key)` | deferred | arm a durable timer | `gen.send(None)` |
+| `ScheduleTimer(path, delay, context_key)` | deferred | arm a durable timer | `gen.send(fire_at)` — the absolute time it scheduled |
 | `CancelTimer(path)` | deferred | disarm the timer | `gen.send(None)` |
 
 **Blocking** effects pause the generator until the runner sends back an `ActionResult` (this is
 how a slow action or a remote FaaS call blocks the worker). **Deferred** effects are
 fire-and-forget: the runner records them and continues immediately; they are persisted and acted
-on *after* the commit (see the relay below).
+on *after* the commit (see the relay below). `ScheduleTimer` is the one whose resume carries a
+value — the absolute fire time, which only the runner can compute (the engine has no clock); the
+engine keeps it where a later `Timeout` must be matched against the arming it belongs to (a
+machine's `ttl`).
 
 ```{mermaid}
 sequenceDiagram
@@ -118,8 +121,8 @@ sequenceDiagram
   R->>R: ret = on_enter(stm, event)
   R->>E: gen.send(ActionResult(ret))
   E-->>R: ScheduleTimer(path, delay)
-  R->>R: collect timer op
-  R->>E: gen.send(None)
+  R->>R: collect timer op (fire_at = clock() + delay)
+  R->>E: gen.send(fire_at)
   E-->>R: Emit(Finished, to=parent)
   R->>R: collect emit
   R->>E: gen.send(None)

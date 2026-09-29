@@ -162,8 +162,9 @@ class AsyncDriver:
                         if effect.delay is not None
                         else float(exe.context.get(effect.context_key, 0.0))
                     )
-                    timer_ops.append(TimerOp("schedule", effect.path, self._clock() + delay))
-                    effect = gen.send(None)
+                    fire_at = self._clock() + delay
+                    timer_ops.append(TimerOp("schedule", effect.path, fire_at))
+                    effect = gen.send(fire_at)
                 elif isinstance(effect, engine.CancelTimer):
                     timer_ops.append(TimerOp("cancel", effect.path))
                     effect = gen.send(None)
@@ -247,6 +248,9 @@ class AsyncDriver:
         publishes to the transport; the CAS happens later inside the worker's route()."""
         fired = 0
         for execution_id, path, fire_at in await self.store.due_timers(self._clock()):
+            target = await self.store.load(execution_id)
+            if target is not None and target.status is Status.SUSPENDED:
+                continue  # left armed: it fires once resumed (the worker path parks it the same way)
             # deliver before delete: a crash between the two is safe — dedup prevents re-delivery
             await self._deliver_timeout(execution_id, engine.timeout_event(execution_id, path, fire_at))
             await self.store.delete_timer(execution_id, path, fire_at)
@@ -265,7 +269,8 @@ class AsyncDriver:
         candidate_ids = [cid for cid, cs in exe.children.items() if not cs.finished and not cs.submachine]
         loaded = await asyncio.gather(*[self.store.load(cid) for cid in candidate_ids])
         live = [child for child in loaded if child is not None]
-        targets = live if (event.kind not in _CONTROL and live) else [exe]
+        broadcast = event.kind not in _CONTROL and bool(live)
+        targets = live if broadcast else [exe]
 
         async def _deliver_one(target: Execution) -> None:
             if await self.store.is_processed(target.id, event.id):
@@ -280,7 +285,24 @@ class AsyncDriver:
         # Each target is a distinct execution → independent CAS rows → safe to run concurrently.
         # Broadcast events (e.g. an external trigger to all live regions) now overlap on the loop.
         await asyncio.gather(*[_deliver_one(t) for t in targets])
+        if broadcast:
+            await self._rearm_ttl(exe, event)
         await self._flush()
+
+    async def _rearm_ttl(self, exe: Execution, event: Event) -> None:
+        """A domain event broadcast to `exe`'s live regions never runs `process` on `exe`
+        itself, but it is still activity for `exe`'s `ttl`: restart the budget."""
+        delay = engine.ttl_delay(self._definition_for(exe), exe)
+        if delay is None or await self.store.is_processed(exe.id, event.id):
+            return
+        exe.expires_at = self._clock() + delay
+        stamp(exe, self._clock())
+        await self.store.commit(
+            exe,
+            [],
+            processed_event_id=event.id,
+            timers=(TimerOp("schedule", engine.TTL_PATH, exe.expires_at),),
+        )
 
 
 def _error_message(exc: Exception) -> str:

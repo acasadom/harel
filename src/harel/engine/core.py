@@ -96,7 +96,8 @@ class ScheduleTimer:
     `delay` (seconds) or read from `context_key` at schedule time (so a state's
     `on_enter` can compute a dynamic/backoff value the timer then uses). Emitted on
     entering a state with `timeout`; the runner persists it in the same commit and a
-    sweep delivers a `Timeout` event when it is due."""
+    sweep delivers a `Timeout` event when it is due. The runner sends back the absolute
+    fire time it scheduled (`fire_at = yield ScheduleTimer(...)`)."""
 
     path: str
     delay: Optional[float] = None
@@ -121,7 +122,9 @@ class ActionResult:
 
 
 # A step generator yields effects and is sent back an ActionResult (or None).
-Step = Generator[Effect, Optional[ActionResult], None]
+# what a driver sends back into a step: an `ActionResult` for a blocking effect, the scheduled
+# fire time for a `ScheduleTimer`, None for the other deferred effects
+Step = Generator[Effect, Union[ActionResult, float, None], None]
 
 _OP = {
     "lt": operator.lt,  # legacy had this mapped to operator.eq (a bug); fixed here
@@ -261,8 +264,37 @@ def _any_pred(t) -> bool:
 def timeout_event(execution_id: str, path: str, fire_at: float) -> Event:
     """The `Timeout` event a due timer delivers. Its id is **stable** (derived from
     the timer key + fire time) so a timer swept by two workers dedupes to one
-    effect; `data.path` is the timed state (the staleness guard in `process`)."""
-    return Event(kind="Timeout", id=f"timeout:{execution_id}:{path}:{fire_at}", data={"path": path})
+    effect; `data.path` is the timed state (the staleness guard in `process`) and
+    `data.fire_at` the time it was armed for."""
+    return Event(
+        kind="Timeout", id=f"timeout:{execution_id}:{path}:{fire_at}", data={"path": path, "fire_at": fire_at}
+    )
+
+
+# the timer path of a machine's `ttl` — never a node path (node names are identifiers)
+TTL_PATH = "@ttl"
+
+
+def _arm_ttl(defn: Definition, exe: Execution) -> Step:
+    """(Re)arm the inactivity budget of a machine declaring `ttl`: only for a root
+    Execution (a region or invoke child lives as long as its parent) that is RUNNING.
+    Re-arming upserts the same timer, and `expires_at` records the new deadline, so a
+    `Timeout` for any earlier arming is recognised as stale."""
+    delay = ttl_delay(defn, exe)
+    if delay is None:
+        return
+    fire_at = yield ScheduleTimer(TTL_PATH, delay=delay)
+    assert isinstance(fire_at, float)
+    exe.expires_at = fire_at
+
+
+def ttl_delay(defn: Definition, exe: Execution) -> Optional[float]:
+    """The `ttl` budget to (re)arm for `exe` — also for writers that bypass `process` (a
+    domain event broadcast straight to its live regions, a `redrive`) — or None if none
+    applies: no `ttl`, not a root, or not RUNNING."""
+    if defn.ttl is None or exe.parent_id is not None or exe.status is not Status.RUNNING:
+        return None
+    return float(defn.ttl)
 
 
 def _is_active(defn: Definition, exe: Execution, path: str) -> bool:
@@ -341,14 +373,21 @@ def has_cancel_handler(defn: Definition, exe: Execution, event: Event) -> bool:
     function is pure, no IO), so every possible branch (and the `else`) is
     checked statically instead, the same way `_check_cancel_target` validates a
     selector in `definition.validate`."""
+    return _safe_teardown(defn, exe, event) is not None
+
+
+def _safe_teardown(defn: Definition, exe: Execution, event: Event):
+    """The `(scope, transition)` the active configuration would take for a teardown
+    event (`Cancel`, `Expired`) — in scope, parent fallback, guard-aware — iff it lands
+    directly on a sink (every branch of a selector, checked statically); else None."""
     if exe.active_path is None:
-        return False
+        return None
     found = _resolve(defn, exe, _event_pred(event), allow_parent=True)
     if found is None:
-        return False
+        return None
     scope, t = found
     if t.target is not None:
-        return _would_be_a_sink(defn, exe, t.target)
+        return found if _would_be_a_sink(defn, exe, t.target) else None
     if t.selector is not None:
         names = list(t.selector.mapper.values())
         if t.selector.default is not None:
@@ -356,8 +395,35 @@ def has_cancel_handler(defn: Definition, exe: Execution, event: Event) -> bool:
         for name in names:
             resolved = resolve_relative(scope, name)
             if resolved is None or not _would_be_a_sink(defn, exe, resolved):
-                return False
-    return True
+                return None
+    return found
+
+
+def _expire(defn: Definition, exe: Execution, event: Event) -> Step:
+    """The `ttl` budget ran out: no domain event reached this root Execution since the
+    deadline was armed. A `Timeout` for an earlier arming (activity re-armed it since),
+    or one reaching an Execution that isn't RUNNING, is a no-op. The model owns the
+    reaction if its active configuration handles `Expired` straight into a terminal;
+    otherwise the execution is forcefully ended — CANCELLED with outcome `expired`, any
+    live region/invoke child cancelled — like `terminate`, but distinguishable."""
+    if exe.status is not Status.RUNNING or event.data.get("fire_at") != exe.expires_at:
+        return
+    exe.processed_events += 1
+    expired = Event(kind="Expired")
+    found = _safe_teardown(defn, exe, expired)
+    if found is not None:
+        scope, t = found
+        dest = yield from _target_of(defn, exe, scope, t, expired)
+        yield from _take(defn, exe, dest, expired)
+        yield from _drain(defn, exe)
+        return
+    site = defn.index.get(exe.active_path) if exe.active_path is not None else None
+    if site is not None and (
+        site.kind in _ORTHOGONAL or site.invoke is not None or site.invoke_each is not None
+    ):
+        yield from _leave_regions(exe, site)
+    exe.status = Status.CANCELLED
+    exe.outcome = "expired"
 
 
 # --- LCA-based enter/exit (UML semantics: own hook per entered/exited level) ---
@@ -665,6 +731,7 @@ def start(defn: Definition, exe: Execution) -> Step:
     yield from _run(start_node, Hook.ENTER, None)
     yield from _descend(defn, exe, start_node, None)
     yield from _drain(defn, exe)
+    yield from _arm_ttl(defn, exe)
 
 
 def is_valid_reposition_target(defn: Definition, exe: Execution, target_path: str) -> bool:
@@ -872,6 +939,9 @@ def process(defn: Definition, exe: Execution, event: Event) -> Step:
         # state was not left+re-entered). Then resolve the Timeout like a normal
         # event (the model owns the reaction); unhandled => no-op.
         path = event.data.get("path")
+        if path == TTL_PATH:
+            yield from _expire(defn, exe, event)
+            return
         if exe.status is not Status.RUNNING or path is None or not _is_active(defn, exe, path):
             return
         # fire the transition of the state that timed out (by path), not the
@@ -905,3 +975,4 @@ def process(defn: Definition, exe: Execution, event: Event) -> Step:
             yield from _run(defn.index[exe.active_path], Hook.ACTIVITY, event)
     yield from _drain(defn, exe)
     exe.processed_events += 1
+    yield from _arm_ttl(defn, exe)  # a domain event is activity: the inactivity budget restarts

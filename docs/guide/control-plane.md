@@ -115,7 +115,7 @@ terminated-> CANCELLED
 | ------- | ------ |
 | `cancel(reason=…)` | cooperative if the model has `on Cancel`, else forceful; always forceful on a `FAILED` execution |
 | `terminate()` | forceful `CANCELLED` now — no cleanup, no hooks; on a `FAILED` execution, abandons the dead letter |
-| `suspend()` | `RUNNING → SUSPENDED`, reversible (backlog parked) |
+| `suspend()` | `RUNNING → SUSPENDED`, reversible (backlog parked; timers that come due meanwhile fire once resumed) |
 | `resume()` | `SUSPENDED → RUNNING`, continues where it stopped |
 | `redrive(target_path)` | `FAILED → RUNNING`, repositioned at `target_path` |
 
@@ -196,6 +196,9 @@ Two things to note:
   exited cleanly earlier in the same cascade did — that partial, inconsistent history is
   discarded rather than risking a later history re-entry landing on the pre-crash child instead
   of wherever you just redrove to.
+
+A machine's [`ttl`](../tutorial/07-timers) never ends a dead letter; `redrive` restarts its
+inactivity budget from the moment of the redrive.
 
 A dead letter you will *not* redrive is closed with `terminate()`: `FAILED → CANCELLED`, with
 `error` kept as the record of why it died (and any live regions terminated along with it).
@@ -294,6 +297,10 @@ report.purged           # root ids purged
 report.skipped_undated  # finished roots with no finished_at (see include_undated)
 report.refused          # root id -> why purge refused it (a member still live, a concurrent change)
 ```
+
+An execution expired by its machine's [`ttl`](../tutorial/07-timers) is finished like any other
+— `DONE` in the model's own terminal, or `CANCELLED` with outcome `expired` — so the same job
+removes it.
 
 `statuses` narrows the candidates to `DONE` or `CANCELLED`, `limit` caps one run, and `dry_run`
 reports without deleting. Candidates are collected before anything is deleted; a tree `purge`

@@ -113,5 +113,68 @@ composite's own `timeout` as the overall budget. harel ships composable backoff 
 delay. The full pattern is laid out in [durability](../guide/durability); for now the takeaway
 is that *policy lives in the model*, and the engine just keeps time.
 
+## An inactivity budget: `ttl`
+
+A `timeout` bounds how long a machine may stay in *one state*. Some machines never finish on
+purpose — a session or a listener that loops on every event it receives — and the question is
+different: how long may it go **without hearing from anyone**? Declare that once, at the
+machine level, with `ttl <seconds>`. Every domain event the execution receives restarts the
+budget; when it runs out, the engine delivers the reserved **`Expired`** event:
+
+```python
+from harel import definition_from_dsl, DurableRunner, DictStore, Event
+
+SESSION = """
+event Ping {}
+
+machine session {
+  ttl 1800
+  initial Active
+  state Active {}
+  final Closed expired {}
+
+  from Active to Active on Ping
+  from Active to Closed on Expired
+}
+"""
+
+clock = [0.0]
+defn = definition_from_dsl(SESSION, "session", validate=True)
+store = DictStore()
+runner = DurableRunner(store, {defn.id: defn}, clock=lambda: clock[0])
+
+exe = runner.create(defn.id)
+clock[0] = 1500.0
+runner.process(exe.id, Event(kind="Ping"))   # activity: the budget restarts from here
+clock[0] = 2000.0
+runner.fire_due_timers()
+print("at 2000:", store.load(exe.id).status.name)
+clock[0] = 3301.0
+runner.fire_due_timers()
+exe = store.load(exe.id)
+print("at 3301:", exe.status.name, exe.active_path, exe.outcome)
+```
+
+```text
+at 2000: RUNNING
+at 3301: DONE Closed expired
+```
+
+- **Only domain events count** — what you `send`. The machine's own `Timeout`s are not activity,
+  so a machine that only polls on a timer still expires if nobody talks to it.
+- **`on Expired` must go straight to a terminal**, like `on Cancel`: the execution is being
+  ended, not asked to do more work (`harel validate` checks it, and the engine refuses an unsafe
+  one at runtime). Without one, the execution is ended forcefully — `CANCELLED` with outcome
+  `expired`, any live region or invoked child cancelled.
+- **Roots only.** A region or an `invoke` child lives as long as its parent; if the invoked
+  machine declares a `ttl`, it applies only when that machine runs on its own. An event
+  broadcast to a machine's regions still counts as activity for the machine itself.
+- A suspended execution's budget keeps running: if it ran out meanwhile, the execution expires
+  once resumed. A `FAILED` dead letter never expires (abandoning one is a deliberate
+  `terminate`); a `redrive` restarts its budget.
+
+An expired execution is finished like any other, so a [purge](../guide/control-plane.md#purge)
+retention job removes it later.
+
 Next we leave the single-thread-of-control world entirely: [orthogonal regions](08-orthogonal)
 let a machine be in several states **at once**.
