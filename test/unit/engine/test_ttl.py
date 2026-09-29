@@ -360,3 +360,33 @@ def test_redrive_rearms_the_budget():
 
     _at(runner, clock, 161.0)
     assert store.load(exe.id).outcome == "expired"
+
+
+def test_an_expired_handler_into_a_captured_sink_is_not_taken():
+    source = """
+    event Go {}
+    machine M {
+      ttl 60
+      initial C
+      state C {
+        initial A
+        state A {}
+        state Cleaned {}
+        from A to Cleaned on Expired
+      }
+      state Next {}
+      final Done success {}
+      from C to Next
+      from Next to Done on Go
+    }
+    """
+    defn = definition_from_dsl(source, "M")  # unvalidated: the engine must refuse it itself
+    clock = [0.0]
+    store = DictStore()
+    runner = DurableRunner(store, {defn.id: defn}, clock=lambda: clock[0])
+    exe = runner.create(defn.id)
+
+    _at(runner, clock, 61.0)
+
+    expired = store.load(exe.id)
+    assert (expired.status, expired.active_path, expired.outcome) == (Status.CANCELLED, "C.A", "expired")

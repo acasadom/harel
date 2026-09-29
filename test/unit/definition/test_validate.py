@@ -495,3 +495,50 @@ def test_build_definition_validate_flag_raises():
     }
     with pytest.raises(ValidationError):
         build_definition(cfg, {}, "M", validate=True)
+
+
+# a sink nested in a composite only ends the execution if no enclosing state catches
+# its bubble: here `from C to Next` would carry the execution on to Next
+CAPTURED = """
+event Go {}
+machine M {
+  initial C
+  state C {
+    initial A
+    state A {}
+    state Cleaned {}
+    from A to Cleaned on KIND
+  }
+  state Next {}
+  final Done success {}
+  from C to Next
+  from Next to Done on Go
+}
+"""
+
+
+def test_a_teardown_target_captured_by_an_enclosing_state_is_an_error():
+    from harel.dsl import definition_from_dsl
+
+    for kind, code in (("Cancel", "cancel_target_not_terminal"), ("Expired", "expired_target_not_terminal")):
+        source = CAPTURED.replace("KIND", kind).replace("machine M {", "machine M {\n  ttl 60")
+        issues = [i for i in validate(definition_from_dsl(source, "M")) if i.code == code]
+        assert issues and "the enclosing 'C' has its own transition" in issues[0].message
+
+
+def test_a_nested_terminal_that_ends_the_execution_is_fine():
+    from harel.dsl import definition_from_dsl
+
+    # nothing encloses Cleaned with a transition of its own: the bubble reaches the root
+    source = """
+    machine M {
+      initial C
+      state C {
+        initial A
+        state A {}
+        final Cleaned cancelled {}
+        from A to Cleaned on Cancel
+      }
+    }
+    """
+    assert "cancel_target_not_terminal" not in codes(definition_from_dsl(source, "M"))

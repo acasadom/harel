@@ -323,33 +323,35 @@ def has_error_handler(defn: Definition, exe: Execution, event: Event) -> bool:
 
 
 def _would_be_a_sink(defn: Definition, exe: Execution, target: Node) -> bool:
-    """Whether `target` would immediately act as a sink if the machine reached it
-    right now. A composite (has children) or an `invoke` state is never a sink —
-    the machine would descend into it (or fork/spawn) rather than park there, the
-    same reason `definition.validate`'s `_is_terminal` refuses those (mirrored
-    here, since `_drain` never even reaches its own transition check for one of
-    these: it forks/invokes/descends first). A target outside this Execution's
-    own branch (rooted at `exe.root_path`) — reachable in the shared Definition
-    but not a place this Execution could ever actually be — is refused the same
-    way, rather than letting `chain()` raise trying to resolve it.
+    """Whether reaching `target` right now would END this Execution in that same step.
+    A composite (has children) or an `invoke` state is never a sink — the machine would
+    descend into it (or fork/spawn) rather than park there, the same reason
+    `definition.validate`'s `_is_terminal` refuses those. A target outside this
+    Execution's own branch (rooted at `exe.root_path`), or inside one of its orthogonal
+    regions (each its own Execution), is refused the same way rather than letting
+    `chain()` raise trying to resolve it.
 
-    Otherwise mirrors `_drain`'s own "anything to wait for" check
-    (`_resolve(..., allow_parent=False)`), evaluated at `target` via
-    `_resolve_between` — not by pointing `exe.active_path` at `target` and calling
-    `_resolve` — so this never mutates a `exe` that a concurrent worker may be
-    reading or writing at the same time, and can never diverge from what the
-    engine will actually do once it gets there. Own scope only, like `_drain`'s
-    check; does not consider a transition an ANCESTOR scope declares sourced from
-    a descendant (a validated Definition never relies on that for a Cancel
-    target — see `_check_cancel_target` in `definition.validate` — so this is a
-    pragmatic, exact-if-narrower runtime mirror of that static rule, not a
-    replacement for running `validate()`)."""
+    Otherwise mirrors `_drain` from `target` upward: a leaf with no transition of its
+    own is a sink, and its sink bubbles to each enclosing composite in turn, any of which
+    with a transition of its own catches it and keeps the Execution going. So `target`
+    and every ancestor below the root must have nothing to take or wait for — the same
+    rule as `definition.validate`'s `_why_not_ending`. Evaluated via `_resolve_between`,
+    not by pointing `exe.active_path` at each node, so this never mutates an `exe` that a
+    concurrent worker may be reading or writing."""
     if target.children or target.invoke is not None:
         return False
     root = defn.index[exe.root_path]
     if not is_descendant(target, root):
         return False
-    return _resolve_between(defn, root, target, _any_pred, allow_parent=False) is None
+    cur = target
+    while cur is not root:
+        if cur is not target and cur.kind in _ORTHOGONAL:
+            return False  # inside a region: another Execution's state, not this one's
+        if _resolve_between(defn, root, cur, _any_pred, allow_parent=False) is not None:
+            return False  # `cur` has its own transition: the bubble stops here
+        assert cur.parent is not None
+        cur = cur.parent
+    return True
 
 
 def has_cancel_handler(defn: Definition, exe: Execution, event: Event) -> bool:

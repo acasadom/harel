@@ -49,8 +49,11 @@ everything else.
 ### `on Cancel` must resolve directly to a terminal
 
 `Cancel` is the control plane's own teardown signal, not a business event — `harel validate`
-rejects an `on Cancel` transition whose target is not itself a terminal state (`Stopped` above is
-a `final`, so it qualifies). `cancel()` also checks this itself at the moment it decides
+rejects an `on Cancel` transition whose target is not a terminal that **ends the execution**
+(`Stopped` above is a `final`, so it qualifies). A leaf with no transitions nested in a composite
+only qualifies if no enclosing state has a transition of its own: reaching it bubbles up through
+each enclosing state, and one with its own transition would catch the bubble and carry the
+execution on. `cancel()` also checks this itself at the moment it decides
 cooperative-vs-forceful, so an unvalidated Definition gets the same guarantee, not just a
 recommendation: a non-terminal target is treated as no handler at all (forceful terminate)
 instead of being taken. Either way, the cooperative path always finishes in the very same step
