@@ -31,3 +31,28 @@ def test_orthogonal_renders_parallel_regions():
     # each region's states render (with their short function name) inside its block
     assert 'state "A1" as Fork.A.A1: <b>on_enter</b>: <i>a1</i>' in lines
     assert 'state "B1" as Fork.B.B1: <b>on_enter</b>: <i>b1</i>' in lines
+
+
+COMPOSITE_GUARDS = """
+event E {}
+guard vip = tier == "gold" or spend > 1000
+machine M {
+  initial A
+  state A {}
+  final B success {}
+  final C success {}
+  final D success {}
+  from A to B on E where (y > 1 and y < 5) or z == "go"
+  from A to C on E where status == "paid" and not (n in [1, 2] or retry == true)
+  from A to D on E where vip and region == "eu"
+}
+"""
+
+
+def test_composite_and_named_guards_are_rendered():
+    # the composable predicate tree (and/or/not, named guards) is drawn, not only the
+    # flat comparisons — with DSL-style literals and parentheses where they help reading
+    text = render(definition_from_dsl(COMPOSITE_GUARDS, "M"))
+    assert "A --> B: E\\n[(y > 1 and y < 5) or z == 'go']" in text
+    assert "A --> C: E\\n[status == 'paid' and not (n in [1, 2] or retry == true)]" in text
+    assert "A --> D: E\\n[(tier == 'gold' or spend > 1000) and region == 'eu']" in text

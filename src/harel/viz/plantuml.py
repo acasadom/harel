@@ -19,6 +19,7 @@ from harel.definition.model import (
     Transition,
     resolve_relative,
 )
+from harel.viz._guards import guard_text
 
 _INDENT = "  "
 _HOOKS = ("on_enter", "on_activity", "on_exit")
@@ -42,10 +43,8 @@ def _prefixed(node: Node) -> str:
 def _filter(ef: Optional[EventFilter]) -> str:
     if ef is None:
         return ""
-    if ef.predicates:
-        data = str(ef.predicates).replace("'", "").replace(": ", "=")
-        return f": {ef.kind}\\n {data}"
-    return f": {ef.kind}"
+    guard = guard_text(ef)
+    return f": {ef.kind}\\n[{guard}]" if guard else f": {ef.kind}"
 
 
 def _emit_selector(comp: Node, source: Node, t: Transition, pad: str, out: list[str]) -> None:

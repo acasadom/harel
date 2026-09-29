@@ -128,3 +128,24 @@ def test_corpus_renders_with_header() -> None:
             assert out.startswith("stateDiagram-v2\n")
             seen += 1
     assert seen >= 5
+
+
+def test_composite_and_named_guards_are_rendered() -> None:
+    source = """
+    event E {}
+    guard vip = tier == "gold" or spend > 1000
+    machine M {
+      initial A
+      state A {}
+      final B success {}
+      final C success {}
+      final D success {}
+      from A to B on E where (y > 1 and y < 5) or z == "go"
+      from A to C on E where status == "paid" and not (n in [1, 2] or retry == true)
+      from A to D on E where vip and region == "eu"
+    }
+    """
+    lines = _lines(source, "M")
+    assert "A --> B : E<br/>[(y > 1 and y < 5) or z == 'go']" in lines
+    assert "A --> C : E<br/>[status == 'paid' and not (n in [1, 2] or retry == true)]" in lines
+    assert "A --> D : E<br/>[(tier == 'gold' or spend > 1000) and region == 'eu']" in lines
