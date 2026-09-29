@@ -106,6 +106,9 @@ class AsyncDictStore:
         if self._timers.get((execution_id, path)) == fire_at:
             del self._timers[(execution_id, path)]
 
+    async def ids_with_prefix(self, prefix: str) -> list[str]:
+        return [i for i in self._by_id if i.startswith(prefix)]
+
     async def purge(self, execution_id: str, expected_version: int) -> bool:
         exe = self._by_id.get(execution_id)
         if exe is not None:

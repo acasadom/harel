@@ -449,6 +449,8 @@ Afterwards a commit of a stale copy of the Execution finds no row at its version
 `StoreConflict` (`_write` inserts only when `old == 0`), so a purged Execution is never recreated.
 The async twin runs the same transaction under its connection lock.
 
+`ids_with_prefix(prefix)` — `SELECT id FROM executions WHERE id LIKE ? ESCAPE '\'`, with
+`%`, `_` and `\` in the prefix escaped — is how the control plane finds a tree's descendants.
 ## Async twin (`aio_store/sqlite.py`)
 
 `AsyncSqliteStore` is a faithful mirror of `SqliteStore` over **`aiosqlite`** — same schema,

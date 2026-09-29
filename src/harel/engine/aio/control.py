@@ -17,7 +17,7 @@ from typing import Any, Callable, Optional
 
 from harel import engine
 from harel.definition.model import Definition, NodeKind, is_descendant
-from harel.engine.control import _archive_bundle, _check_purgeable
+from harel.engine.control import _archive_bundle, _check_purgeable, _tree_of
 from harel.engine.execution import Execution, Status, stamp
 from harel.engine.store import StoreConflict, TimerOp
 from harel.spec.states import Event
@@ -182,16 +182,17 @@ def _validate_redrive_target(defn: Definition, exe: Execution, target_path: str)
 
 
 async def _collect_tree(store: Any, root: Execution) -> tuple[list[Execution], list[str]]:
-    tree, missing, i = [root], [], 0
-    while i < len(tree):
-        for cid in tree[i].children:
-            child = await store.load(cid)
-            if child is None:
-                missing.append(cid)
-            else:
-                tree.append(child)
-        i += 1
-    return tree, missing
+    """Async mirror of `harel.engine.control._collect_tree`."""
+    found = {
+        i: e for i in await store.ids_with_prefix(root.id + ":") if (e := await store.load(i)) is not None
+    }
+    frontier = [root, *found.values()]
+    while frontier:
+        for cid in frontier.pop().children:
+            if cid != root.id and cid not in found and (child := await store.load(cid)) is not None:
+                found[cid] = child
+                frontier.append(child)
+    return _tree_of(root, found)
 
 
 async def purge(store: Any, execution_id: str, *, archive: Optional[Callable[[dict], Any]] = None) -> bool:

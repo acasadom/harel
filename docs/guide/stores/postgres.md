@@ -441,6 +441,7 @@ Any error rolls it back. It returns True if the Execution was deleted. If no row
 no row at its version: the multi-statement path only inserts when `old == 0`, and
 `harel_commit_cas` returns false, so it raises `StoreConflict` instead of recreating the row.
 
+`ids_with_prefix(prefix)` is the same escaped `LIKE` query as the SQLite family's, with `%s`.
 ## Async twin
 
 `AsyncPostgresStore` (in `harel/engine/aio_store/postgres.py`) is the async mirror, byte-for-byte the

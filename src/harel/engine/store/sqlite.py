@@ -9,6 +9,7 @@ from typing import Iterable, Optional, Union
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.store._base import (
+    _IDS_WITH_PREFIX_SQL,
     _PURGE_COMPANIONS_SQL,
     DEFAULT_TRACE_MAX,
     OutboxEntry,
@@ -17,6 +18,7 @@ from harel.engine.store._base import (
     TimerOp,
     _decode_offset,
     _encode_offset,
+    _like_prefix,
 )
 from harel.spec.states import Event
 
@@ -261,6 +263,9 @@ class SqliteStore:
     def ack_outbox(self, seq: int) -> None:
         self._conn.execute("DELETE FROM outbox WHERE seq = ?", (seq,))
         self._conn.commit()
+
+    def ids_with_prefix(self, prefix: str) -> list[str]:
+        return [r[0] for r in self._conn.execute(_IDS_WITH_PREFIX_SQL, (_like_prefix(prefix),)).fetchall()]
 
     def purge(self, execution_id: str, expected_version: int) -> bool:
         try:

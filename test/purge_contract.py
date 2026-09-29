@@ -75,6 +75,8 @@ def assert_purge_contract(store, ns: str = "") -> None:
     for exe in (reborn, store.load(bystander.id)):  # leave a shared backend clean
         assert store.purge(exe.id, exe.version) is True
 
+    assert_ids_with_prefix_contract(store, ns)
+
 
 async def assert_async_purge_contract(store, ns: str = "") -> None:
     victim, bystander = _new(ns, "victim"), _new(ns, "bystander")
@@ -110,3 +112,53 @@ async def assert_async_purge_contract(store, ns: str = "") -> None:
 
     for exe in (reborn, await store.load(bystander.id)):
         assert await store.purge(exe.id, exe.version) is True
+
+    await assert_async_ids_with_prefix_contract(store, ns)
+
+
+# ids around a tree `r`, plus pairs where one id's prefix is another's with a LIKE / glob
+# metacharacter in place of a plain character — each must be matched literally
+_PREFIX_SEED = [
+    "r",
+    "r:A:0",
+    "r:A:0:B:0",
+    "rx",
+    "a_b:1",
+    "aXb:1",
+    "p%q:1",
+    "p1q:1",
+    "s*t:1",
+    "sxt:1",
+    "u[v]:1",
+    "uv:1",
+]
+_PREFIX_CASES = {
+    "r:": {"r:A:0", "r:A:0:B:0"},
+    "a_b:": {"a_b:1"},
+    "p%q:": {"p%q:1"},
+    "s*t:": {"s*t:1"},
+    "u[v]:": {"u[v]:1"},
+}
+
+
+def _prefix_ok(ns: str, prefix: str, found: list) -> None:
+    seeded = {ns + i for i in _PREFIX_SEED}
+    assert {i for i in found if i in seeded} == {ns + i for i in _PREFIX_CASES[prefix]}, prefix
+
+
+def assert_ids_with_prefix_contract(store, ns: str = "") -> None:
+    for i in _PREFIX_SEED:
+        store.commit(Execution(id=ns + i, definition_id=f"{ns}d"), [])
+    for prefix in _PREFIX_CASES:
+        _prefix_ok(ns, prefix, store.ids_with_prefix(ns + prefix))
+    for i in _PREFIX_SEED:
+        assert store.purge(ns + i, 1) is True
+
+
+async def assert_async_ids_with_prefix_contract(store, ns: str = "") -> None:
+    for i in _PREFIX_SEED:
+        await store.commit(Execution(id=ns + i, definition_id=f"{ns}d"), [])
+    for prefix in _PREFIX_CASES:
+        _prefix_ok(ns, prefix, await store.ids_with_prefix(ns + prefix))
+    for i in _PREFIX_SEED:
+        assert await store.purge(ns + i, 1) is True

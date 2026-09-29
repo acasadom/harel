@@ -7,7 +7,14 @@ from typing import Any, Optional
 
 from harel.engine.execution import Execution
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
-from harel.engine.store._base import _PG_COMMIT_FN, _PG_SCHEMA_LOCK, _PURGE_COMPANIONS_SQL, DEFAULT_TRACE_MAX
+from harel.engine.store._base import (
+    _IDS_WITH_PREFIX_SQL,
+    _PG_COMMIT_FN,
+    _PG_SCHEMA_LOCK,
+    _PURGE_COMPANIONS_SQL,
+    DEFAULT_TRACE_MAX,
+    _like_prefix,
+)
 from harel.spec.states import Event
 
 
@@ -280,6 +287,14 @@ class AsyncPostgresStore:
                     (execution_id, path, fire_at),
                 )
             await conn.commit()
+
+    async def ids_with_prefix(self, prefix: str) -> list[str]:
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(_IDS_WITH_PREFIX_SQL.replace("?", "%s"), (_like_prefix(prefix),))
+                rows = await cur.fetchall()
+            await conn.commit()
+        return [r[0] for r in rows]
 
     async def purge(self, execution_id: str, expected_version: int) -> bool:
         # an exception leaves the transaction to the pool, which rolls back a returned connection

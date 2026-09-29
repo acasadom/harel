@@ -380,6 +380,8 @@ EXEC                                  -- a concurrent write to exe:{id} aborts i
 It returns True if the Execution was deleted. If no row exists under the id at all, the companion deletes still run (a no-op, or the leftovers of an earlier interrupted purge) and it returns False. The control plane's [purge](../control-plane.md#purge) calls it once per member of a finished tree. After a purge, both commit paths treat a missing key with `old != 0` as a conflict,
 so a stale copy can't recreate it.
 
+`ids_with_prefix(prefix)` `SCAN`s `exe:<prefix>*`, with the glob metacharacters in the prefix
+escaped.
 ## Async twin
 
 `AsyncRedisStore` ([`aio_store/redis.py`](https://github.com/acasadom/harel/blob/main/src/harel/engine/aio_store/redis.py)) is the

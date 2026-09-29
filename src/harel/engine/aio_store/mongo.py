@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
 from harel.engine.execution import Execution
@@ -215,6 +216,10 @@ class AsyncMongoStore:
     async def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None:
         key = f"timers.{self._enc(path)}"
         await self._exes.update_one({"_id": execution_id, key: fire_at}, {"$unset": {key: ""}})
+
+    async def ids_with_prefix(self, prefix: str) -> list[str]:
+        query = {"_id": {"$regex": "^" + re.escape(prefix)}}
+        return [doc["_id"] async for doc in self._exes.find(query, {"_id": 1})]
 
     async def purge(self, execution_id: str, expected_version: int) -> bool:
         # see MongoStore.purge: the one document carries everything keyed by the Execution

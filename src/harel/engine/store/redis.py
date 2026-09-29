@@ -214,6 +214,13 @@ class RedisStore:
     def ack_outbox(self, seq: int) -> None:
         self._r.hdel(self._k("outbox"), str(seq))
 
+    def ids_with_prefix(self, prefix: str) -> list[str]:
+        head = self._k("exe:")
+        return [
+            _text(k)[len(head) :]
+            for k in self._r.scan_iter(match=head + _glob_escape(prefix) + "*", count=500)
+        ]
+
     def purge(self, execution_id: str, expected_version: int) -> bool:
         key = self._k(f"exe:{execution_id}")
         with self._r.pipeline() as pipe:
@@ -256,7 +263,15 @@ class RedisStore:
         self._r.close()
 
 
+def _text(raw: Any) -> str:
+    return raw.decode() if isinstance(raw, (bytes, bytearray)) else raw
+
+
 def _timer_owner(member: Any) -> str:
     """The execution id of a `timers` sorted-set member (`{execution_id}\\x00{path}`)."""
-    text = member.decode() if isinstance(member, (bytes, bytearray)) else member
-    return text.partition("\x00")[0]
+    return _text(member).partition("\x00")[0]
+
+
+def _glob_escape(text: str) -> str:
+    """`text` as a literal inside a Redis MATCH glob."""
+    return "".join("\\" + c if c in "\\*?[]" else c for c in text)
