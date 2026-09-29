@@ -448,6 +448,8 @@ update_many({"outbox.target_id": id}, {"$pull": {"outbox": {"target_id": id}}}) 
 It returns True if the Execution was deleted. If no row exists under the id at all, the companion deletes still run (a no-op, or the leftovers of an earlier interrupted purge) and it returns False. The control plane's [purge](../control-plane.md#purge) calls it once per member of a finished tree. A stale copy's later commit matches no document at `version = old` and, with
 `old != 0`, never inserts — it raises `StoreConflict`.
 
+`ids_with_prefix(prefix)` finds `{"_id": {"$regex": "^" + re.escape(prefix)}}` — an anchored
+regex, which the `_id` index serves.
 ## Async twin
 
 `AsyncMongoStore` ([`aio_store/mongo.py`](https://github.com/acasadom/harel/blob/main/src/harel/engine/aio_store/mongo.py)) is the

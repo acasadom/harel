@@ -437,6 +437,7 @@ COMMIT
 Any error rolls it back. It returns True if the Execution was deleted. If no row exists under the id at all, the companion deletes still run (a no-op, or the leftovers of an earlier interrupted purge) and it returns False. The control plane's [purge](../control-plane.md#purge) calls it once per member of a finished tree. The async twin runs it on a thread under its lock, like
 every other call.
 
+`ids_with_prefix(prefix)` is the same escaped `LIKE` query as `SqliteStore`'s.
 ## Async twin — `AsyncLibsqlStore`
 
 `harel/engine/aio_store/libsql.py` is the async-facing store the async worker talks to — but it is

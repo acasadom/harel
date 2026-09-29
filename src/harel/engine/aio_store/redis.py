@@ -8,7 +8,7 @@ from typing import Any, Optional
 from harel.engine.execution import Execution
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
 from harel.engine.store._base import _COMMIT_CAS_LUA, DEFAULT_TRACE_MAX
-from harel.engine.store.redis import _timer_owner
+from harel.engine.store.redis import _glob_escape, _text, _timer_owner
 from harel.spec.states import Event
 
 
@@ -179,6 +179,11 @@ class AsyncRedisStore:
         score = await self._r.zscore(self._k("timers"), member)
         if score is not None and float(score) == fire_at:
             await self._r.zrem(self._k("timers"), member)
+
+    async def ids_with_prefix(self, prefix: str) -> list[str]:
+        head = self._k("exe:")
+        pattern = head + _glob_escape(prefix) + "*"
+        return [_text(k)[len(head) :] async for k in self._r.scan_iter(match=pattern, count=500)]
 
     async def purge(self, execution_id: str, expected_version: int) -> bool:
         key = self._k(f"exe:{execution_id}")

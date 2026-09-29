@@ -269,7 +269,10 @@ again:    False
   `FAILED` dead letter is waiting for a `redrive`, so abandoning it is a deliberate step:
   `terminate()` it first (its `error` is kept, and archived with it).
 - **Only roots.** A region or `invoke` child belongs to its parent's join; purging the root
-  removes the whole tree, so a child id is refused.
+  removes the whole tree, so a child id is refused. The tree is every stored descendant —
+  also the ones the parent no longer lists in `children` (an `invoke` that returned, the
+  regions of an earlier entry into a fork, what a `Reset` discarded), found by id prefix (a
+  child's id extends its parent's) and confirmed by their `parent_id` chain.
 - **The archiver runs first.** It receives `{"root_id", "executions", "traces"}` — the tree root
   first, plus each member's trace — before anything is deleted, so an archiver that raises
   aborts the purge. `JsonlArchive(path)` appends one line per tree and fsyncs it; any callable

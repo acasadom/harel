@@ -7,6 +7,7 @@ from typing import Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.store._base import (
+    _IDS_WITH_PREFIX_SQL,
     _PURGE_COMPANIONS_SQL,
     DEFAULT_TRACE_MAX,
     OutboxEntry,
@@ -15,6 +16,7 @@ from harel.engine.store._base import (
     TimerOp,
     _decode_offset,
     _encode_offset,
+    _like_prefix,
 )
 from harel.spec.states import Event
 
@@ -350,6 +352,9 @@ class RqliteStore:
                 ]
             ]
         )
+
+    def ids_with_prefix(self, prefix: str) -> list[str]:
+        return [r[0] for r in self._query(_IDS_WITH_PREFIX_SQL, (_like_prefix(prefix),))]
 
     def purge(self, execution_id: str, expected_version: int) -> bool:
         results = self._execute(_purge_statements(execution_id, expected_version), transaction=True)

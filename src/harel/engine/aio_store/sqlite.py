@@ -8,7 +8,12 @@ from typing import Any, Optional
 
 from harel.engine.execution import Execution
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
-from harel.engine.store._base import _PURGE_COMPANIONS_SQL, DEFAULT_TRACE_MAX
+from harel.engine.store._base import (
+    _IDS_WITH_PREFIX_SQL,
+    _PURGE_COMPANIONS_SQL,
+    DEFAULT_TRACE_MAX,
+    _like_prefix,
+)
 from harel.spec.states import Event
 
 
@@ -240,6 +245,9 @@ class AsyncSqliteStore:
             "DELETE FROM timers WHERE execution_id = ? AND path = ? AND fire_at = ?",
             (execution_id, path, fire_at),
         )
+
+    async def ids_with_prefix(self, prefix: str) -> list[str]:
+        return [r[0] for r in await self._fetchall(_IDS_WITH_PREFIX_SQL, (_like_prefix(prefix),))]
 
     async def purge(self, execution_id: str, expected_version: int) -> bool:
         async with self._lock:

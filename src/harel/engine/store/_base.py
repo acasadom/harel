@@ -81,6 +81,17 @@ _PURGE_COMPANIONS_SQL = (
     "DELETE FROM spawns WHERE parent_id = ?",
 )
 
+# `ids_with_prefix` for the SQL family: LIKE with the pattern metacharacters escaped (`?`
+# placeholder; the Postgres backends swap in `%s`). SQLite's LIKE is case-insensitive, so it
+# may over-match — `ids_with_prefix` allows that.
+_IDS_WITH_PREFIX_SQL = "SELECT id FROM executions WHERE id LIKE ? ESCAPE '\\'"
+
+
+def _like_prefix(prefix: str) -> str:
+    """A LIKE pattern matching ids that start with `prefix` literally."""
+    return prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
 # one advisory-lock key for all harel schema setup (tables + functions), so concurrent
 # connections opening at once serialize their CREATE OR REPLACE FUNCTION (avoids pg_proc clashes).
 _PG_SCHEMA_LOCK = 7723019
@@ -257,6 +268,13 @@ class ExecutionStore(Protocol):
     def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None:
         """Remove the timer for `(execution_id, path)` — but only if it still holds
         `fire_at` (so a concurrent re-schedule to a new time survives a stale sweep)."""
+        ...
+
+    def ids_with_prefix(self, prefix: str) -> list[str]:
+        """The ids of every stored Execution whose id starts with `prefix` (any order).
+        A child's id extends its parent's (`<parent id>:<path>:<seq>...`), so this finds a
+        tree's descendants — including those the parent no longer lists in `children`.
+        May over-match (e.g. case-insensitively): callers verify what they get."""
         ...
 
     def purge(self, execution_id: str, expected_version: int) -> bool:

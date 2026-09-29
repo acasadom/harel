@@ -348,19 +348,38 @@ def _archive_bundle(root: Execution, tree: list[Execution], traces: dict[str, li
     }
 
 
-def _collect_tree(store: ExecutionStore, root: Execution) -> tuple[list[Execution], list[str]]:
-    """The root and every descendant (regions, invokes, fan-out instances), root first
-    and each level before the next; plus the ids of children no longer stored."""
-    tree, missing, i = [root], [], 0
-    while i < len(tree):
-        for cid in tree[i].children:
-            child = store.load(cid)
-            if child is None:
-                missing.append(cid)
-            else:
-                tree.append(child)
-        i += 1
+def _tree_of(root: Execution, found: dict[str, Execution]) -> tuple[list[Execution], list[str]]:
+    """`root` and its descendants among `found`, parents before children; plus the ids a
+    member lists in `children` that are no longer stored. A descendant is recognised by
+    its `parent_id` chain reaching `root`, so an unrelated execution in `found` (a root
+    whose caller-chosen id merely shares the prefix) is never taken in."""
+    members = {root.id: root}
+    added = True
+    while added:
+        added = False
+        for exe in found.values():
+            if exe.id not in members and exe.parent_id in members:
+                members[exe.id] = exe
+                added = True
+    tree = list(members.values())
+    missing = [cid for exe in tree for cid in exe.children if cid not in members]
     return tree, missing
+
+
+def _collect_tree(store: ExecutionStore, root: Execution) -> tuple[list[Execution], list[str]]:
+    """The root and every descendant still stored (regions, invokes, fan-out instances),
+    parents first. Two sources, since neither alone is complete: a parent drops a child
+    from `children` once done with it (an invoke that returned, a fork or fan-out
+    re-entered, a `Reset`) while its record stays in the store — found by the id prefix a
+    child's id extends its parent's with; and `children` lists what a parent spawned."""
+    found = {i: e for i in store.ids_with_prefix(root.id + ":") if (e := store.load(i)) is not None}
+    frontier = [root, *found.values()]
+    while frontier:
+        for cid in frontier.pop().children:
+            if cid != root.id and cid not in found and (child := store.load(cid)) is not None:
+                found[cid] = child
+                frontier.append(child)
+    return _tree_of(root, found)
 
 
 def purge(

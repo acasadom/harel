@@ -188,3 +188,96 @@ async def test_async_purge_with_a_coroutine_archiver():
     assert await aio_control.purge(store, exe.id, archive=archive) is True
     assert archived == [exe.id]
     assert await store.load(exe.id) is None
+
+
+# --- descendants the parent no longer lists ------------------------------------------
+CHILD = "event Go {}\nmachine Child { initial W  state W {}  final D success {}  from W to D on Go }"
+CALLER = """
+machine P {
+   initial Run
+   state Run { invoke Child }
+   final Done success {}
+   from Run to Done on Returned
+}
+"""
+REFORK = """
+event Go {}
+event Again {}
+event Stop {}
+machine M {
+   initial Fork
+   orthogonal Fork {
+      state A { initial A1  state A1 {}  final A2 success {}  from A1 to A2 on Go }
+   }
+   state Between {}
+   final End success {}
+   from Fork to Between
+   from Between to Fork on Again
+   from Between to End on Stop
+}
+"""
+
+
+def _stored_ids(store) -> set:
+    return set(store._by_id)
+
+
+def test_purge_reaches_a_returned_invoke_child():
+    child, caller = definition_from_dsl(CHILD, "Child"), definition_from_dsl(CALLER, "P")
+    store = DictStore()
+    runner = DurableRunner(store, {caller.id: caller, child.id: child})
+    exe = runner.create(caller.id)
+    (cid,) = store.load(exe.id).children
+    runner.process(cid, Event(kind="Go"))
+    assert store.load(exe.id).children == {}  # the caller dropped the returned child
+
+    assert runner.purge(exe.id) is True
+    assert _stored_ids(store) == set()
+
+
+def test_purge_reaches_the_regions_of_an_earlier_fork_entry():
+    runner, store = _runner(REFORK)
+    exe = runner.create(runner_defn_id(runner))
+    for kind in ("Go", "Again", "Go", "Stop"):  # the second entry replaced the first's regions
+        runner.process(exe.id, Event(kind=kind))
+    assert len(_stored_ids(store)) == 3
+
+    assert runner.purge(exe.id) is True
+    assert _stored_ids(store) == set()
+
+
+def test_purge_reaches_the_children_a_reset_discarded():
+    runner, store = _runner(REFORK)
+    exe = runner.create(runner_defn_id(runner))
+    for kind in ("Go", "Reset", "Go", "Stop"):
+        runner.process(exe.id, Event(kind=kind))
+
+    assert runner.purge(exe.id) is True
+    assert _stored_ids(store) == set()
+
+
+def test_purge_leaves_an_unrelated_execution_whose_id_shares_the_prefix():
+    # ids are caller-suppliable: "job:x" is its own root, not a child of "job"
+    from harel.engine.execution import Execution
+
+    store = DictStore()
+    store.save(Execution(id="job", definition_id="M", status=Status.DONE))
+    store.save(Execution(id="job:x", definition_id="M", status=Status.RUNNING))
+
+    from harel.engine import control
+
+    assert control.purge(store, "job") is True
+    assert _stored_ids(store) == {"job:x"}
+
+
+async def test_async_purge_reaches_a_child_the_parent_no_longer_lists():
+    from harel.engine.aio import control as aio_control
+    from harel.engine.aio_store import AsyncDictStore
+    from harel.engine.execution import Execution
+
+    store = AsyncDictStore()
+    await store.save(Execution(id="p", definition_id="M", status=Status.DONE))
+    await store.save(Execution(id="p:Run:0", definition_id="C", status=Status.DONE, parent_id="p"))
+
+    assert await aio_control.purge(store, "p") is True
+    assert await store.load("p:Run:0") is None

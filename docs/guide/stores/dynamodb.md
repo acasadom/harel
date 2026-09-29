@@ -458,6 +458,9 @@ only leaves unreachable rows; a retry (the Execution already absent) still remov
 It returns True if the Execution was deleted. If no row exists under the id at all, the companion deletes still run (a no-op, or the leftovers of an earlier interrupted purge) and it returns False. The control plane's [purge](../control-plane.md#purge) calls it once per member of a finished tree. A stale copy's later commit fails its `version = :ov` condition, so it can't be
 recreated.
 
+`ids_with_prefix(prefix)` has no key range to query on a hash key, so it is a `Scan` of
+`executions` with `begins_with(id, :prefix)` — a full-table read per purged tree. Fine for a
+periodic retention job; worth knowing on a very large table.
 ## Async twin
 
 [`aio_store/dynamodb.py`](https://github.com/acasadom/harel/blob/main/src/harel/engine/aio_store/dynamodb.py) is `AsyncDynamoDBStore` —

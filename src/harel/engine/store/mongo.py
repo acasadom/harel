@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
@@ -268,6 +269,10 @@ class MongoStore:
         # guarded on the stored value: a concurrent re-schedule to a new time wins
         key = f"timers.{self._enc(path)}"
         self._exes.update_one({"_id": execution_id, key: fire_at}, {"$unset": {key: ""}})
+
+    def ids_with_prefix(self, prefix: str) -> list[str]:
+        query = {"_id": {"$regex": "^" + re.escape(prefix)}}
+        return [doc["_id"] for doc in self._exes.find(query, {"_id": 1})]
 
     def purge(self, execution_id: str, expected_version: int) -> bool:
         # the document holds the Execution with its dedupe/trace/timers and the spawn intents

@@ -420,6 +420,17 @@ class DynamoDBStore:
             if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
                 raise  # the guard didn't match (stale sweep) — a no-op, as intended
 
+    def ids_with_prefix(self, prefix: str) -> list[str]:
+        # a hash key can't be range-queried, so this is a filtered Scan of the whole table
+        rows = self._scan(
+            "executions",
+            FilterExpression="begins_with(#i, :p)",
+            ExpressionAttributeNames={"#i": "id"},
+            ExpressionAttributeValues={":p": {"S": prefix}},
+            ProjectionExpression="#i",
+        )
+        return [r["id"] for r in rows]
+
     def purge(self, execution_id: str, expected_version: int) -> bool:
         try:
             self._db.delete_item(

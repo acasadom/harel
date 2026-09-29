@@ -383,6 +383,7 @@ whole request changes nothing. The result is `results[0].rows_affected == 1`. It
 A stale copy's later commit can't recreate it: an existing Execution is only ever `UPDATE`d
 (see (a) above).
 
+`ids_with_prefix(prefix)` is the same escaped `LIKE` query as `SqliteStore`'s, over `_query`.
 ## Async twin
 
 `harel/engine/aio_store/rqlite.py` is `AsyncRqliteStore`, the exact mirror over

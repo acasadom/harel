@@ -193,6 +193,10 @@ caller may still hold it after the purge; the id is remembered in `_purged` so a
 that object (version > 0) raises `StoreConflict` instead of re-inserting it. A brand-new Execution
 (version 0) may reuse the id. See [purge](../control-plane.md#purge).
 
+### `ids_with_prefix(prefix) -> list[str]`
+
+The stored ids starting with `prefix` (a plain `startswith` over `_by_id`).
+
 ### Trace: `_record_trace` / `append_trace` / `read_trace`
 
 ```text
