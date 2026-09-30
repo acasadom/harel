@@ -105,7 +105,9 @@ exits and the entries (an `on exit` sees the old context, an `on enter` the new 
 that can't be evaluated — a field that isn't set, arithmetic on a non-number, division by zero, a
 value that breaks the declared type — raises an `ExpressionError`, routed like an action error
 (`on error`, else dead-letter), before any state is left. A `choose`'s guards see the context before
-its own `set`. See [the context in the model](../tutorial/17-context).
+its own `set`; an automatic `choose` (no `on`) is re-evaluated after each step taken in its source,
+and one without `else` in a state nothing can re-run it from is a validation error
+(`choose_can_hang`). See [the context in the model](../tutorial/17-context).
 
 See: [guards](../tutorial/04-guards), [selectors](../tutorial/05-selectors),
 [payloads](../tutorial/13-payloads), [on error](../tutorial/16-on-error).
@@ -149,7 +151,8 @@ fragment Outer(work: action, budget: value) {     # a fragment may `use` another
 }
 
 invoke pkg.machine                   # run another machine as a black box (a leaf)
-  with { child_key: parent_key }     # project input in
+  with { child_key: parent_key }     # project input in (also on an orthogonal node: what each
+                                     # region's context starts with; else it starts empty)
 invoke pkg.machine for item in coll  # fan-out: one child per entry of coll
   with { slice: item }
 invoke { … machine body … }          # inline target (QML-style)

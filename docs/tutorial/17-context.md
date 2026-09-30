@@ -44,7 +44,8 @@ The declaration is checked at three points:
 - **after each `set`** — see below.
 
 Undeclared keys are not rejected at runtime: actions may keep their own keys next to the declared
-ones.
+ones. The schema covers every execution of the machine — the keys its orthogonal regions use
+included — and a `with` may only read declared fields.
 
 ## `set` updates it
 
@@ -81,7 +82,11 @@ from Working choose on Fail set context.attempts = context.attempts + 1 {
 ```
 
 Without an `else`, a `choose` where no branch holds doesn't fire at all — as if its guard were
-false. Without a trigger it is an automatic transition, routing as soon as its source is reached.
+false. Without a trigger it is an automatic transition, routing as soon as its source is reached —
+and re-evaluated after every later step taken in that state, so "wait until `context.ready`" works
+as long as some event transition there can change the context. An automatic `choose` without
+`else` in a state nothing can ever re-run (no event transition, no `on activity`) would wait
+forever if no branch holds: `harel validate` reports it (`choose_can_hang`).
 Its guards are evaluated when the transition is picked, so they see the context **before** the
 transition's own `set`, as in UML — above, the fourth failure is the one that gives up.
 
@@ -135,9 +140,18 @@ DONE failed
 
 ## Orthogonal regions
 
-Each region of an orthogonal state is its own execution. It starts from a **copy** of the parent's
-context as it is at the fork — so a region's guards see what the parent knew — and from then on the
-two evolve apart: a region reports back through `carry` (see [orthogonal regions](08-orthogonal)).
-An `invoke`d machine still receives only what its `with` passes.
+Each region of an orthogonal state is its own execution, with its own context — which starts with
+only what the orthogonal node passes down, exactly like an `invoke`'s `with`:
+
+```text
+orthogonal Checks {
+  with { limit: max_amount }       # each region starts with context.limit = the parent's max_amount
+  state Fraud { ... from Scoring to Flagged on Scored where context.limit < event.amount ... }
+  state Stock { ... }
+}
+```
+
+Nothing else is copied, so a region's guards see exactly what it was given, and a key it reports
+back with `carry` is one it produced (or was given). See [orthogonal regions](08-orthogonal).
 
 Next: [validation](14-validation) covers every rule above in one place.
