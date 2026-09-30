@@ -79,7 +79,9 @@ event Go {}
 machine M {
   initial Fork
   orthogonal Fork {
+    with { limit: max }
     state R {
+      carry verdict
       initial W
       state W {}
       final Hit success {}
@@ -94,17 +96,41 @@ machine M {
 """
 
 
-def test_a_region_starts_from_a_copy_of_the_parents_context():
+def test_a_region_starts_with_what_the_fork_passes_down():
     runner, store, defn = _runner(REGIONS)
-    exe = runner.create(defn.id, context={"limit": 5})
+    exe = runner.create(defn.id, context={"max": 5, "verdict": "parent-value"})
     (cid,) = store.load(exe.id).children
-    assert store.load(cid).context == {"limit": 5}
+    assert store.load(cid).context == {"limit": 5}  # only the `with` projection, renamed
 
     runner.process(exe.id, Event(kind="Go"))
 
-    assert store.load(cid).active_path == "Fork.R.Hit"  # the region's guard saw the parent's limit
+    assert store.load(cid).active_path == "Fork.R.Hit"  # the region's guard saw what it was given
     assert store.load(cid).context["seen"] is True
     assert "seen" not in store.load(exe.id).context  # a copy: the two evolve apart
+
+
+def test_carry_reports_only_what_the_region_produced():
+    # the parent holds a `verdict` the region never writes: `carry verdict` must not report it
+    runner, store, defn = _runner(REGIONS)
+    exe = runner.create(defn.id, context={"max": 5, "verdict": "parent-value"})
+
+    done = runner.process(exe.id, Event(kind="Go"))
+
+    assert done.status is Status.DONE
+    assert done.context["region_results"] == {"Fork.R": {"outcome": "success"}}
+
+
+def test_without_with_a_region_starts_empty():
+    runner, store, defn = _runner(REGIONS.replace("    with { limit: max }\n", ""))
+    exe = runner.create(defn.id, context={"max": 5})
+    (cid,) = store.load(exe.id).children
+    assert store.load(cid).context == {}
+
+
+def test_with_on_a_state_that_passes_nothing_down_is_a_warning():
+    source = "machine M {\n initial A\n state A { with { x: y } }\n final B success {}\n from A to B\n}"
+    issues = {(i.code, i.severity) for i in validate(definition_from_dsl(source, "M"))}
+    assert ("with_without_children", "warning") in issues
 
 
 # --- the context schema ------------------------------------------------------------------------
@@ -423,3 +449,53 @@ def test_the_context_schema_is_machine_level_only():
     ) as err:
         definition_from_dsl("machine M {\n  initial A\n  state A { context { n: int } }\n}", "M")
     assert err.value.line == 3
+
+
+# --- an automatic choose that can never be re-evaluated ------------------------------------
+HANGS = """
+machine M {
+  context { n: int }
+  initial A
+  state A {}
+  final Done success {}
+  from A choose { when context.n >= 10 to Done }
+}
+"""
+
+
+def test_an_automatic_choose_without_else_that_can_never_rerun_is_an_error():
+    assert "choose_can_hang" in _codes(HANGS)
+    assert "choose_can_hang" not in _codes(HANGS.replace("to Done }", "to Done\n else to A }"))
+    # a teardown event ends the execution, it doesn't re-run the choose
+    only_cancel = HANGS.replace(
+        "from A choose", "final Off cancelled {}\n  from A to Off on Cancel\n  from A choose"
+    )
+    assert "choose_can_hang" in _codes(only_cancel)
+
+
+def test_waiting_for_a_condition_is_a_valid_automatic_choose():
+    # every event handled in W re-drains it, so the choose is re-evaluated
+    source = """
+    event Update {}
+    machine M {
+      context { ready: bool }
+      initial W
+      state W {}
+      final Go success {}
+      from W choose { when context.ready == true to Go }
+      from W to W on Update set context.ready = true
+    }
+    """
+    assert "choose_can_hang" not in _codes(source)
+    runner, _, defn = _runner(source)
+    exe = runner.create(defn.id, context={"ready": False})
+    assert exe.active_path == "W"
+    assert runner.process(exe.id, Event(kind="Update")).active_path == "Go"
+
+
+def test_with_reads_declared_context_fields():
+    # the schema covers every execution of the machine, its regions' keys included
+    schema = "context { max: int  verdict: string?  limit: int?  seen: bool? }"
+    source = REGIONS.replace("machine M {", "machine M {\n  " + schema)
+    assert "unknown_context_field" not in _codes(source)
+    assert "unknown_context_field" in _codes(source.replace("with { limit: max }", "with { limit: maximum }"))

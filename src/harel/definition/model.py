@@ -147,7 +147,8 @@ class Node:
     carry: tuple[str, ...] = ()  # context keys a region propagates on its `Finished` (besides `outcome`)
     defer: frozenset[str] = frozenset()  # event kinds held (not dropped) while unhandled in this node's scope
     invoke: Optional[str] = None  # submachine FQN: entering this state runs that machine as a child
-    invoke_with: dict[str, str] = field(default_factory=dict)  # child-ctx-key -> parent-ctx-key (input)
+    invoke_with: dict[str, str] = field(default_factory=dict)  # `with`: child-ctx-key -> parent-ctx-key,
+    #   what an `invoke` child or each region of an orthogonal node starts with
     invoke_each: Optional[tuple[str, str]] = None  # (loop_var, collection_key): fan out ONE child per
     #                                                collection entry (addressed; join on completion)
     start_state: Optional[str] = None  # initial child name (composites)

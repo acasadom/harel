@@ -551,17 +551,21 @@ def _fork(exe: Execution, node: Node) -> Step:
     """Enter an orthogonal (AND) node: instead of descending, spawn one child
     Execution per region and stay positioned on the orthogonal node until they all
     finish (`_joined`). Regions share the parent's Definition and SEE the parent's
-    domain events (broadcast — UML semantics). Each region starts from a copy of the
-    parent's context as it is at the fork — so its guards and actions see what the
-    parent knew — and from then on the two evolve independently (a region reports back
-    through `carry`). Data-parallel fan-out (N independent, addressed workers) is a
+    domain events (broadcast — UML semantics). Each region starts with only what the
+    orthogonal node passes down with `with { child_key: parent_key }` (the same
+    projection as an `invoke`), copied from the parent's context at the fork — nothing
+    else, so a key a region reports back through `carry` is one it produced or was
+    explicitly given. Data-parallel fan-out (N independent, addressed workers) is a
     `fan-out invoke`, not this."""
     seq = exe.invoke_seq.get(node.full_path, 0)  # per-entry seq: a re-entry spawns fresh child ids
     exe.children = {}
     specs: list[ChildSpec] = []
     for child in node.children:
         cid = f"{exe.id}:{child.full_path}:{seq}"
-        specs.append(ChildSpec(child_id=cid, root_path=child.full_path, context=copy.deepcopy(exe.context)))
+        passed = {
+            ck: copy.deepcopy(exe.context[pk]) for ck, pk in node.invoke_with.items() if pk in exe.context
+        }
+        specs.append(ChildSpec(child_id=cid, root_path=child.full_path, context=passed))
         exe.children[cid] = ChildState(root_path=child.full_path, key=child.full_path)
     yield SpawnChildren(specs)
 

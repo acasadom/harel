@@ -67,8 +67,10 @@ Distinct problems, each a structured `Issue` (`severity`, `code`, `path`, `messa
   fires);
 - with a `context { ... }` schema, every `context.x` a guard, `choose` or `set` names is declared,
   and a `set` value fits the field's type (`/` yields a float); a `set` or `choose` guard reading
-  the event on an automatic transition — which has no event — is an error (see [the context in
-  the model](17-context)).
+  the event on an automatic transition — which has no event — is an error; so is an automatic
+  `choose` without `else` in a state nothing can re-run it from (see [the context in the
+  model](17-context));
+- a `with` anywhere but an `invoke` or an orthogonal node is a warning (nothing reads it).
 
 ## Fix it, and fail the build on errors
 

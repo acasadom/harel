@@ -420,6 +420,8 @@ def _check_context_ref(node: Node, field: str, op: str, defn: Definition, issues
 
 def _check_context_refs(defn: Definition, issues: list[Issue]) -> None:
     for node in defn.index.values():
+        for parent_key in node.invoke_with.values():  # what a `with` reads from this context
+            _check_context_ref(node, parent_key, "eq", defn, issues)
         for t in node.transitions:
             for leaf in _guard_leaves(t):
                 if leaf.source == "context" and leaf.field:
@@ -637,6 +639,64 @@ def _check_outcome(node: Node, issues: list[Issue]) -> None:
         )
 
 
+def _check_with(node: Node, issues: list[Issue]) -> None:
+    """`with` passes context to an `invoke` child or to each region of an orthogonal node;
+    anywhere else nothing reads it."""
+    if node.invoke_with and node.invoke is None and node.kind not in _ORTHOGONAL:
+        issues.append(
+            Issue(
+                "with_without_children",
+                "warning",
+                node.full_path,
+                "`with` has no effect here: it passes context to an `invoke` or to an orthogonal node's regions",
+            )
+        )
+
+
+def _can_rerun(source: Node) -> bool:
+    """Whether the execution can get past `source` other than through its automatic
+    transitions: a transition on an event (other than the teardown ones, which just end the
+    execution) from `source` — a step taken there re-drains, re-running them — or from an
+    enclosing state of the same execution, which leaves it; or an `on activity` hook, which an
+    event with no transition runs (and may change the context) before re-draining."""
+    if source.on_activity is not None:
+        return True
+    root = _execution_root_of(source)
+    node: Optional[Node] = source
+    while node is not None:
+        for t in _all_transitions_from(node):
+            kinds = (
+                {k.strip() for k in t.event_filter.kind.split("|")} if t.event_filter is not None else set()
+            )
+            if kinds - set(_TEARDOWN_EVENTS):
+                return True
+        if node is root:
+            break
+        node = node.parent
+    return False
+
+
+def _check_choose_can_hang(defn: Definition, issues: list[Issue]) -> None:
+    """An automatic `choose` with no `else` and no branch holding simply doesn't fire — fine
+    while something can re-run it, a dead end otherwise: the execution would sit in its
+    source forever. With an `else` it always fires."""
+    for node in defn.index.values():
+        for t in node.transitions:
+            if t.choice is None or t.event_filter is not None or t.choice.default is not None:
+                continue
+            if not _can_rerun(t.source):
+                issues.append(
+                    Issue(
+                        "choose_can_hang",
+                        "error",
+                        t.source.full_path,
+                        "an automatic `choose` without `else` can never be re-evaluated here (no "
+                        "event transition, no `on activity`): if no branch holds, the execution "
+                        "waits forever — add an `else`",
+                    )
+                )
+
+
 def _check_invoke(node: Node, issues: list[Issue]) -> None:
     """An `invoke` state is a black-box leaf. A SINGLE invoke parks until the
     submachine returns and routes on a `Returned` completion, so it must not have an
@@ -773,11 +833,13 @@ def validate(defn: Definition) -> list[Issue]:
         _check_timeout(node, issues)
         _check_outcome(node, issues)
         _check_invoke(node, issues)
+        _check_with(node, issues)
     _check_nondeterminism(defn, issues)
     _check_reachability(defn, issues)
     _check_events(defn, issues)
     _check_context_refs(defn, issues)
     _check_cancel_targets(defn, issues)
+    _check_choose_can_hang(defn, issues)
     _check_ttl(defn, issues)
     _check_terminal_outcomes(defn, issues)
     return issues
