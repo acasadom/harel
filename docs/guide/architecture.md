@@ -359,6 +359,12 @@ The `StoreConflict` path (not shown above) is the backstop: if two workers someh
 same group concurrently (lease expired, clock skew), the CAS in `commit` rejects the slower
 one, which `nack`s and lets the transport redeliver to a fresh worker with the correct version.
 
+Any other failure while handling a message — the store or the transport down, a bug — is logged by
+the worker's `run` loop with its traceback, and the message is `nack`ed to come back after
+`suspend_recheck` seconds (5 by default): soon enough for a passing outage, without spinning on one
+that persists. If that `nack` fails too, the message returns when its lease expires. (An action that
+raises is not this case: the driver routes it to `on error` or dead-letters the execution.)
+
 ### Async core, sync façade
 
 The engine in `core.py` is a **synchronous generator that does no IO** — it only `yield`s

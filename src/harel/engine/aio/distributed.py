@@ -251,13 +251,39 @@ class AsyncWorker:
     async def run(self, stop: asyncio.Event, idle_sleep: float = 0.005) -> None:
         """Loop until `stop` is set, driving up to `concurrency` events in flight at once.
         Per-group exclusivity (one in-flight per group) is the transport's claim; the
-        semaphore caps total concurrency. When the queue is empty, sweep due timers."""
+        semaphore caps total concurrency. When the queue is empty, sweep due timers.
+
+        A message whose handling raises (a store or transport outage, an engine bug — an
+        action's own error is the driver's to route, not this) is logged with its traceback
+        and nacked to come back after `suspend_recheck` seconds: soon enough for a transient
+        outage, without spinning on a failure that persists. If the nack fails too, the
+        message comes back when its lease expires."""
         sem = asyncio.Semaphore(self.concurrency)
         pending: set[asyncio.Task] = set()
 
         async def _run_one(lease) -> None:
             try:
                 await self._handle(lease)
+            except Exception:
+                logger.exception(
+                    "worker %s failed handling %s event %s for execution %s; retrying in %ss",
+                    self.worker_id,
+                    lease.event.kind,
+                    lease.event.id,
+                    lease.group_id,
+                    self.suspend_recheck,
+                )
+                try:
+                    await self.transport.nack(lease, delay=self.suspend_recheck)
+                except Exception:
+                    logger.exception(
+                        "worker %s could not nack %s event %s for execution %s; it is "
+                        "redelivered when its lease expires",
+                        self.worker_id,
+                        lease.event.kind,
+                        lease.event.id,
+                        lease.group_id,
+                    )
             finally:
                 sem.release()
 

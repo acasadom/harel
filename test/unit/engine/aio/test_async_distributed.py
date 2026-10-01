@@ -11,7 +11,7 @@ import logging
 import pytest
 
 from harel.dsl import definition_from_dsl
-from harel.engine.aio.distributed import AsyncDistributedRunner
+from harel.engine.aio.distributed import AsyncDistributedRunner, AsyncWorker
 from harel.engine.aio_store import AsyncDictStore
 from harel.engine.aio_transport import AsyncInMemoryTransport
 from harel.engine.execution import Status
@@ -312,3 +312,78 @@ async def test_a_tracing_runner_records_each_step_with_its_event():
         ["A.enter", "B.enter"],
         ["A.enter", "B.enter", "C.enter"],
     ]
+
+
+class _LoadFailsOnce(AsyncDictStore):
+    """Once armed, the next `load` raises — a store outage while a message is handled."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.armed = False
+
+    async def load(self, execution_id):
+        if self.armed:
+            self.armed = False
+            raise RuntimeError("store outage")
+        return await super().load(execution_id)
+
+
+class _NackFails(AsyncInMemoryTransport):
+    async def nack(self, lease, delay: float = 0.0) -> None:
+        raise RuntimeError("transport outage")
+
+
+async def _run_until(worker, done, timeout: float = 5.0) -> None:
+    import asyncio
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(worker.run(stop, idle_sleep=0.001))
+    try:
+        async with asyncio.timeout(timeout):
+            while not await done():
+                await asyncio.sleep(0.005)
+    finally:
+        stop.set()
+        await task
+
+
+async def test_run_logs_a_failed_message_and_retries_it(caplog):
+    """A message whose handling raises is logged with its traceback and nacked to come back
+    after `suspend_recheck`; the execution then moves on."""
+    defn = definition_from_dsl(FLAT, "M")
+    store = _LoadFailsOnce()
+    runner = AsyncDistributedRunner(store, AsyncInMemoryTransport(), {defn.id: defn})
+    exe = await runner.create(defn.id)
+    await _drain(runner)
+    await runner.send(exe.id, Event(kind="Go"))
+    store.armed = True  # the worker's load of the execution for that Go fails
+
+    worker = AsyncWorker(store, runner.transport, {defn.id: defn}, suspend_recheck=0.01)
+    with caplog.at_level(logging.ERROR):
+        await _run_until(worker, lambda: _is_at(store, exe.id, "C"))
+
+    failures = [r for r in caplog.records if "failed handling Go event" in r.getMessage()]
+    assert len(failures) == 1 and failures[0].exc_info is not None
+    assert "store outage" in caplog.text
+
+
+async def test_run_logs_a_failed_nack_and_the_lease_brings_the_message_back(caplog):
+    defn = definition_from_dsl(FLAT, "M")
+    store = _LoadFailsOnce()
+    transport = _NackFails()
+    runner = AsyncDistributedRunner(store, transport, {defn.id: defn})
+    exe = await runner.create(defn.id)
+    await _drain(runner)
+    await runner.send(exe.id, Event(kind="Go"))
+    store.armed = True  # the worker's load of the execution for that Go fails
+
+    worker = AsyncWorker(store, transport, {defn.id: defn}, visibility=0.05)
+    with caplog.at_level(logging.ERROR):
+        await _run_until(worker, lambda: _is_at(store, exe.id, "C"))
+
+    assert "could not nack Go event" in caplog.text
+    assert "transport outage" in caplog.text
+
+
+async def _is_at(store, execution_id: str, path: str) -> bool:
+    return (await AsyncDictStore.load(store, execution_id)).active_path == path  # not the armed load
