@@ -501,6 +501,19 @@ Pick `SqliteStore` when:
   exactly the model the engine assumes.
 - You want the simplest thing that survives a restart, or `:memory:` for fast tests.
 
+**Concurrency, measured.** One file has one writer at a time, so:
+
+- **Put the store and the [SQLite transport](../transports/sqlite) in separate files.** In one
+  file the store's commits and the queue's claims and acks wait for the same lock; on the
+  benchmark host a worker drained 15–55% faster with two files (and with one file, raising its
+  concurrency made it slower).
+- **More worker processes don't add throughput.** The write lock serializes them, and it isn't
+  fair: a process that finds it taken backs off with growing sleeps while the holder takes it
+  again at once, so one or two workers end up doing almost all the work. One worker process,
+  with in-flight concurrency, is the shape that suits SQLite.
+
+The numbers are in [`bench/RESULTS.md`](https://github.com/acasadom/harel/blob/main/bench/RESULTS.md).
+
 Reach for a **networked backend** instead when you need **many hosts** writing concurrently
 (horizontal scale, no shared filesystem): `PostgresStore` (same SQL shape, server-side CAS via
 `UPDATE ... WHERE version`) or `RqliteStore` (distributed SQLite over Raft). Those are the same

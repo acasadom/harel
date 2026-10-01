@@ -94,3 +94,10 @@ The global write-lock means claims **serialize** — perfect for one host or a s
 it won't let workers claim *different* groups in parallel. For that, use
 [Postgres](postgres) (`SKIP LOCKED`) or [Redis](redis). See the [transports hub](../transports)
 and [distribution](../distribution).
+
+Keep the queue in a **different file from the [SQLite store](../stores/sqlite)**: in one file the
+store's commits and the queue's claims and acks wait for the same lock. And run **one worker
+process**: more don't add throughput, and SQLite's lock isn't fair between processes, so one or two
+of them end up doing almost all the work. The claim's query also reads the whole `messages` table,
+so a long backlog makes every claim slower. Numbers in
+[`bench/RESULTS.md`](https://github.com/acasadom/harel/blob/main/bench/RESULTS.md).

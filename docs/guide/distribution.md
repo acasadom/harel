@@ -129,17 +129,15 @@ Two independent dials:
 
 Each backend's claim/commit is folded into the fewest round-trips it can be — an atomic Lua script
 on Redis, one sorted `find_one_and_update` on Mongo, a `plpgsql` function (`FOR UPDATE SKIP LOCKED`
-inside) on Postgres — because the per-worker limit is usually round-trips, not the server (a single
-Postgres/Redis sat at single-digit % CPU even at the top rates we measured).
+inside) on Postgres — because the per-worker limit is usually round-trips, not the server.
 
 ```{warning}
 The numbers in [`bench/RESULTS.md`](https://github.com/acasadom/harel/blob/main/bench/RESULTS.md)
-are **A/B comparisons on one laptop with the backends in Docker Desktop** — its VM/network proxy and
-the shared cores cap the *absolute* throughput, so the multi-worker plateau there is the **laptop**,
-not the backend. Read them as relative gains; a backend on native hardware / managed cloud, with
-workers on a multi-core host, scales far higher on a *single* instance before sharding is needed.
-Run `bench/bench_async.py`, `bench_workers.py`, `bench_shards.py` against your own backend for real
-numbers.
+were measured on **one 8-core laptop with the backends in Docker Desktop**, workers and backends
+sharing the cores — so a multi-worker plateau there is often the **laptop**, not the backend. Read
+them as relative; a backend on its own hardware, with workers on other machines, scales far higher
+on a *single* instance before sharding is needed. Run `bench/bench_async.py`, `bench_workers.py`,
+`bench_shards.py` against your own backend for real numbers.
 ```
 
 ### harel and durable-execution engines (illustrative)
@@ -157,17 +155,17 @@ point is the *shape* of the difference, not the ratio. Full caveats and the scri
 [`bench/RESULTS.md`](https://github.com/acasadom/harel/blob/main/bench/RESULTS.md).
 ```
 
-On the toy FSM (`Idle → Working → Done`), single process, same Postgres + laptop, measured the
-**same way for both** (timed window = enqueue *and* process every event):
+On a toy FSM (start, then one more event, then done), same Postgres + laptop, measured the
+**same way for both** — the timed window covers sending *and* processing every event, with the
+clients and the workers in separate processes:
 
-| | events/s |
-|---|---:|
-| harel-on-Postgres | ~800 |
-| DBOS — durable workflow + `send`/`recv` | ~390 |
-| DBOS — durable workflow per event | ~230 |
+| | best case | one worker process |
+|---|---:|---:|
+| harel-on-Postgres | ~900 events/s | ~860 events/s |
+| DBOS — durable workflow + `send`/`recv` | ~470–500 events/s (4 workers) | ~205 events/s |
 
-(harel scales further with more worker processes — ~2050 at 8 workers — but the single-process row is
-the like-for-like one here.) harel comes out ahead, but **that's the paradigm, not a verdict on
+(DBOS was still gaining at 4 worker processes, the most this host could run without them
+competing for cores.) harel comes out ahead, but **that's the paradigm, not a verdict on
 DBOS**: DBOS does full
 durable-*workflow* bookkeeping per event — workflow-status rows, automatic recovery of arbitrary
 imperative code, queues, `SERIALIZABLE` transactions — which is exactly what you want for "run these
