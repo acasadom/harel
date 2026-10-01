@@ -191,11 +191,13 @@ class LibsqlStore:
                 raise StoreConflict(exe.id, expected=old, found=found[0] if found else None)
 
     def save(self, exe: Execution) -> None:
+        old = exe.version
         try:
             self._write(exe)
             self._conn.commit()
-        except StoreConflict:
-            self._conn.rollback()
+        except BaseException:
+            self._conn.rollback()  # any failure: release the write lock, keep nothing
+            exe.version = old
             raise
 
     def commit(
@@ -207,6 +209,7 @@ class LibsqlStore:
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,
     ) -> list[int]:
+        old = exe.version
         try:
             self._write(exe)
             seqs = []
@@ -241,8 +244,9 @@ class LibsqlStore:
                 self._write_trace(exe.id, trace)
             self._conn.commit()
             return seqs
-        except StoreConflict:
-            self._conn.rollback()
+        except BaseException:
+            self._conn.rollback()  # any failure discards the whole batch and its write lock
+            exe.version = old
             raise
 
     def is_processed(self, execution_id: str, event_id: str) -> bool:
