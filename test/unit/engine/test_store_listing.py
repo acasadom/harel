@@ -1,5 +1,5 @@
-"""`ExecutionStore.list_executions` contract over every in-process backend (no Docker):
-Dict, Sqlite, RedisStore (fakeredis), MongoStore (mongomock), DynamoDBStore (moto).
+"""`list_executions` contract over every in-process backend, sync and async (no Docker):
+Dict, Sqlite, libSQL, Redis (fakeredis), Mongo (mongomock, sync only), DynamoDB (moto).
 The networked servers are covered in test/integration/ (stack).
 
 The shared seed + assertions live in `_listing_contract`; here we just build each store
@@ -7,8 +7,9 @@ and say whether its listing is order-stable (Redis/Dynamo Scan are unordered).
 """
 
 import pytest
-from listing_contract import assert_contract  # noqa: E402 (test-root bare import)
+from listing_contract import assert_async_contract, assert_contract
 
+from harel.engine.aio_store import AsyncDictStore, AsyncSqliteStore
 from harel.engine.store import DictStore, SqliteStore
 
 
@@ -48,3 +49,56 @@ def test_dynamodb_listing():
     with moto.mock_aws():
         # DynamoDB Scan is unordered
         assert_contract(DynamoDBStore(boto3.client("dynamodb", region_name="us-east-1")), ordered=False)
+
+
+def test_libsql_listing(tmp_path):
+    pytest.importorskip("libsql")
+    from harel.engine.store import LibsqlStore
+
+    store = LibsqlStore(str(tmp_path / "stm.db"))
+    try:
+        assert_contract(store, ordered=True)
+    finally:
+        store.close()
+
+
+async def test_async_dict_listing():
+    await assert_async_contract(AsyncDictStore(), ordered=True)
+
+
+async def test_async_sqlite_listing(tmp_path):
+    store = await AsyncSqliteStore.create(str(tmp_path / "stm.db"))
+    try:
+        await assert_async_contract(store, ordered=True)
+    finally:
+        await store.close()
+
+
+async def test_async_libsql_listing(tmp_path):
+    pytest.importorskip("libsql")
+    from harel.engine.aio_store import AsyncLibsqlStore
+
+    store = await AsyncLibsqlStore.create(str(tmp_path / "stm.db"))
+    try:
+        await assert_async_contract(store, ordered=True)
+    finally:
+        await store.close()
+
+
+async def test_async_redis_listing():
+    fakeredis = pytest.importorskip("fakeredis")
+    from harel.engine.aio_store import AsyncRedisStore
+
+    await assert_async_contract(AsyncRedisStore(fakeredis.aioredis.FakeRedis()), ordered=False)
+
+
+async def test_async_dynamodb_listing():
+    aiomoto = pytest.importorskip("aiomoto")
+    from harel.engine.aio_store import AsyncDynamoDBStore
+
+    async with aiomoto.mock_aws():
+        store = await AsyncDynamoDBStore.create(region="us-east-1")
+        try:
+            await assert_async_contract(store, ordered=False)
+        finally:
+            await store.close()

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
-from harel.engine.execution import Execution
+from harel.engine.execution import Execution, ExecutionPage, Status
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
 from harel.engine.store._base import (
     _IDS_WITH_PREFIX_SQL,
@@ -13,7 +13,10 @@ from harel.engine.store._base import (
     _PG_SCHEMA_LOCK,
     _PURGE_COMPANIONS_SQL,
     DEFAULT_TRACE_MAX,
+    _decode_offset,
     _like_prefix,
+    _listing_page,
+    _listing_sql_pg,
 )
 from harel.spec.states import Event
 
@@ -109,6 +112,25 @@ class AsyncPostgresStore:
                 row = await cur.fetchone()
             await conn.commit()
         return Execution.model_validate_json(row[0]) if row is not None else None
+
+    async def list_executions(
+        self,
+        *,
+        status: Optional[Iterable[Status]] = None,
+        definition_id: Optional[str] = None,
+        roots_only: bool = False,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> ExecutionPage:
+        """See `PostgresStore.list_executions`."""
+        off = _decode_offset(cursor)
+        sql, params = _listing_sql_pg(status, definition_id, roots_only, limit, off)
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, params)
+                rows = await cur.fetchall()
+            await conn.commit()  # end the read transaction
+        return _listing_page(rows, limit, off)
 
     async def load_for_event(self, execution_id: str, event_id: str) -> tuple[Optional[Execution], bool]:
         """Load the Execution and whether `event_id` is already processed in **one** round-trip

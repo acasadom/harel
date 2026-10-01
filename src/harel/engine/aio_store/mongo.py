@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import re
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
-from harel.engine.execution import Execution
+from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
-from harel.engine.store._base import DEFAULT_TRACE_MAX
+from harel.engine.store._base import DEFAULT_TRACE_MAX, _decode_offset, _encode_offset, _matches
 from harel.spec.states import Event
 
 
@@ -71,6 +72,32 @@ class AsyncMongoStore:
     async def load(self, execution_id: str) -> Optional[Execution]:
         doc = await self._exes.find_one({"_id": execution_id}, {"data": 1})
         return Execution.model_validate_json(doc["data"]) if doc is not None else None
+
+    async def list_executions(
+        self,
+        *,
+        status: Optional[Iterable[Status]] = None,
+        definition_id: Optional[str] = None,
+        roots_only: bool = False,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> ExecutionPage:
+        """See `MongoStore.list_executions`: definition_id filtered server-side, the rest
+        client-side from the `data` JSON."""
+        status = set(status) if status is not None else None
+        query: dict = {} if definition_id is None else {"definition_id": definition_id}
+        off = _decode_offset(cursor)
+        items: list[ExecutionSummary] = []
+        scanned = 0
+        async for doc in self._exes.find(query, {"version": 1, "data": 1}).sort("_id", 1).skip(off):
+            scanned += 1
+            summary = ExecutionSummary.from_data(json.loads(doc["data"]), doc.get("version", 0))
+            if _matches(summary, status, definition_id, roots_only):
+                items.append(summary)
+            if len(items) >= limit:
+                break
+        nxt = _encode_offset(off + scanned) if len(items) >= limit else None
+        return ExecutionPage(items=items, next_cursor=nxt)
 
     async def load_for_event(self, execution_id: str, event_id: str) -> tuple[Optional[Execution], bool]:
         """Load + dedupe-check in one round-trip: an aggregation projects `data` plus a

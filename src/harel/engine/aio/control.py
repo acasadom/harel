@@ -13,11 +13,20 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from harel import engine
 from harel.definition.model import Definition, NodeKind, is_descendant
-from harel.engine.control import _archive_bundle, _check_purgeable, _tree_of
+from harel.engine.control import (
+    _PURGEABLE,
+    PurgeRefused,
+    PurgeReport,
+    _archive_bundle,
+    _check_purgeable,
+    _purge_statuses,
+    _take_candidates,
+    _tree_of,
+)
 from harel.engine.execution import Execution, Status, stamp
 from harel.engine.store import StoreConflict, TimerOp
 from harel.spec.states import Event
@@ -214,6 +223,52 @@ async def purge(store: Any, execution_id: str, *, archive: Optional[Callable[[di
         await store.purge(cid, 0)  # sweep what an interrupted purge left behind (version unused when absent)
     await _purge_one(store, root)
     return True
+
+
+async def purge_finished(
+    store: Any,
+    *,
+    older_than: float,
+    statuses: Iterable[Status] = _PURGEABLE,
+    archive: Optional[Callable[[dict], Any]] = None,
+    include_undated: bool = False,
+    limit: Optional[int] = None,
+    dry_run: bool = False,
+    now: Optional[float] = None,
+) -> PurgeReport:
+    """Async mirror of `harel.engine.control.purge_finished` — see its docstring. `archive`
+    may be a plain function or a coroutine function."""
+    chosen = _purge_statuses(statuses)
+    cutoff = (time.time() if now is None else now) - older_than
+    report = PurgeReport()
+    candidates: list[str] = []
+    cursor: Optional[str] = None
+    while limit is None or len(candidates) < limit:
+        page = await store.list_executions(status=chosen, roots_only=True, limit=500, cursor=cursor)
+        _take_candidates(page.items, cutoff, include_undated, report, candidates)
+        cursor = page.next_cursor
+        if cursor is None:
+            break
+    candidates = candidates[:limit]
+    if dry_run:
+        for root_id in candidates:
+            root = await store.load(root_id)
+            if root is None:
+                continue
+            try:
+                _check_purgeable(root, (await _collect_tree(store, root))[0])
+            except PurgeRefused as exc:
+                report.refused[root_id] = str(exc)
+            else:
+                report.purged.append(root_id)
+        return report
+    for root_id in candidates:
+        try:
+            if await purge(store, root_id, archive=archive):
+                report.purged.append(root_id)
+        except (PurgeRefused, StoreConflict) as exc:  # anything else, e.g. the archiver, stops the run
+            report.refused[root_id] = str(exc)
+    return report
 
 
 async def _purge_one(store: Any, exe: Execution) -> None:

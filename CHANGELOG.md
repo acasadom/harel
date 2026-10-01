@@ -21,7 +21,7 @@ sees; read them before upgrading. Custom `ExecutionStore` implementations need t
     first. A tree with a member that isn't `DONE`/`CANCELLED` is refused (`PurgeRefused`).
   - `control.purge_finished(older_than=...)` and the `harel purge --older-than AGE` command purge
     finished trees by age (`--archive`, `--status`, `--limit`, `--dry-run`,
-    `--include-undated`). Sync stores only (it needs `list_executions`).
+    `--include-undated`); `aio.control.purge_finished` is the async one.
   - Executions record `created_at`, `updated_at` and `finished_at`; listings include
     `finished_at`.
   - `ttl <seconds>` at machine level expires a root execution after that long without a domain
@@ -75,6 +75,8 @@ For custom `ExecutionStore` / `AsyncExecutionStore` implementations:
   by it, iff the version still matches (#76).
 - **`ids_with_prefix(prefix) -> list[str]`**: the stored ids starting with `prefix`, matched
   literally (#82).
+- **`list_executions(...)`** is now part of the async protocol too (`AsyncExecutionStore`), as
+  `aio.control.purge_finished` needs it.
 - A stale copy's `commit` after a purge must raise `StoreConflict`, not recreate the
   execution (#76).
 

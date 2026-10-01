@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import copy
-from typing import Optional
+from typing import Iterable, Optional
 
-from harel.engine.execution import Execution
+from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
-from harel.engine.store._base import DEFAULT_TRACE_MAX
+from harel.engine.store._base import DEFAULT_TRACE_MAX, _decode_offset, _encode_offset, _matches
 from harel.spec.states import Event
 
 
@@ -49,6 +49,25 @@ class AsyncDictStore:
 
     async def load(self, execution_id: str) -> Optional[Execution]:
         return self._by_id.get(execution_id)
+
+    async def list_executions(
+        self,
+        *,
+        status: Optional[Iterable[Status]] = None,
+        definition_id: Optional[str] = None,
+        roots_only: bool = False,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> ExecutionPage:
+        """See `DictStore.list_executions`."""
+        status = set(status) if status is not None else None
+        summaries = [ExecutionSummary.of(e) for e in self._by_id.values()]
+        summaries = [s for s in summaries if _matches(s, status, definition_id, roots_only)]
+        summaries.sort(key=lambda s: s.id)  # stable order for deterministic pagination
+        off = _decode_offset(cursor)
+        window = summaries[off : off + limit]
+        nxt = _encode_offset(off + limit) if off + limit < len(summaries) else None
+        return ExecutionPage(items=window, next_cursor=nxt)
 
     async def save(self, exe: Execution) -> None:
         prev = self._by_id.get(exe.id)

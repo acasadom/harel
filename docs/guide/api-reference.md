@@ -58,6 +58,7 @@ DurableRunner(store, definitions, clock=time.time, resolver=None, trace=False)
 from harel.engine.control import purge_finished
 purge_finished(store, *, older_than, statuses=(DONE, CANCELLED), archive=None,
                include_undated=False, limit=None, dry_run=False, now=None) -> PurgeReport
+# async stores: harel.engine.aio.control.purge_finished, same arguments, awaited
 ```
 
 - `definitions` is a `{definition_id: Definition}` registry; inline `invoke` targets register

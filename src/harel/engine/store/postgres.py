@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Iterable, Optional
 
-from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
+from harel.engine.execution import Execution, ExecutionPage, Status
 from harel.engine.store._base import (
     _IDS_WITH_PREFIX_SQL,
     _PG_COMMIT_FN,
@@ -17,8 +17,9 @@ from harel.engine.store._base import (
     StoreConflict,
     TimerOp,
     _decode_offset,
-    _encode_offset,
     _like_prefix,
+    _listing_page,
+    _listing_sql_pg,
 )
 from harel.spec.states import Event
 
@@ -132,44 +133,13 @@ class PostgresStore:
         limit: int = 100,
         cursor: Optional[str] = None,
     ) -> ExecutionPage:
-        # `data` is TEXT, so cast to jsonb and extract the scalar summary fields with ->>
-        # (never select the heavy blob). status filtered with = ANY(array).
-        where: list[str] = ["TRUE"]
-        params: list[Any] = []
-        if definition_id is not None:
-            where.append("definition_id = %s")
-            params.append(definition_id)
-        if status is not None:
-            where.append("(data::jsonb->>'status') = ANY(%s)")
-            params.append([s.value for s in status])
-        if roots_only:
-            where.append("(data::jsonb->>'parent_id') IS NULL")
         off = _decode_offset(cursor)
+        sql, params = _listing_sql_pg(status, definition_id, roots_only, limit, off)
         with self._conn.cursor() as cur:
-            cur.execute(
-                "SELECT id, definition_id, version, data::jsonb->>'status', "
-                "data::jsonb->>'outcome', data::jsonb->>'active_path', data::jsonb->>'parent_id', "
-                "(data::jsonb->>'finished_at')::float8 "
-                f"FROM executions WHERE {' AND '.join(where)} ORDER BY id LIMIT %s OFFSET %s",
-                (*params, limit + 1, off),
-            )
+            cur.execute(sql, params)
             rows = cur.fetchall()
         self._conn.commit()  # end the read transaction
-        items = [
-            ExecutionSummary(
-                id=r[0],
-                definition_id=r[1],
-                version=r[2],
-                status=r[3],
-                outcome=r[4],
-                active_path=r[5],
-                parent_id=r[6],
-                finished_at=r[7],
-            )
-            for r in rows[:limit]
-        ]
-        nxt = _encode_offset(off + limit) if len(rows) > limit else None
-        return ExecutionPage(items=items, next_cursor=nxt)
+        return _listing_page(rows, limit, off)
 
     def save(self, exe: Execution) -> None:
         self.commit(exe, [])

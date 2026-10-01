@@ -55,7 +55,7 @@ from typing import Callable, Iterable, Optional
 
 from harel import engine
 from harel.definition.model import Definition, NodeKind, is_descendant
-from harel.engine.execution import Execution, Status, stamp
+from harel.engine.execution import Execution, ExecutionSummary, Status, stamp
 from harel.engine.store import ExecutionStore, StoreConflict, TimerOp
 from harel.spec.states import Event
 
@@ -430,6 +430,33 @@ class PurgeReport:
     refused: dict[str, str] = field(default_factory=dict)
 
 
+def _purge_statuses(statuses: Iterable[Status]) -> set[Status]:
+    """`purge_finished`'s `statuses`, checked to be a subset of the purgeable ones."""
+    chosen = set(statuses)
+    if not chosen <= set(_PURGEABLE):
+        raise ValueError(f"only {', '.join(s.name for s in _PURGEABLE)} executions can be purged")
+    return chosen
+
+
+def _take_candidates(
+    summaries: Iterable[ExecutionSummary],
+    cutoff: float,
+    include_undated: bool,
+    report: PurgeReport,
+    candidates: list[str],
+) -> None:
+    """Append to `candidates` the roots of a listing page that finished before `cutoff`
+    (shared with the async control plane); count the undated ones it skips in `report`."""
+    for summary in summaries:
+        if summary.finished_at is None:
+            if not include_undated:
+                report.skipped_undated += 1
+                continue
+        elif summary.finished_at >= cutoff:
+            continue
+        candidates.append(summary.id)
+
+
 def purge_finished(
     store: ExecutionStore,
     *,
@@ -449,23 +476,14 @@ def purge_finished(
     candidate `purge` refuses (a member still live, or changed concurrently) is recorded in
     `refused` and the run goes on; an archiver error aborts it. `limit` caps how many roots
     are purged; `dry_run` only reports them, applying the same whole-tree check."""
-    statuses = set(statuses)
-    if not statuses <= set(_PURGEABLE):
-        raise ValueError(f"only {', '.join(s.name for s in _PURGEABLE)} executions can be purged")
+    statuses = _purge_statuses(statuses)
     cutoff = (time.time() if now is None else now) - older_than
     report = PurgeReport()
     candidates: list[str] = []
     cursor: Optional[str] = None
     while limit is None or len(candidates) < limit:
         page = store.list_executions(status=statuses, roots_only=True, limit=500, cursor=cursor)
-        for summary in page.items:
-            if summary.finished_at is None:
-                if not include_undated:
-                    report.skipped_undated += 1
-                    continue
-            elif summary.finished_at >= cutoff:
-                continue
-            candidates.append(summary.id)
+        _take_candidates(page.items, cutoff, include_undated, report, candidates)
         cursor = page.next_cursor
         if cursor is None:
             break

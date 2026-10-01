@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
-from harel.engine.execution import Execution
+from harel.engine.execution import Execution, ExecutionPage, Status
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
 from harel.engine.store._base import (
     _IDS_WITH_PREFIX_SQL,
     _PURGE_COMPANIONS_SQL,
     DEFAULT_TRACE_MAX,
+    _decode_offset,
     _like_prefix,
+    _listing_page,
+    _listing_sql_sqlite,
 )
 from harel.spec.states import Event
 
@@ -120,6 +123,20 @@ class AsyncSqliteStore:
     async def load(self, execution_id: str) -> Optional[Execution]:
         rows = await self._fetchall("SELECT data FROM executions WHERE id = ?", (execution_id,))
         return Execution.model_validate_json(rows[0][0]) if rows else None
+
+    async def list_executions(
+        self,
+        *,
+        status: Optional[Iterable[Status]] = None,
+        definition_id: Optional[str] = None,
+        roots_only: bool = False,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> ExecutionPage:
+        """See `SqliteStore.list_executions`."""
+        off = _decode_offset(cursor)
+        sql, params = _listing_sql_sqlite(status, definition_id, roots_only, limit, off)
+        return _listing_page(await self._fetchall(sql, params), limit, off)
 
     async def load_for_event(self, execution_id: str, event_id: str) -> tuple[Optional[Execution], bool]:
         """Load + dedupe-check in one round-trip (the worker's per-event pair)."""

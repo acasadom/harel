@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
-from harel.engine.execution import Execution
+from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
-from harel.engine.store._base import _COMMIT_CAS_LUA, DEFAULT_TRACE_MAX
+from harel.engine.store._base import _COMMIT_CAS_LUA, DEFAULT_TRACE_MAX, _matches
 from harel.engine.store.redis import _glob_escape, _text, _timer_owner
 from harel.spec.states import Event
 
@@ -41,6 +41,31 @@ class AsyncRedisStore:
     async def load(self, execution_id: str) -> Optional[Execution]:
         raw = await self._r.get(self._k(f"exe:{execution_id}"))
         return Execution.model_validate_json(raw) if raw is not None else None
+
+    async def list_executions(
+        self,
+        *,
+        status: Optional[Iterable[Status]] = None,
+        definition_id: Optional[str] = None,
+        roots_only: bool = False,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> ExecutionPage:
+        """See `RedisStore.list_executions`: SCAN + MGET, filtered client-side; unordered,
+        and a page is best-effort sized — keep paging while `next_cursor` is set."""
+        status = set(status) if status is not None else None
+        cur = int(cursor) if cursor else 0
+        new_cur, keys = await self._r.scan(cursor=cur, match=self._k("exe:*"), count=max(limit, 20))
+        items = []
+        for raw in await self._r.mget(keys) if keys else []:
+            if not raw:
+                continue
+            data = json.loads(raw)
+            summary = ExecutionSummary.from_data(data, data.get("version", 0))
+            if _matches(summary, status, definition_id, roots_only):
+                items.append(summary)
+        items.sort(key=lambda s: s.id)  # within-page order only (no global order in SCAN)
+        return ExecutionPage(items=items, next_cursor=str(new_cur) if int(new_cur) != 0 else None)
 
     async def load_for_event(self, execution_id: str, event_id: str) -> tuple[Optional[Execution], bool]:
         """Load + dedupe-check in one round-trip: pipeline the GET and the SISMEMBER."""

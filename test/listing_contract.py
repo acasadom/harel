@@ -106,3 +106,62 @@ def assert_contract(store, *, ordered: bool, ns: str = "") -> None:
         two = store.list_executions(definition_id=d1, limit=2)
         assert len(two.items) <= 2
         assert [s.id for s in two.items] == sorted(n("e00", "e01", "e02", "e03", "e04"))[:2]
+
+
+# --- the same contract over an `AsyncExecutionStore` ----------------------------------
+async def seed_async(store, ns: str = "") -> tuple[str, str]:
+    d1, d2 = f"{ns}d1", f"{ns}d2"
+    defs = {"d1": d1, "d2": d2}
+    for suffix, which, status, parent in SEED:
+        await store.save(
+            Execution(
+                id=f"{ns}{suffix}",
+                definition_id=defs[which],
+                status=status,
+                parent_id=f"{ns}{parent}" if parent else None,
+                finished_at=FINISHED_AT if status is Status.DONE else None,
+            )
+        )
+    return d1, d2
+
+
+async def _ids_async(store, *, page=4, **filters) -> set:
+    ids, cursor, guard = [], None, 0
+    while True:
+        guard += 1
+        assert guard < 1000, "pagination did not terminate"
+        result = await store.list_executions(limit=page, cursor=cursor, **filters)
+        ids += [s.id for s in result.items]
+        if result.next_cursor is None:
+            break
+        cursor = result.next_cursor
+    return set(ids)
+
+
+async def assert_async_contract(store, *, ordered: bool, ns: str = "") -> None:
+    """`assert_contract` for an async store."""
+    d1, d2 = await seed_async(store, ns)
+    n = lambda *s: {f"{ns}{x}" for x in s}  # noqa: E731
+
+    assert await _ids_async(store, definition_id=d1) == n("e00", "e01", "e02", "e03", "e04")
+    assert await _ids_async(store, definition_id=d2, status=[Status.RUNNING]) == n("e05", "e06", "e10", "e11")
+    assert await _ids_async(store, definition_id=d2, status=[Status.DONE, Status.FAILED]) == n("e07", "e09")
+    assert await _ids_async(store, definition_id=d2, roots_only=True) == n("e05", "e06", "e07", "e08", "e09")
+    assert await _ids_async(store, definition_id=d2, status=[Status.RUNNING], roots_only=True) == n(
+        "e05", "e06"
+    )
+
+    one = (await store.list_executions(definition_id=d1, status=[Status.RUNNING], limit=1)).items[0]
+    assert one.definition_id == d1 and one.status == Status.RUNNING and one.parent_id is None
+    assert not hasattr(one, "context") and not hasattr(one, "history")
+    assert one.finished_at is None
+    done = (await store.list_executions(definition_id=d1, status=[Status.DONE], limit=10)).items
+    assert done and all(s.finished_at == FINISHED_AT for s in done)
+
+    if ordered:
+        page = await store.list_executions(definition_id=d1, limit=100)
+        ids = [s.id for s in page.items]
+        assert ids == sorted(ids)
+        two = await store.list_executions(definition_id=d1, limit=2)
+        assert len(two.items) <= 2
+        assert [s.id for s in two.items] == sorted(n("e00", "e01", "e02", "e03", "e04"))[:2]

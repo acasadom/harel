@@ -1,5 +1,5 @@
-"""`ExecutionStore.list_executions` contract against the REAL networked backends
-(Postgres / rqlite / Mongo / DynamoDB-on-LocalStack) in the stack.
+"""`list_executions` contract against the REAL networked backends (Postgres / rqlite /
+Mongo / DynamoDB-on-LocalStack), sync and async, in the stack.
 
 The in-process fakes are covered in test/unit/engine/test_store_listing.py; this runs
 the same shared contract (`listing_contract.assert_contract`) over a real server, gated
@@ -11,7 +11,7 @@ import os
 import uuid
 
 import pytest
-from listing_contract import assert_contract
+from listing_contract import assert_async_contract, assert_contract
 
 pytestmark = pytest.mark.stack
 
@@ -78,3 +78,55 @@ def test_dynamodb_listing():
         assert_contract(store, ordered=False, ns=_ns())  # Scan is unordered
     finally:
         store.close()
+
+
+def _env(backend: str, var: str) -> str:
+    if os.environ.get("STM_STORE_BACKEND") != backend:
+        pytest.skip(f"not the {backend} backend")
+    value = os.environ.get(var)
+    if not value:
+        pytest.skip(f"{var} not set")
+    return value
+
+
+async def test_async_postgres_listing():
+    from harel.engine.aio_store import AsyncPostgresStore
+
+    store = await AsyncPostgresStore.from_dsn(_env("postgres", "STM_POSTGRES_DSN"))
+    try:
+        await assert_async_contract(store, ordered=True, ns=_ns())
+    finally:
+        await store.close()
+
+
+async def test_async_rqlite_listing():
+    from harel.engine.aio_store import AsyncRqliteStore
+
+    store = await AsyncRqliteStore.from_url(_env("rqlite", "STM_RQLITE_URL"))
+    try:
+        await assert_async_contract(store, ordered=True, ns=_ns())
+    finally:
+        await store.close()
+
+
+async def test_async_mongo_listing():
+    from harel.engine.aio_store import AsyncMongoStore
+
+    store = await AsyncMongoStore.from_url(
+        _env("mongo", "STM_MONGO_URL"), os.environ.get("STM_MONGO_DB", "harel")
+    )
+    try:
+        await assert_async_contract(store, ordered=True, ns=_ns())
+    finally:
+        await store.close()
+
+
+async def test_async_dynamodb_listing():
+    from harel.engine.aio_store import AsyncDynamoDBStore
+
+    endpoint = _env("dynamodb", "STM_DYNAMODB_ENDPOINT")
+    store = await AsyncDynamoDBStore.create(endpoint, os.environ.get("STM_AWS_REGION", "us-east-1"))
+    try:
+        await assert_async_contract(store, ordered=False, ns=_ns())  # Scan is unordered
+    finally:
+        await store.close()
