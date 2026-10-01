@@ -102,7 +102,9 @@ class AsyncTransportDriver(_AsyncRuntimeDriver):
             await self.store.commit(exe, [], processed_event_id=event.id, timers=timers)
             enqueued = False  # broadcast went straight to the transport; nothing in the outbox
         else:
-            enqueued = await self._run(exe, engine.process(self.defn, exe, event), event_id=event.id)
+            enqueued = await self._run(
+                exe, engine.process(self.defn, exe, event), event_id=event.id, event=event
+            )
         # only run the relay (its HGETALL round-trips) when this event actually enqueued
         # outbox/spawn work — most events emit nothing. Orphans from a crash are still drained
         # by the next emitting event's relay and by `recover()` on startup (the idle loop never

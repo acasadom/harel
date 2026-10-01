@@ -291,3 +291,24 @@ async def test_async_start_can_seed_the_context_with_its_own_data():
     started = await store.load(exe.id)
     assert started.status is Status.RUNNING
     assert started.context["tenant"] == "acme"
+
+
+async def test_a_tracing_runner_records_each_step_with_its_event():
+    defn = definition_from_dsl(FLAT, "M")
+    store = AsyncDictStore()
+    runner = AsyncDistributedRunner(store, AsyncInMemoryTransport(), {defn.id: defn}, trace=True)
+
+    exe = await runner.create(defn.id)
+    await _drain(runner)
+    await runner.send(exe.id, Event(kind="Go"))
+    await _drain(runner)
+
+    steps = await store.read_trace(exe.id)
+    assert [(s["event_kind"], s["from_path"], s["to_path"]) for s in steps] == [
+        ("Start", None, "B"),
+        ("Go", "B", "C"),
+    ]
+    assert [s["context_out"]["trace"] for s in steps] == [
+        ["A.enter", "B.enter"],
+        ["A.enter", "B.enter", "C.enter"],
+    ]

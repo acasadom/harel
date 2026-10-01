@@ -68,6 +68,30 @@ def _drain(worker):
         pass
 
 
+def test_a_tracing_runner_gives_its_worker_the_trace(backend):
+    """`DistributedRunner(trace=True)`: its worker records each step it processes, with the
+    event that drove it."""
+    store, transport = backend
+    defn = definition_from_dsl(FLAT, "M")
+    runner = DistributedRunner(store, transport, {defn.id: defn}, trace=True)
+
+    exe = runner.create(defn.id)
+    _drain(runner.worker())
+    runner.send(exe.id, Event(kind="Go"))
+    _drain(runner.worker())
+
+    steps = store.read_trace(exe.id)
+    assert [(s["event_kind"], s["from_path"], s["to_path"]) for s in steps] == [
+        ("Start", None, "B"),
+        ("Go", "B", "C"),
+    ]
+    # each step keeps the context as it was then, not as later actions left it
+    assert [s["context_out"]["trace"] for s in steps] == [
+        ["A.enter", "B.enter"],
+        ["A.enter", "B.enter", "C.enter"],
+    ]
+
+
 def test_flat_advances_through_the_transport(backend):
     store, transport = backend
     defn = definition_from_dsl(FLAT, "M")
