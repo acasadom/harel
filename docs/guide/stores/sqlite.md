@@ -219,11 +219,13 @@ def commit(self, exe, emits, processed_event_id=None, timers=(), spawns=(), trac
     try:
         self._write(exe)                                   # 1. CAS the Execution (no commit yet)
 
+        seqs = []
         for target_id, event in emits:                     # 2. enqueue emitted events (outbox)
-            self._conn.execute(
+            cur = self._conn.execute(
                 "INSERT INTO outbox (target_id, event) VALUES (?, ?)",
                 (target_id, event.model_dump_json()),
             )
+            seqs.append(cur.lastrowid)                     #    each entry's seq, for the caller
 
         if processed_event_id is not None:                 # 3. record this event handled (dedupe)
             self._conn.execute(
@@ -253,6 +255,7 @@ def commit(self, exe, emits, processed_event_id=None, timers=(), spawns=(), trac
             self._write_trace(exe.id, trace)
 
         self._conn.commit()                                # 7. ONE commit: all-or-nothing
+        return seqs
     except BaseException:
         self._conn.rollback()                              # any failure: discard the whole batch
         exe.version = old

@@ -143,7 +143,7 @@ class MongoStore:
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,  # execution-trace deferred for this backend (accepted, ignored)
-    ) -> None:
+    ) -> list[int]:
         # allocate monotonic seqs up front (one find_one_and_update each; a seq
         # wasted by a lost CAS is harmless), then build the embedded entries
         outbox_entries: list[dict] = []
@@ -194,9 +194,10 @@ class MongoStore:
         if unset_ops:
             update["$unset"] = unset_ops
 
+        seqs = [entry["seq"] for entry in outbox_entries]
         res = self._exes.update_one({"_id": exe.id, "version": old}, update)
         if res.matched_count == 1:
-            return  # CAS won
+            return seqs  # CAS won
 
         # no document at version=old: either a brand-new Execution or a stale write
         existing = self._exes.find_one({"_id": exe.id}, {"version": 1})
@@ -214,7 +215,7 @@ class MongoStore:
             }
             try:
                 self._exes.insert_one(doc)
-                return
+                return seqs
             except self._DuplicateKeyError:
                 existing = self._exes.find_one({"_id": exe.id}, {"version": 1})
         exe.version = old  # undo the in-memory bump; the commit did not happen

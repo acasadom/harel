@@ -218,9 +218,10 @@ not a second copy), which is exactly the at-least-once dedupe semantics.
 `version`**:
 
 ```text
+seqs = [entry["seq"] for entry in outbox_entries]
 res = self._exes.update_one({"_id": exe.id, "version": old}, update)
 if res.matched_count == 1:
-    return  # CAS won
+    return seqs  # CAS won: the outbox seqs, in emits order
 ```
 
 If `matched_count == 1`, a document at exactly `version == old` existed and was updated — **this writer
@@ -244,7 +245,7 @@ if existing is None and old == 0:
     }
     try:
         self._exes.insert_one(doc)
-        return
+        return seqs
     except self._DuplicateKeyError:
         existing = self._exes.find_one({"_id": exe.id}, {"version": 1})
 exe.version = old  # undo the in-memory bump; the commit did not happen

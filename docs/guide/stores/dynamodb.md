@@ -224,6 +224,7 @@ except self._ClientError as exc:
                              ProjectionExpression="version")
     found = int(self._item(resp["Item"])["version"]) if "Item" in resp else None
     raise StoreConflict(exe.id, expected=old, found=found)
+return [o["seq"] for o in outbox]  # the seqs allocated up front, in emits order
 ```
 
 Two error codes are treated as a conflict: DynamoDB raises **`TransactionCanceledException`** when

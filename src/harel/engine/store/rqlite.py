@@ -154,7 +154,7 @@ class RqliteStore:
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,
-    ) -> None:
+    ) -> list[int]:
         old = exe.version
         exe.version = old + 1  # bump BEFORE dumping so the stored JSON carries the new version
         new = exe.version
@@ -278,7 +278,8 @@ class RqliteStore:
             exe.version = old  # CAS missed: undo the in-memory bump (nothing was written)
             found = self._query("SELECT version FROM executions WHERE id = ?", (exe.id,))
             raise StoreConflict(exe.id, expected=old, found=found[0][0] if found else None)
-        # success: exe.version is already `new`
+        # success: exe.version is already `new`; the outbox inserts are statements 1..len(emits)
+        return [int(r["last_insert_id"]) for r in results[1 : 1 + len(emits)]]
 
     def is_processed(self, execution_id: str, event_id: str) -> bool:
         rows = self._query(

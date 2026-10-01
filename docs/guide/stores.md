@@ -17,9 +17,9 @@ a twin under `harel/engine/aio_store/` (same data model, awaited IO):
 | --- | --- |
 | `load(id)` / `load_for_event(id, event_id)` | rehydrate the Execution (the latter folds the dedupe check into the same round-trip) |
 | `save(exe)` | persist with the version CAS (raises `StoreConflict` on a stale write) |
-| `commit(exe, emits, processed_event_id, timers, spawns, trace)` | the **one atomic write per event** — the Execution + outbox + dedupe + timer ops + spawn intents + (opt-in) trace step, all-or-nothing |
+| `commit(exe, emits, processed_event_id, timers, spawns, trace)` | the **one atomic write per event** — the Execution + outbox + dedupe + timer ops + spawn intents + (opt-in) trace step, all-or-nothing; returns the `seq` of each outbox entry it enqueued, in `emits` order |
 | `is_processed(id, event_id)` | dedupe lookup |
-| `pending_outbox()` / `ack_outbox(seq)` | the relay drains emitted events |
+| `pending_outbox()` / `ack_outbox(seq)` | the relay drains emitted events (a caller that delivers an entry itself acks it by the `seq` `commit` returned) |
 | `pending_spawns()` / `ack_spawn(seq)` | the relay drains orthogonal child-creation intents |
 | `due_timers(now)` / `delete_timer(id, path, fire_at)` | the timer sweep |
 | `read_trace(id)` / `append_trace(id, entry)` | the opt-in execution timeline (see below) |

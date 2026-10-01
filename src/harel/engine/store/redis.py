@@ -94,12 +94,12 @@ class RedisStore:
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,
-    ) -> None:
+    ) -> list[int]:
         # fast path: an event that only advances state (no emits/spawns/timers/trace) commits
         # in ONE atomic round-trip — version-CAS + SET + optional dedupe — instead of WATCH/MULTI.
         if not emits and not spawns and not timers and trace is None:
             self._commit_cas(exe, processed_event_id)
-            return
+            return []
         # allocate monotonic outbox seqs up front (INCR can't return its value
         # inside MULTI; a seq wasted by an aborted txn is harmless)
         queued = [(int(self._r.incr(self._k("outbox:seq"))), t, e.model_dump_json()) for t, e in emits]
@@ -144,6 +144,7 @@ class RedisStore:
                     if self.trace_max:
                         pipe.ltrim(tkey, -self.trace_max, -1)  # ring: keep the last N
                 pipe.execute()
+                return [seq for seq, _, _ in queued]
             except self._WatchError:
                 exe.version = old  # a concurrent writer won between WATCH and EXEC
                 raise StoreConflict(exe.id, expected=old, found=None)

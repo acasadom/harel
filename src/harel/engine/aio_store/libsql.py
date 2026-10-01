@@ -68,9 +68,9 @@ class AsyncLibsqlStore:
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,
-    ) -> None:
+    ) -> list[int]:
         async with self._lock:
-            await asyncio.to_thread(
+            return await asyncio.to_thread(
                 self._s.commit,
                 exe,
                 emits,

@@ -221,12 +221,15 @@ class ExecutionStore(Protocol):
         timers: "tuple[TimerOp, ...]" = (),
         spawns: "tuple[tuple[str, str, dict], ...]" = (),
         trace: "Optional[dict]" = None,
-    ) -> None:
+    ) -> list[int]:
         """Atomically `save` the Execution, enqueue its emitted events into the
         outbox, record `processed_event_id` as handled (if given), apply the
         `timers` mutations, and enqueue the `spawns` (orthogonal child creations,
         each `(child_id, root_path, context)`). Either all happen or none — so a
         fork's children + the parent's join expectations commit atomically.
+
+        Returns the `seq` of each outbox entry it enqueued, in `emits` order — what a
+        caller that delivers one of them itself passes to `ack_outbox`.
 
         `trace` (opt-in execution-trace, off by default): one step to append to the
         execution's timeline (event/transition/actions/context_out + a stamped `index`),

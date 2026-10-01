@@ -118,7 +118,8 @@ here means it all runs without interleaving. Step by step:
 1. **CAS first** — `self.save(exe)`. This raises `StoreConflict` *before* any emit is
    enqueued, so a losing writer never pollutes the outbox.
 2. **Outbox append** — for each `(target_id, event)` in `emits`: bump `_seq`, append
-   `OutboxEntry(self._seq, target_id, event)`. Deferred delivery, post-save.
+   `OutboxEntry(self._seq, target_id, event)`. Deferred delivery, post-save. `commit` returns
+   these seqs, in `emits` order.
 3. **Dedupe** — if `processed_event_id is not None`, add `(exe.id, processed_event_id)` to
    `_processed`, marking the just-handled event so a redelivery is skipped.
 4. **Timer ops** — for each `TimerOp` in `timers`: `schedule` sets

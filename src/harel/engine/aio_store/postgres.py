@@ -138,12 +138,12 @@ class AsyncPostgresStore:
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,
-    ) -> None:
+    ) -> list[int]:
         # fast path: a state-only event (no emits/spawns/timers/trace) commits in ONE atomic
         # round-trip via the version-CAS function — instead of UPDATE + (SELECT/INSERT) + INSERT.
         if not emits and not spawns and not timers and trace is None:
             await self._commit_cas(exe, processed_event_id)
-            return
+            return []
         old = exe.version
         exe.version = old + 1
         data = exe.model_dump_json()
@@ -168,11 +168,14 @@ class AsyncPostgresStore:
                                 exe.version = old
                                 await conn.rollback()
                                 raise StoreConflict(exe.id, expected=old, found=row[0] if row else None)
+                        seqs = []
                         for target_id, event in emits:
                             await cur.execute(
-                                "INSERT INTO outbox (target_id, event) VALUES (%s, %s)",
+                                "INSERT INTO outbox (target_id, event) VALUES (%s, %s) RETURNING seq",
                                 (target_id, event.model_dump_json()),
                             )
+                            row = await cur.fetchone()
+                            seqs.append(row[0])
                         if processed_event_id is not None:
                             await cur.execute(
                                 "INSERT INTO processed_events (execution_id, event_id) VALUES (%s, %s) "
@@ -200,6 +203,7 @@ class AsyncPostgresStore:
                         if trace is not None:
                             await self._write_trace(cur, exe.id, trace)
                     await conn.commit()
+                    return seqs
                 except StoreConflict:
                     raise
                 except Exception:

@@ -97,7 +97,7 @@ class AsyncMongoStore:
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,
-    ) -> None:
+    ) -> list[int]:
         outbox_entries: list[dict] = []
         if emits:
             base = await self._next_seq("outbox", len(emits))
@@ -143,9 +143,10 @@ class AsyncMongoStore:
         if unset_ops:
             update["$unset"] = unset_ops
 
+        seqs = [entry["seq"] for entry in outbox_entries]
         res = await self._exes.update_one({"_id": exe.id, "version": old}, update)
         if res.matched_count == 1:
-            return  # CAS won
+            return seqs  # CAS won
 
         existing = await self._exes.find_one({"_id": exe.id}, {"version": 1})
         if existing is None and old == 0:
@@ -162,7 +163,7 @@ class AsyncMongoStore:
             }
             try:
                 await self._exes.insert_one(doc)
-                return
+                return seqs
             except self._DuplicateKeyError:
                 existing = await self._exes.find_one({"_id": exe.id}, {"version": 1})
         exe.version = old
