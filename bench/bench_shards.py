@@ -19,7 +19,7 @@ Usage (4 independent Redis instances on 4 ports):
 redis://localhost:6381/0,redis://localhost:6382/0 \\
         --shards 1,2,4 --n-executions 3000 --concurrency 64
 
-Method mirrors bench_workers: setup (create + publish the per-shard backlog) is not
+Method mirrors bench_workers: setup (create + start + send the per-shard backlog) is not
 measured; only the drain is, detected per worker by its ack counter going quiet
 (`--grace`). Aggregate = total_events / (last_ack − first_ack) across all shards.
 """
@@ -35,12 +35,11 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # import sibling bench modules
 
-from bench_async import _DSL  # noqa: E402
+from bench_async import _DSL, _create_all, _enqueue_all  # noqa: E402
 from bench_workers import _redis_pool, _worker_proc  # noqa: E402
 
 from harel.dsl import definition_from_dsl  # noqa: E402
 from harel.engine.aio.distributed import AsyncDistributedRunner  # noqa: E402
-from harel.spec.states import Event  # noqa: E402
 
 
 async def _setup_shard(redis_url: str, n: int, concurrency: int) -> None:
@@ -57,13 +56,9 @@ async def _setup_shard(redis_url: str, n: int, concurrency: int) -> None:
     store = AsyncRedisStore(raw)
     transport = AsyncRedisTransport(aioredis.Redis.from_url(redis_url, max_connections=conns))
     try:
-        defn = definition_from_dsl(_DSL, "Bench")
+        defn = definition_from_dsl(_DSL, "Bench", validate=True)
         runner = AsyncDistributedRunner(store, transport, {defn.id: defn})
-        ids = [(await runner.create(defn.id)).id for _ in range(n)]
-        for eid in ids:
-            await runner.send(eid, Event(kind="Start"))
-        for eid in ids:
-            await runner.send(eid, Event(kind="Finish"))
+        await _enqueue_all(runner, await _create_all(runner, defn, n))
     finally:
         await store.close()
         await transport.close()
