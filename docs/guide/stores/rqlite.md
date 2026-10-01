@@ -234,7 +234,9 @@ The whole list goes in `transaction=True`, so it is atomic — and because every
 guarded on the same condition, a CAS miss makes *all* of them no-ops, not just the CAS write. The
 store then inspects `results[0]` (the CAS write): if its `rows_affected` is 0 the CAS lost, so it
 rolls the in-memory version back to `old` (nothing was persisted) and raises `StoreConflict`,
-querying the stored version for the error's `found`. On success `exe.version` is already `new`.
+querying the stored version for the error's `found`. On success `exe.version` is already `new`,
+and `commit` returns the outbox seqs: the `last_insert_id` of each outbox statement (statements
+`1..len(emits)`, right after the CAS write).
 
 `save(exe)` is just `commit(exe, [])` — a CAS with no side-writes.
 

@@ -392,19 +392,36 @@ class AsyncDistributedRunner:
         backlog, encountered first in that scan, would abort before this exe's own
         entry is even attempted, and get logged as *this* exe's Start failing).
 
+        Once published, the entry is acked, as `_flush` does with each one it
+        delivers — otherwise it would sit in the outbox and be published again by the
+        next flush.
+
         A failed direct publish must not raise: `exe` is already durably committed
         above, so the Start stays queued for the next flush anywhere in the fleet to
         pick up (see `route`'s comment on orphan draining) — raising here would cost
-        the caller the very id they'd need to retry via `start(execution_id)`."""
+        the caller the very id they'd need to retry via `start(execution_id)`. A
+        failed ack doesn't raise either: the entry is published again by a later
+        flush, and the copy is dropped by the dedupe on the Start's event id."""
         event = Event(kind="Start", data=dict(data or {}))
         stamp(exe, self._clock())
-        await self.store.commit(exe, [(exe.id, event)])
+        seqs = await self.store.commit(exe, [(exe.id, event)])
         try:
             await self.transport.publish(exe.id, event, priority=exe.priority)
         except Exception:
             logger.warning(
                 "could not immediately publish the Start for execution %s; it is "
                 "durably queued and will be delivered by a later flush",
+                exe.id,
+                exc_info=True,
+            )
+            return
+        try:
+            for seq in seqs:
+                await self.store.ack_outbox(seq)
+        except Exception:
+            logger.warning(
+                "published the Start for execution %s but could not ack its outbox "
+                "entry; a later flush publishes it again, and the copy is dropped",
                 exe.id,
                 exc_info=True,
             )

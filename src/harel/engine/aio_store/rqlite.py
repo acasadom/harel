@@ -117,7 +117,7 @@ class AsyncRqliteStore:
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,
-    ) -> None:
+    ) -> list[int]:
         old = exe.version
         exe.version = old + 1
         new = exe.version
@@ -229,6 +229,8 @@ class AsyncRqliteStore:
             exe.version = old
             found = await self._query("SELECT version FROM executions WHERE id = ?", (exe.id,))
             raise StoreConflict(exe.id, expected=old, found=found[0][0] if found else None)
+        # success: exe.version is already `new`; the outbox inserts are statements 1..len(emits)
+        return [int(r["last_insert_id"]) for r in results[1 : 1 + len(emits)]]
 
     async def is_processed(self, execution_id: str, event_id: str) -> bool:
         rows = await self._query(

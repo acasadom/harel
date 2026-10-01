@@ -166,7 +166,7 @@ Opt-in (off by default); a ring capped at `trace_max` steps per execution — se
 def commit(self, exe, emits, processed_event_id=None, timers=(), spawns=(), trace=None):
     if not emits and not spawns and not timers and trace is None:
         self._commit_cas(exe, processed_event_id)   # fast path: one round-trip via harel_commit_cas
-        return
+        return []                                   # no emits: no outbox seqs
     # ... otherwise the multi-statement path below
 ```
 
@@ -196,11 +196,13 @@ try:
                 exe.version = old
                 self._conn.rollback()
                 raise StoreConflict(exe.id, expected=old, found=row[0] if row else None)
+        seqs = []
         for target_id, event in emits:
             cur.execute(
-                "INSERT INTO outbox (target_id, event) VALUES (%s, %s)",
+                "INSERT INTO outbox (target_id, event) VALUES (%s, %s) RETURNING seq",
                 (target_id, event.model_dump_json()),
             )
+            seqs.append(cur.fetchone()[0])
         if processed_event_id is not None:
             cur.execute(
                 "INSERT INTO processed_events (execution_id, event_id) VALUES (%s, %s) "
@@ -227,6 +229,7 @@ try:
         if trace is not None:
             self._write_trace(cur, exe.id, trace)
     self._conn.commit()
+    return seqs
 except StoreConflict:
     raise
 except Exception:

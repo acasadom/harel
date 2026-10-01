@@ -170,6 +170,78 @@ async def test_create_does_not_drain_unrelated_backlog():
     assert len(marker_entries) == 1
 
 
+async def _relay(runner: AsyncDistributedRunner, execution_id: str) -> None:
+    """A flush, as any later step anywhere in the fleet runs one."""
+    driver, _ = await runner._driver_for(execution_id)
+    await driver._flush()
+
+
+async def test_create_and_start_leave_no_start_in_the_outbox():
+    """A Start delivered directly is acked, as the outbox relay acks what it delivers:
+    nothing is left for a later flush to publish again."""
+    defn = definition_from_dsl(FLAT, "M")
+    store = AsyncDictStore()
+    runner = AsyncDistributedRunner(store, AsyncInMemoryTransport(), {defn.id: defn})
+
+    for _ in range(3):
+        await runner.create(defn.id)
+    later = await runner.create(defn.id, start_on_create=False)
+    await runner.start(later.id)
+    assert await store.pending_outbox() == []
+
+    await _drain(runner)
+    assert await store.pending_outbox() == []
+
+
+async def test_a_failed_publish_leaves_the_start_for_the_relay(caplog):
+    """When the direct publish fails, the Start stays in the outbox, and a later flush
+    delivers (and acks) it."""
+    defn = definition_from_dsl(FLAT, "M")
+    store = AsyncDictStore()
+    runner = AsyncDistributedRunner(store, _FlakyOncePublish(), {defn.id: defn})
+
+    with caplog.at_level(logging.WARNING):
+        exe = await runner.create(defn.id)
+    assert [(e.target_id, e.event.kind) for e in await store.pending_outbox()] == [(exe.id, "Start")]
+
+    await _relay(runner, exe.id)
+    assert await store.pending_outbox() == []
+    await _drain(runner)
+    assert (await store.load(exe.id)).active_path == "B"
+
+
+class _AckFailsOnce(AsyncDictStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.armed = True
+
+    async def ack_outbox(self, seq: int) -> None:
+        if self.armed:
+            self.armed = False
+            raise RuntimeError("store outage")
+        await super().ack_outbox(seq)
+
+
+async def test_a_failed_ack_does_not_raise_and_the_republished_start_is_dropped(caplog):
+    """A Start published but not acked is published again by a later flush; the
+    execution processes it once."""
+    defn = definition_from_dsl(FLAT, "M")
+    store = _AckFailsOnce()
+    runner = AsyncDistributedRunner(store, AsyncInMemoryTransport(), {defn.id: defn})
+
+    with caplog.at_level(logging.WARNING):
+        exe = await runner.create(defn.id)  # published; the ack raises internally
+    assert "could not ack its outbox entry" in caplog.text
+    assert len(await store.pending_outbox()) == 1
+
+    await _relay(runner, exe.id)  # publishes the same Start again
+    assert await store.pending_outbox() == []
+    await _drain(runner)
+    final = await store.load(exe.id)
+    assert final.active_path == "B"
+    assert final.context["trace"] == ["A.enter", "B.enter"]  # started once
+
+
 async def test_start_survives_a_transient_publish_failure(caplog):
     """start() shares create()'s _persist_start helper, so it gets the same
     durability guarantee: a failed immediate delivery leaves the Start durably

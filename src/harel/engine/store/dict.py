@@ -98,11 +98,13 @@ class DictStore:
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,
-    ) -> None:
+    ) -> list[int]:
         self.save(exe)  # CAS first: raises before any emit is enqueued
+        seqs = []
         for target_id, event in emits:
             self._seq += 1
             self._outbox.append(OutboxEntry(self._seq, target_id, event))
+            seqs.append(self._seq)
         if processed_event_id is not None:
             self._processed.add((exe.id, processed_event_id))
         for op in timers:
@@ -115,6 +117,7 @@ class DictStore:
             self._spawns.append(SpawnEntry(self._spawn_seq, exe.id, child_id, root_path, dict(context)))
         if trace is not None:
             self._record_trace(exe.id, trace)
+        return seqs
 
     def is_processed(self, execution_id: str, event_id: str) -> bool:
         return (execution_id, event_id) in self._processed

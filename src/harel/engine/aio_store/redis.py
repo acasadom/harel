@@ -63,12 +63,12 @@ class AsyncRedisStore:
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,
-    ) -> None:
+    ) -> list[int]:
         # fast path: an event that only advances state (no emits/spawns/timers/trace) commits
         # in ONE atomic round-trip — version-CAS + SET + optional dedupe — instead of WATCH/MULTI.
         if not emits and not spawns and not timers and trace is None:
             await self._commit_cas(exe, processed_event_id)
-            return
+            return []
         queued = [(int(await self._r.incr(self._k("outbox:seq"))), t, e.model_dump_json()) for t, e in emits]
         queued_spawns = [
             (int(await self._r.incr(self._k("spawns:seq"))), cid, rp, ctx) for cid, rp, ctx in spawns
@@ -110,6 +110,7 @@ class AsyncRedisStore:
                     if self.trace_max:
                         pipe.ltrim(tkey, -self.trace_max, -1)  # ring: keep the last N
                 await pipe.execute()
+                return [seq for seq, _, _ in queued]
             except self._WatchError:
                 exe.version = old
                 raise StoreConflict(exe.id, expected=old, found=None)

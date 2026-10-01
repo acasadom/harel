@@ -202,14 +202,16 @@ def commit(
     timers: tuple[TimerOp, ...] = (),
     spawns: tuple[tuple[str, str, dict], ...] = (),
     trace: Optional[dict] = None,
-) -> None:
+) -> list[int]:
     try:
         self._write(exe)
+        seqs = []
         for target_id, event in emits:
-            self._conn.execute(
+            cur = self._conn.execute(
                 "INSERT INTO outbox (target_id, event) VALUES (?, ?)",
                 (target_id, event.model_dump_json()),
             )
+            seqs.append(cur.lastrowid)
         if processed_event_id is not None:
             self._conn.execute(
                 "INSERT OR IGNORE INTO processed_events (execution_id, event_id) VALUES (?, ?)",
@@ -234,6 +236,7 @@ def commit(
         if trace is not None:
             self._write_trace(exe.id, trace)
         self._conn.commit()
+        return seqs
     except StoreConflict:
         self._conn.rollback()
         raise
@@ -245,7 +248,9 @@ Statement by statement:
    `StoreConflict`, the whole transaction is rolled back and the error re-raised — nothing else in
    the batch is applied.
 2. **Outbox** — for each `(target_id, event)`, `INSERT INTO outbox (target_id, event)`. The
-   `seq` auto-increments. These are the deferred events the relay delivers post-commit.
+   `seq` auto-increments, and `commit` returns the new seqs in `emits` order (so a caller that
+   delivers an entry itself can ack it). These are the deferred events the relay delivers
+   post-commit.
 3. **Dedupe** — if `processed_event_id` is given, `INSERT OR IGNORE INTO processed_events`. The
    `OR IGNORE` makes recording the handled event idempotent against the PK (a re-delivery is a
    no-op).
@@ -463,9 +468,9 @@ A representative method shows the pattern (every method follows it): take the lo
 ```text
 async def commit(
     self, exe, emits, processed_event_id=None, timers=(), spawns=(), trace=None
-) -> None:
+) -> list[int]:
     async with self._lock:
-        await asyncio.to_thread(
+        return await asyncio.to_thread(
             self._s.commit, exe, emits,
             processed_event_id=processed_event_id, timers=timers, spawns=spawns, trace=trace,
         )

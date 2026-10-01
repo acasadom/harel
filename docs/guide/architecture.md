@@ -322,12 +322,10 @@ sequenceDiagram
   participant E as Engine (core)
 
   C->>DR: create(definition_id, context)
-  DR->>TD: start(exe)
-  TD->>E: start(defn, exe)
-  TD->>S: commit(exe v1, emits, timers, spawns)
-  TD->>TD: _flush() publish outbox to transport, create children
-  DR->>S: load(exe.id)
-  DR-->>C: Execution committed, worker not yet involved
+  DR->>S: commit(exe PENDING, emits=[Start])   %% the Start is in the outbox
+  DR->>T: publish(exe.id, Start, priority)
+  DR->>S: ack_outbox(seq)   %% delivered: off the outbox
+  DR-->>C: Execution committed, a worker runs its Start
 
   C->>DR: send(exe.id, event)
   DR->>S: load(exe.id)   %% read priority

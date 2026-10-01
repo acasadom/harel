@@ -81,7 +81,7 @@ async def test_concurrent_commits_on_one_store_do_not_interleave_transactions(tm
 
     results = await asyncio.gather(store.commit(a, []), store.commit(b, []), return_exceptions=True)
 
-    assert sorted(type(r).__name__ for r in results) == ["NoneType", "StoreConflict"]
+    assert sorted(type(r).__name__ for r in results) == ["StoreConflict", "list"]
     assert any(isinstance(r, StoreConflict) for r in results)
     assert not store._conn.in_transaction
     assert (await store.load("same")).version == 1

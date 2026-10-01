@@ -195,7 +195,7 @@ class AsyncDynamoDBStore:
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,  # execution-trace deferred for this backend (accepted, ignored)
-    ) -> None:
+    ) -> list[int]:
         from decimal import Decimal
 
         # allocate monotonic seqs up front (a seq wasted by a cancelled txn is harmless)
@@ -307,6 +307,7 @@ class AsyncDynamoDBStore:
             )
             found = int(self._item(resp["Item"])["version"]) if "Item" in resp else None
             raise StoreConflict(exe.id, expected=old, found=found)
+        return [o["seq"] for o in outbox]
 
     async def is_processed(self, execution_id: str, event_id: str) -> bool:
         resp = await self._db.get_item(

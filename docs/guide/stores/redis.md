@@ -97,7 +97,7 @@ There are two paths, picked by what the commit carries:
 def commit(self, exe, emits, processed_event_id=None, timers=(), spawns=(), trace=None):
     if not emits and not spawns and not timers and trace is None:
         self._commit_cas(exe, processed_event_id)   # fast path: one atomic Lua round-trip
-        return
+        return []                                   # no emits: no outbox seqs
     # ... otherwise the WATCH/MULTI/EXEC path below
 ```
 
@@ -173,6 +173,7 @@ atomic unit (and only if the watched key is untouched):
             if self.trace_max:
                 pipe.ltrim(tkey, -self.trace_max, -1)  # ring: keep the last N
         pipe.execute()
+        return [seq for seq, _, _ in queued]  # the outbox seqs, in emits order
     except self._WatchError:
         exe.version = old  # a concurrent writer won between WATCH and EXEC
         raise StoreConflict(exe.id, expected=old, found=None)
