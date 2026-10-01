@@ -12,13 +12,16 @@ Usage:
         python bench/bench_async.py --n-executions 100 --concurrency 1,4,16,64,256
 
 The machine used has one async IO-bound action (anyio.sleep) so the benchmark
-measures the real async speedup — not pure CPU overhead.
+measures the real async speedup — not pure CPU overhead. Each execution takes two
+events: its `Start` (which enters Working and runs the action) and a `Finish`.
 
 Options:
     --n-executions N    number of parallel machines per run (default 200)
     --concurrency C     comma-separated concurrency levels to sweep (default 1,4,16,64,256)
     --no-sleep          skip the async sleep in the action (measures pure overhead)
-    --pool-size N       Postgres connection pool size (default: concurrency * 2 + 4)
+    --pool-size N       Postgres connection pool size (default: (concurrency + producers) * 2 + 4)
+    --e2e               time the enqueue too (end-to-end), not just the drain
+    --producers K       with --e2e: enqueue from K concurrent coroutines (default 1)
 """
 
 from __future__ import annotations
@@ -39,19 +42,21 @@ from harel.engine.aio.distributed import AsyncDistributedRunner, AsyncWorker
 from harel.spec.states import Event
 
 # ---------------------------------------------------------------------------
-# Benchmark machine — Idle → Working (async IO action) → Done
+# Benchmark machine — Start enters Working (async IO action), Finish ends it
 # ---------------------------------------------------------------------------
 
 _DSL = """
+event Finish {}
+
 machine Bench {
-  initial Idle
-  state Idle {}
+  initial Working
   state Working { on enter bench_actions.sleep_io }
-  state Done {}
-  from Idle to Working on Start
+  final Done success {}
   from Working to Done on Finish
 }
 """
+
+EVENTS_PER_EXECUTION = 2  # Start + Finish
 
 # ---------------------------------------------------------------------------
 # Action module injected at runtime
@@ -59,24 +64,40 @@ machine Bench {
 
 
 def _make_actions(use_sleep: bool) -> Any:
+    """The `bench_actions` module the machine binds to; `calls` counts the action's runs."""
     import types
 
-    mod = types.SimpleNamespace()
+    import anyio
 
-    if use_sleep:
-        import anyio
+    mod = types.SimpleNamespace(calls=0)
 
-        async def sleep_io(stm: Any) -> None:
+    async def sleep_io(stm: Any, event: Event) -> None:
+        mod.calls += 1
+        if use_sleep:
             await anyio.sleep(0.01)
 
-        mod.sleep_io = sleep_io
-    else:
-
-        async def noop(stm: Any) -> None:
-            pass
-
-        mod.sleep_io = noop
+    mod.sleep_io = sleep_io
     return mod
+
+
+async def _create_all(runner: AsyncDistributedRunner, defn: Any, n: int) -> list[str]:
+    """Create n executions without starting them: nothing reaches the transport yet."""
+    return [(await runner.create(defn.id, start_on_create=False)).id for _ in range(n)]
+
+
+async def _enqueue_all(runner: AsyncDistributedRunner, exe_ids: list[str], producers: int = 1) -> None:
+    """Start then Finish per execution; FIFO-per-group delivers the Start first, so each
+    execution is RUNNING (in Working) by the time its Finish is processed. The executions
+    are split across `producers` concurrent coroutines, each enqueueing its share in order
+    — one producer is a single sequential client; more model many clients at once."""
+
+    async def produce(ids: list[str]) -> None:
+        for eid in ids:
+            await runner.start(eid)
+        for eid in ids:
+            await runner.send(eid, Event(kind="Finish"))
+
+    await asyncio.gather(*(produce(exe_ids[k::producers]) for k in range(producers)))
 
 
 # ---------------------------------------------------------------------------
@@ -128,8 +149,7 @@ async def _build_transport(pg_pool_size: int, redis_pool_size: int) -> Any:
 class _AckCounter:
     """Wraps a transport, counting `ack`s; fires `done` when `target` acks are seen.
     This is the whole measurement instrument — one increment per processed event, no
-    polling probe and no sleeps in the measured path (the old probe-drain loop stole
-    work and added fixed 50ms latency per idle check, capping the apparent rate)."""
+    polling probe and no sleeps in the measured path. Everything else is delegated."""
 
     def __init__(self, inner: Any, target: int) -> None:
         self._inner = inner
@@ -137,23 +157,14 @@ class _AckCounter:
         self.count = 0
         self.done = asyncio.Event()
 
-    async def publish(self, group_id: str, event: Event) -> None:
-        await self._inner.publish(group_id, event)
-
-    async def claim(self, worker_id: str, visibility: float) -> Any:
-        return await self._inner.claim(worker_id, visibility)
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
 
     async def ack(self, lease: Any) -> None:
         await self._inner.ack(lease)
         self.count += 1
         if self.count >= self._target:
             self.done.set()
-
-    async def nack(self, lease: Any, delay: float = 0.0) -> None:
-        await self._inner.nack(lease, delay)
-
-    async def close(self) -> None:
-        await self._inner.close()
 
 
 async def _run_once(
@@ -163,42 +174,35 @@ async def _run_once(
     n: int,
     concurrency: int,
     e2e: bool = False,
+    producers: int = 1,
 ) -> tuple[float, float]:
     """Throughput for n machines × 2 events (Start, Finish). `create` is always setup
-    (not measured). By default we then pre-load the backlog (also setup) and time only the
-    worker draining it. With `e2e=True` the publish is *inside* the timed window too
-    (enqueue + process), which is how a durable-execution engine like DBOS is measured
-    (send + process) — use it for an apples-to-apples cross-engine comparison. End detected
-    by counting acks (no probe). Returns (elapsed_seconds, events_per_second)."""
-    counting = _AckCounter(transport, target=n * 2)
+    (not measured, and publishes nothing). By default we then pre-load the backlog (also
+    setup) and time only the worker draining it. With `e2e=True` the start + send are
+    *inside* the timed window too (enqueue + process), which is how a durable-execution
+    engine like DBOS is measured (send + process) — use it for an apples-to-apples
+    cross-engine comparison; `producers` sets how many coroutines enqueue at once (with
+    one, the rate is bounded by that single client's round-trips, not by the worker). End
+    detected by counting acks (no probe). Returns (elapsed_seconds, events_per_second)."""
+    counting = _AckCounter(transport, target=n * EVENTS_PER_EXECUTION)
     runner = AsyncDistributedRunner(store, counting, {defn.id: defn})
 
-    # setup (never measured): create the executions
-    exe_ids = [(await runner.create(defn.id)).id for _ in range(n)]
-
-    async def _publish_all() -> None:
-        # Start then Finish per group; FIFO-per-group delivers Start first, so the worker
-        # advances Idle->Working->Done in order (Finish queues behind Start).
-        for eid in exe_ids:
-            await runner.send(eid, Event(kind="Start"))
-        for eid in exe_ids:
-            await runner.send(eid, Event(kind="Finish"))
-
+    exe_ids = await _create_all(runner, defn, n)  # setup (never measured)
     if not e2e:
-        await _publish_all()  # pre-load the backlog as setup (drain-only measurement)
+        await _enqueue_all(runner, exe_ids, producers)  # pre-load the backlog as setup (drain-only)
 
     stop = asyncio.Event()
     worker = AsyncWorker(store, counting, {defn.id: defn}, concurrency=concurrency)
     t0 = time.perf_counter()
     drain_task = asyncio.create_task(worker.run(stop))
     if e2e:
-        await _publish_all()  # enqueue is part of the timed window (end-to-end)
+        await _enqueue_all(runner, exe_ids, producers)  # enqueue is timed too (end-to-end)
     await counting.done.wait()
     elapsed = time.perf_counter() - t0
 
     stop.set()
     await drain_task
-    return elapsed, (n * 2) / elapsed
+    return elapsed, (n * EVENTS_PER_EXECUTION) / elapsed
 
 
 # ---------------------------------------------------------------------------
@@ -210,11 +214,15 @@ _ROW = "{:>12}  {:>12.0f}  {:>12.2f}  {:>12}".format
 
 
 async def _main(args: argparse.Namespace) -> None:
-    defn = definition_from_dsl(_DSL, "Bench")
+    defn = definition_from_dsl(_DSL, "Bench", validate=True)
 
     backend_store = os.environ.get("STM_STORE_BACKEND", "redis")
     backend_transport = os.environ.get("STM_TRANSPORT_BACKEND", backend_store)
-    mode = "end-to-end (enqueue+process timed)" if args.e2e else "drain-only (enqueue is setup)"
+    mode = (
+        f"end-to-end (enqueue+process timed, {args.producers} producers)"
+        if args.e2e
+        else "drain-only (enqueue is setup)"
+    )
     print(
         f"store={backend_store}  transport={backend_transport}  n={args.n_executions}  "
         f"sleep={not args.no_sleep}  mode={mode}"
@@ -225,7 +233,8 @@ async def _main(args: argparse.Namespace) -> None:
     levels = [int(c) for c in args.concurrency.split(",")]
 
     for level in levels:
-        pg_pool_size = args.pool_size if args.pool_size else level * 2 + 4
+        # the producers share the runner's store/transport pools with the worker
+        pg_pool_size = args.pool_size if args.pool_size else (level + args.producers) * 2 + 4
         # Redis pipelines need one connection each; size for both worker concurrency and
         # the n_executions fan-out during setup (gather of sends).
         redis_pool_size = max(pg_pool_size, args.n_executions) + 10
@@ -233,12 +242,14 @@ async def _main(args: argparse.Namespace) -> None:
         transport = await _build_transport(pg_pool_size, redis_pool_size)
 
         try:
-            elapsed, eps = await _run_once(defn, store, transport, args.n_executions, level, args.e2e)
+            elapsed, eps = await _run_once(
+                defn, store, transport, args.n_executions, level, args.e2e, args.producers
+            )
         finally:
             await store.close()
             await transport.close()
 
-        print(_ROW(level, eps, elapsed, args.n_executions * 2))
+        print(_ROW(level, eps, elapsed, args.n_executions * EVENTS_PER_EXECUTION))
 
     print()
 
@@ -258,10 +269,18 @@ def main() -> None:
         action="store_true",
         help="time enqueue+process (end-to-end), not drain-only — apples-to-apples with DBOS",
     )
+    parser.add_argument(
+        "--producers",
+        type=int,
+        default=1,
+        metavar="K",
+        help="coroutines enqueueing at once (1 = one sequential client)",
+    )
     args = parser.parse_args()
+    if args.producers < 1:
+        parser.error("--producers must be at least 1")
 
     # register bench_actions so the DSL runner resolves it
-
     bench_mod = _make_actions(not args.no_sleep)
     sys.modules["bench_actions"] = bench_mod  # type: ignore[assignment]
 
