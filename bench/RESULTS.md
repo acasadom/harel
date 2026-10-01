@@ -1,6 +1,8 @@
 # Benchmark results
 
-Measured on 2026-10-01 with the benchmarks in this directory, at the commit that added this file.
+Measured on 2026-10-01 with the benchmarks in this directory, at the commit that added this file;
+the SQLite rows were measured again the same day once its transport's claim stopped scanning the
+backlog (see [SQLite's claim](#sqlites-claim)).
 
 ## Read this first
 
@@ -27,13 +29,13 @@ runs, events/s; Redis varied the most between runs, so its range is given.
 |---|---:|---:|---:|
 | Redis | 1488 (1359–1593) | 2582 (2355–3600) | 2963 (1463–3278) |
 | Postgres | 488 | 940 | 999 |
-| SQLite | 675 | 725 | 688 |
+| SQLite | 1053 | 1101 | 1133 |
 | Mongo | 321 | 493 | 491 |
 | rqlite | 130 | 146 | 139 |
 
 - Postgres and Mongo gain about 2× up to c=16 and stay there.
 - rqlite barely gains: every operation is an HTTP request through Raft consensus.
-- SQLite doesn't gain either: one writer at a time per file.
+- SQLite gains little: one writer at a time per file.
 
 ### SQLite: separate files or one
 
@@ -41,11 +43,26 @@ The same run with the store and the transport in **one** file:
 
 | SQLite | c=1 | c=16 | c=64 |
 |---|---:|---:|---:|
-| two files | 675 | 725 | 688 |
-| one file | 592 | 467 | 493 |
+| two files | 1053 | 1101 | 1133 |
+| one file | 1025 | 702 | 828 |
 
-With one file the store's commits and the queue's claims and acks wait for the same write lock,
-and concurrency makes it worse. Give them a file each.
+With one file the store's commits and the queue's claims and acks wait for the same write lock:
+level with one event in flight, behind with more. Give them a file each.
+
+### SQLite's claim
+
+The SQLite transport's claim used to read every pending message to pick one, so it slowed as the
+backlog grew. It now walks the groups in claim order on an index and stops at the first one with
+nothing in flight. Same run, before and after (two files):
+
+| One worker | c=1 | c=16 | c=64 |
+|---|---:|---:|---:|
+| before, 1000 executions | 705 | 758 | 765 |
+| after, 1000 executions | 1053 | 1101 | 1133 |
+| before, 4000 executions | 340 | 351 | 357 |
+| after, 4000 executions | 975 | 1097 | 1107 |
+
+The rate no longer depends on the backlog: 4000 executions go as fast as 1000.
 
 ## 2. Worker processes on one backend
 
@@ -58,8 +75,8 @@ two runs). W worker processes drain a pre-loaded backlog; events/s across all of
 | Postgres | 728 | 1142 | 1073 | 1122 | even |
 | Mongo | 433 | 731 | 1005 | 1136 | even |
 | rqlite | 117 | 197 | 237 | 298 | even |
-| SQLite (two files) | 441 | 466 | 433 | 450 | very uneven, e.g. 8 w: [8, 18, 5, 219, 15, 85, 1620, 2030] |
-| SQLite (one file) | 371 | 379 | 397 | 367 | very uneven |
+| SQLite (two files) | 1068 | 1003 | 795 | 974 | very uneven, e.g. 8 w: [7, 165, 554, 333, 380, 1137, 68, 1356] |
+| SQLite (one file) | 771 | 804 | 772 | 782 | very uneven |
 
 - **Redis** about doubles with a second worker and levels off at 7–8k events/s from 4: 8 worker
   processes on 8 cores, shared with Redis and Docker, leave no CPU to spare.
@@ -69,9 +86,8 @@ two runs). W worker processes drain a pre-loaded backlog; events/s across all of
   workers overlap.
 - **SQLite doesn't scale with processes.** One writer per file, and its lock isn't fair: a
   process that finds it taken backs off with growing sleeps, while the holder takes it again
-  at once, so one or two workers end up doing almost everything. The claim also scans the
-  whole message table, so it slows as the backlog grows (one worker: 441 events/s with 2000
-  executions here, about 700 with 1000 in section 1).
+  at once, so one or two workers end up doing almost everything. Fairer waiting wouldn't add
+  throughput — the lock serializes them either way — so run one worker process.
 
 ## 3. End to end, and harel next to DBOS
 

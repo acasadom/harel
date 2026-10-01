@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS groups (
   last_claimed_at REAL NOT NULL DEFAULT 0.0,  -- epoch of last claim (0 = never claimed) — round-robin
   priority        INT  NOT NULL DEFAULT 0     -- set on first publish; 0–4
 )
+CREATE INDEX IF NOT EXISTS groups_by_last_claimed ON groups (last_claimed_at)  -- the claim's walk
+CREATE INDEX IF NOT EXISTS messages_by_group ON messages (group_id, seq)       -- a group's head / in flight
 ```
 
 `(locked_by, lock_expiry)` is the **lease**. The `groups` table drives **round-robin fairness**
@@ -47,12 +49,13 @@ selection is race-free) select the oldest-claimed deliverable group and lease it
 ```text
 BEGIN IMMEDIATE
 SELECT m.seq, m.group_id, m.event
-  FROM messages m JOIN groups g ON g.group_id = m.group_id
-  WHERE (m.locked_by IS NULL OR m.lock_expiry < ?)          -- message free / lease lapsed (recovery)
-    AND m.group_id NOT IN (                                  -- group has nothing in flight
-      SELECT group_id FROM messages WHERE locked_by IS NOT NULL AND lock_expiry >= ?)
-    AND g.priority >= ?                                      -- priority floor (min_priority)
-  ORDER BY g.last_claimed_at ASC, m.seq ASC LIMIT 1         -- oldest-claimed group first (round-robin)
+  FROM groups g
+  JOIN messages m ON m.seq = (SELECT MIN(seq) FROM messages WHERE group_id = g.group_id)  -- its head
+  WHERE g.priority >= ?                                      -- priority floor (min_priority)
+    AND NOT EXISTS (                                         -- group has nothing in flight
+      SELECT 1 FROM messages x WHERE x.group_id = g.group_id
+        AND x.locked_by IS NOT NULL AND x.lock_expiry >= ?)  -- (a lapsed lease or park doesn't count)
+  ORDER BY g.last_claimed_at, g.rowid LIMIT 1               -- oldest-claimed group first, ties by arrival
 -- if a row matched:
 UPDATE groups SET last_claimed_at = ? WHERE group_id = ?    -- record claim time (round-robin)
 UPDATE messages SET locked_by = ?, lock_expiry = now+visibility WHERE seq = ?

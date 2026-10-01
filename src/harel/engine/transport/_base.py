@@ -13,6 +13,26 @@ from harel.spec.states import Event
 # claim's "available"/in-flight checks skip it) until its `lock_expiry` passes.
 _PARKED = "__parked__"
 
+# The SQLite-dialect claim (SQLite and libSQL transports, sync and async), run inside
+# BEGIN IMMEDIATE: the group that waited longest (`last_claimed_at`, 0 = never claimed; ties
+# by arrival) with nothing in flight, and its head — its oldest message. It walks `groups` in
+# that order and stops at the first eligible one, so its cost doesn't grow with the backlog.
+# A group with nothing in flight has a free head: unlocked, or its lease or park ended.
+# Params: (min_priority, now).
+_SQLITE_CLAIM_SQL = (
+    "SELECT m.seq, m.group_id, m.event FROM groups g "
+    "JOIN messages m ON m.seq = (SELECT MIN(seq) FROM messages WHERE group_id = g.group_id) "
+    "WHERE g.priority >= ? AND NOT EXISTS ("
+    "  SELECT 1 FROM messages x WHERE x.group_id = g.group_id "
+    "  AND x.locked_by IS NOT NULL AND x.lock_expiry >= ?"
+    ") ORDER BY g.last_claimed_at, g.rowid LIMIT 1"
+)
+# what `_SQLITE_CLAIM_SQL` (and ack's empty-group check) walk
+_SQLITE_TRANSPORT_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS groups_by_last_claimed ON groups (last_claimed_at)",
+    "CREATE INDEX IF NOT EXISTS messages_by_group ON messages (group_id, seq)",
+)
+
 # The Redis `publish`, server-side and atomic (shared by the sync + async backends). Pushes
 # the payload onto the group's FIFO, fixes the group's priority on the FIRST publish (HSETNX,
 # clamped to 0..4), and readies it (score 0) in the ZSET of ITS priority tier (`ready:{prio}`)
