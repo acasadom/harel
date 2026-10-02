@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
@@ -46,7 +47,9 @@ class DictStore:
         idx = self._trace_idx.get(execution_id, 0)
         self._trace_idx[execution_id] = idx + 1
         steps = self._trace.setdefault(execution_id, [])
-        steps.append({**entry, "index": entry.get("index", idx)})
+        # a deep copy, as a serializing backend stores it: the step must not share the live
+        # context's lists and dicts, which later actions keep mutating
+        steps.append({**copy.deepcopy(entry), "index": entry.get("index", idx)})
         if self.trace_max and len(steps) > self.trace_max:  # ring: keep only the last N
             del steps[: len(steps) - self.trace_max]
 

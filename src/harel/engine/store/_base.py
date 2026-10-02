@@ -123,6 +123,80 @@ def _matches(summary: ExecutionSummary, status, definition_id, roots_only) -> bo
     return True
 
 
+# `list_executions` on the SQL backends: only the scalar summary fields come out of the JSON
+# blob (never `data` itself); status/outcome/active_path/parent_id/finished_at live inside it.
+# One extra row is fetched to know whether there is a next page.
+_SUMMARY_COLUMNS_SQLITE = (
+    "id, definition_id, version, json_extract(data,'$.status'), json_extract(data,'$.outcome'), "
+    "json_extract(data,'$.active_path'), json_extract(data,'$.parent_id'), "
+    "json_extract(data,'$.finished_at')"
+)
+_SUMMARY_COLUMNS_PG = (
+    "id, definition_id, version, data::jsonb->>'status', data::jsonb->>'outcome', "
+    "data::jsonb->>'active_path', data::jsonb->>'parent_id', (data::jsonb->>'finished_at')::float8"
+)
+
+
+def _listing_sql_sqlite(
+    status: Optional[Iterable[Status]], definition_id: Optional[str], roots_only: bool, limit: int, off: int
+) -> tuple[str, tuple]:
+    """The listing query for the SQLite dialect (SQLite, libSQL, rqlite) and its params."""
+    where, params = ["1=1"], []
+    if definition_id is not None:
+        where.append("definition_id = ?")
+        params.append(definition_id)
+    if status is not None:
+        statuses = [s.value for s in status]
+        where.append(f"json_extract(data,'$.status') IN ({','.join('?' * len(statuses))})")
+        params += statuses
+    if roots_only:
+        where.append("json_extract(data,'$.parent_id') IS NULL")
+    sql = (
+        f"SELECT {_SUMMARY_COLUMNS_SQLITE} FROM executions "
+        f"WHERE {' AND '.join(where)} ORDER BY id LIMIT ? OFFSET ?"
+    )
+    return sql, (*params, limit + 1, off)
+
+
+def _listing_sql_pg(
+    status: Optional[Iterable[Status]], definition_id: Optional[str], roots_only: bool, limit: int, off: int
+) -> tuple[str, tuple]:
+    """The listing query for Postgres (`data` is TEXT, cast to jsonb) and its params."""
+    where: list[str] = ["TRUE"]
+    params: list = []
+    if definition_id is not None:
+        where.append("definition_id = %s")
+        params.append(definition_id)
+    if status is not None:
+        where.append("(data::jsonb->>'status') = ANY(%s)")
+        params.append([s.value for s in status])
+    if roots_only:
+        where.append("(data::jsonb->>'parent_id') IS NULL")
+    sql = (
+        f"SELECT {_SUMMARY_COLUMNS_PG} FROM executions "
+        f"WHERE {' AND '.join(where)} ORDER BY id LIMIT %s OFFSET %s"
+    )
+    return sql, (*params, limit + 1, off)
+
+
+def _listing_page(rows: list, limit: int, off: int) -> ExecutionPage:
+    """An `ExecutionPage` from the rows of a listing query (the extra row means more)."""
+    items = [
+        ExecutionSummary(
+            id=r[0],
+            definition_id=r[1],
+            version=r[2],
+            status=r[3],
+            outcome=r[4],
+            active_path=r[5],
+            parent_id=r[6],
+            finished_at=r[7],
+        )
+        for r in rows[:limit]
+    ]
+    return ExecutionPage(items=items, next_cursor=_encode_offset(off + limit) if len(rows) > limit else None)
+
+
 @dataclass
 class OutboxEntry:
     """A deferred event awaiting delivery: `seq` (monotonic, for ack), the

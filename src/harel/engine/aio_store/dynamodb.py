@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 from contextlib import AsyncExitStack
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
-from harel.engine.execution import Execution
+from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
-from harel.engine.store._base import DEFAULT_TRACE_MAX
+from harel.engine.store._base import DEFAULT_TRACE_MAX, _decode_offset, _encode_offset, _matches
 from harel.engine.store.dynamodb import _PURGE_PARTITIONS
 from harel.spec.states import Event
 
@@ -161,6 +161,43 @@ class AsyncDynamoDBStore:
         )
         item = resp.get("Item")
         return Execution.model_validate_json(self._item(item)["data"]) if item else None
+
+    async def list_executions(
+        self,
+        *,
+        status: Optional[Iterable[Status]] = None,
+        definition_id: Optional[str] = None,
+        roots_only: bool = False,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> ExecutionPage:
+        """See `DynamoDBStore.list_executions`: drains the Scan pages (its `Limit` bounds
+        items examined, not matched), then pages the matches by offset."""
+        status = set(status) if status is not None else None
+        kwargs: dict[str, Any] = {
+            "TableName": self._t("executions"),
+            "ProjectionExpression": "#dat,#v",
+            "ExpressionAttributeNames": {"#dat": "data", "#v": "version"},
+        }
+        if definition_id is not None:
+            kwargs["ExpressionAttributeNames"]["#def"] = "definition_id"
+            kwargs["FilterExpression"] = "#def = :def"
+            kwargs["ExpressionAttributeValues"] = {":def": {"S": definition_id}}
+        off = _decode_offset(cursor)
+        matched: list[ExecutionSummary] = []
+        while True:
+            resp = await self._db.scan(**kwargs)
+            for raw in resp.get("Items", []):
+                item = self._item(raw)
+                summary = ExecutionSummary.from_data(json.loads(item["data"]), int(item.get("version", 0)))
+                if _matches(summary, status, definition_id, roots_only):
+                    matched.append(summary)
+            lek = resp.get("LastEvaluatedKey")
+            if not lek:
+                break
+            kwargs["ExclusiveStartKey"] = lek
+        nxt = _encode_offset(off + limit) if off + limit < len(matched) else None
+        return ExecutionPage(items=matched[off : off + limit], next_cursor=nxt)
 
     async def load_for_event(self, execution_id: str, event_id: str) -> tuple[Optional[Execution], bool]:
         """Load + dedupe-check in one round-trip: BatchGetItem across the executions and

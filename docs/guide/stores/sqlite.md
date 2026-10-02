@@ -505,8 +505,8 @@ Pick `SqliteStore` when:
 
 - **Put the store and the [SQLite transport](../transports/sqlite) in separate files.** In one
   file the store's commits and the queue's claims and acks wait for the same lock; on the
-  benchmark host a worker drained 15–55% faster with two files (and with one file, raising its
-  concurrency made it slower).
+  benchmark host the two were level with one event in flight, and two files drained 35–55%
+  faster with more.
 - **More worker processes don't add throughput.** The write lock serializes them, and it isn't
   fair: a process that finds it taken backs off with growing sleeps while the holder takes it
   again at once, so one or two workers end up doing almost all the work. One worker process,

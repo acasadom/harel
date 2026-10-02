@@ -4,9 +4,9 @@ The outbox/spawn/timer dataclasses are reused from the sync `harel.engine.store`
 
 from __future__ import annotations
 
-from typing import Optional, Protocol, runtime_checkable
+from typing import Iterable, Optional, Protocol, runtime_checkable
 
-from harel.engine.execution import Execution
+from harel.engine.execution import Execution, ExecutionPage, Status
 from harel.engine.store import OutboxEntry, SpawnEntry, TimerOp
 from harel.spec.states import Event
 
@@ -17,6 +17,16 @@ class AsyncExecutionStore(Protocol):
     so the deferred backends (rqlite/sqs/mongo/dynamo) slot in unchanged later."""
 
     async def load(self, execution_id: str) -> Optional[Execution]: ...
+
+    async def list_executions(
+        self,
+        *,
+        status: Optional[Iterable[Status]] = None,
+        definition_id: Optional[str] = None,
+        roots_only: bool = False,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> ExecutionPage: ...
 
     async def save(self, exe: Execution) -> None: ...
 

@@ -7,7 +7,7 @@ import sqlite3
 from pathlib import Path
 from typing import Iterable, Optional, Union
 
-from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
+from harel.engine.execution import Execution, ExecutionPage, Status
 from harel.engine.store._base import (
     _IDS_WITH_PREFIX_SQL,
     _PURGE_COMPANIONS_SQL,
@@ -17,8 +17,9 @@ from harel.engine.store._base import (
     StoreConflict,
     TimerOp,
     _decode_offset,
-    _encode_offset,
     _like_prefix,
+    _listing_page,
+    _listing_sql_sqlite,
 )
 from harel.spec.states import Event
 
@@ -107,41 +108,9 @@ class SqliteStore:
         limit: int = 100,
         cursor: Optional[str] = None,
     ) -> ExecutionPage:
-        # project only the scalar summary fields out of the JSON blob (never pull `data`);
-        # status/outcome/active_path/parent_id live inside it, so json_extract reaches them.
-        where, params = ["1=1"], []
-        if definition_id is not None:
-            where.append("definition_id = ?")
-            params.append(definition_id)
-        if status is not None:
-            statuses = [s.value for s in status]
-            where.append(f"json_extract(data,'$.status') IN ({','.join('?' * len(statuses))})")
-            params += statuses
-        if roots_only:
-            where.append("json_extract(data,'$.parent_id') IS NULL")
         off = _decode_offset(cursor)
-        rows = self._conn.execute(
-            "SELECT id, definition_id, version, json_extract(data,'$.status'), "
-            "json_extract(data,'$.outcome'), json_extract(data,'$.active_path'), "
-            "json_extract(data,'$.parent_id'), json_extract(data,'$.finished_at') FROM executions "
-            f"WHERE {' AND '.join(where)} ORDER BY id LIMIT ? OFFSET ?",
-            (*params, limit + 1, off),  # fetch one extra to know if there's a next page
-        ).fetchall()
-        items = [
-            ExecutionSummary(
-                id=r[0],
-                definition_id=r[1],
-                version=r[2],
-                status=r[3],
-                outcome=r[4],
-                active_path=r[5],
-                parent_id=r[6],
-                finished_at=r[7],
-            )
-            for r in rows[:limit]
-        ]
-        nxt = _encode_offset(off + limit) if len(rows) > limit else None
-        return ExecutionPage(items=items, next_cursor=nxt)
+        sql, params = _listing_sql_sqlite(status, definition_id, roots_only, limit, off)
+        return _listing_page(self._conn.execute(sql, params).fetchall(), limit, off)
 
     def _write(self, exe: Execution) -> None:
         """The CAS write of `exe`, WITHOUT committing the transaction (so it can

@@ -34,6 +34,7 @@ test-stack: ## Run each backend's tests directly against the real stack (needs D
 	    test/integration/test_postgres_store.py \
 	    test/integration/test_async_postgres.py \
 	    "test/integration/test_store_listing.py::test_postgres_listing" \
+	    "test/integration/test_store_listing.py::test_async_postgres_listing" \
 	    "test/integration/test_store_purge.py::test_postgres_purge" \
 	    "test/integration/test_store_purge.py::test_async_postgres_purge" \
 	    "test/integration/test_store_outbox.py::test_postgres_outbox" \
@@ -44,6 +45,7 @@ test-stack: ## Run each backend's tests directly against the real stack (needs D
 	    test/integration/test_rqlite_store.py \
 	    test/integration/test_async_rqlite.py \
 	    "test/integration/test_store_listing.py::test_rqlite_listing" \
+	    "test/integration/test_store_listing.py::test_async_rqlite_listing" \
 	    "test/integration/test_store_purge.py::test_rqlite_purge" \
 	    "test/integration/test_store_purge.py::test_async_rqlite_purge" \
 	    "test/integration/test_store_outbox.py::test_rqlite_outbox" \
@@ -54,6 +56,7 @@ test-stack: ## Run each backend's tests directly against the real stack (needs D
 	    test/integration/test_mongo_store.py \
 	    test/integration/test_async_mongo.py \
 	    "test/integration/test_store_listing.py::test_mongo_listing" \
+	    "test/integration/test_store_listing.py::test_async_mongo_listing" \
 	    "test/integration/test_store_purge.py::test_mongo_purge" \
 	    "test/integration/test_store_purge.py::test_async_mongo_purge" \
 	    "test/integration/test_store_outbox.py::test_mongo_outbox" \
@@ -63,6 +66,7 @@ test-stack: ## Run each backend's tests directly against the real stack (needs D
 	    test uv run pytest -m stack \
 	    test/integration/test_dynamodb_store.py \
 	    "test/integration/test_store_listing.py::test_dynamodb_listing" \
+	    "test/integration/test_store_listing.py::test_async_dynamodb_listing" \
 	    "test/integration/test_store_purge.py::test_dynamodb_purge" \
 	    "test/integration/test_store_purge.py::test_async_dynamodb_purge" \
 	    "test/integration/test_store_outbox.py::test_dynamodb_outbox" \

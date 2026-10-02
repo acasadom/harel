@@ -21,7 +21,7 @@ sees; read them before upgrading. Custom `ExecutionStore` implementations need t
     first. A tree with a member that isn't `DONE`/`CANCELLED` is refused (`PurgeRefused`).
   - `control.purge_finished(older_than=...)` and the `harel purge --older-than AGE` command purge
     finished trees by age (`--archive`, `--status`, `--limit`, `--dry-run`,
-    `--include-undated`). Sync stores only (it needs `list_executions`).
+    `--include-undated`); `aio.control.purge_finished` is the async one.
   - Executions record `created_at`, `updated_at` and `finished_at`; listings include
     `finished_at`.
   - `ttl <seconds>` at machine level expires a root execution after that long without a domain
@@ -75,6 +75,8 @@ For custom `ExecutionStore` / `AsyncExecutionStore` implementations:
   by it, iff the version still matches (#76).
 - **`ids_with_prefix(prefix) -> list[str]`**: the stored ids starting with `prefix`, matched
   literally (#82).
+- **`list_executions(...)`** is now part of the async protocol too (`AsyncExecutionStore`), as
+  `aio.control.purge_finished` needs it.
 - A stale copy's `commit` after a purge must raise `StoreConflict`, not recreate the
   execution (#76).
 
@@ -85,6 +87,15 @@ For custom `ExecutionStore` / `AsyncExecutionStore` implementations:
 - Async `redrive` now clears history, as the sync one does (#72).
 - SQLite: async store and transport serialize transactions per connection, and `save`/`commit`
   roll back on any error, not only a conflict (#75).
+- SQLite and libSQL transports: the claim walks the groups on an index and stops at the first
+  one it can lease, instead of reading the whole backlog — its cost no longer grows with the
+  queue (a worker drained a 4000-execution backlog about 3× faster).
+- `LibsqlStore`: `save`/`commit` roll back on any error, not only a conflict.
+- `DistributedRunner(trace=True)` records its worker's steps (the sync `Worker` takes `trace`),
+  each step carries the event that drove it, and the in-memory stores keep each step's context
+  as it was.
+- `AsyncWorker.run` logs a message whose handling raises, with its traceback, and nacks it to
+  come back after `suspend_recheck` seconds, instead of losing the error.
 - `purge_finished(dry_run=True)` applies the same whole-tree check as a real run (#81).
 - The benchmarks in `bench/` run the machine they describe again, and gained end-to-end modes
   with several producer processes (#88).

@@ -177,11 +177,13 @@ produce spurious conflicts — see [Experimental status](#experimental-status).
 
 ```text
 def save(self, exe: Execution) -> None:
+    old = exe.version
     try:
         self._write(exe)
         self._conn.commit()
-    except StoreConflict:
-        self._conn.rollback()
+    except BaseException:
+        self._conn.rollback()  # any failure: release the write lock, keep nothing
+        exe.version = old
         raise
 ```
 
@@ -203,6 +205,7 @@ def commit(
     spawns: tuple[tuple[str, str, dict], ...] = (),
     trace: Optional[dict] = None,
 ) -> list[int]:
+    old = exe.version
     try:
         self._write(exe)
         seqs = []
@@ -237,8 +240,9 @@ def commit(
             self._write_trace(exe.id, trace)
         self._conn.commit()
         return seqs
-    except StoreConflict:
-        self._conn.rollback()
+    except BaseException:
+        self._conn.rollback()  # any failure discards the whole batch and its write lock
+        exe.version = old
         raise
 ```
 
@@ -264,8 +268,11 @@ Statement by statement:
 6. **Trace** — if a `trace` step is given, `_write_trace` appends it (still inside this txn; see
    below).
 7. **`self._conn.commit()`** — the single atomic commit. Up to here nothing is durable.
-8. **`except StoreConflict: rollback; raise`** — any CAS loss rolls the whole transaction back and
-   propagates; the caller reloads and retries (or drops the stale work).
+8. **`except BaseException: rollback; restore version; raise`** — any failure rolls the whole
+   transaction back, so the connection never keeps the file's write lock (which would block every
+   other writer) and a later commit can't persist a half-written batch. The in-memory `version`
+   goes back to `old`, so a retry isn't a false conflict. On a `StoreConflict` the caller reloads
+   and retries (or drops the stale work).
 
 ## The trace ring
 

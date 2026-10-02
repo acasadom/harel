@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional, Union
 
-from harel.engine.transport._base import _PARKED, Lease
+from harel.engine.transport._base import _PARKED, _SQLITE_CLAIM_SQL, _SQLITE_TRANSPORT_INDEXES, Lease
 from harel.spec.states import Event
 
 
@@ -40,6 +40,8 @@ class SqliteTransport:
         # backfill: messages published before this version have no groups row; without it the
         # claim() INNER JOIN would make them invisible forever after an upgrade.
         self._conn.execute("INSERT OR IGNORE INTO groups (group_id) SELECT DISTINCT group_id FROM messages")
+        for sql in _SQLITE_TRANSPORT_INDEXES:
+            self._conn.execute(sql)
         self._clock = clock
 
     def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
@@ -56,14 +58,8 @@ class SqliteTransport:
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             row = self._conn.execute(
-                "SELECT m.seq, m.group_id, m.event FROM messages m "
-                "JOIN groups g ON g.group_id = m.group_id "
-                "WHERE (m.locked_by IS NULL OR m.lock_expiry < ?) "
-                "AND m.group_id NOT IN ("
-                "  SELECT group_id FROM messages WHERE locked_by IS NOT NULL AND lock_expiry >= ?"
-                ") AND g.priority >= ?"
-                " ORDER BY g.last_claimed_at ASC, m.seq ASC LIMIT 1",
-                (now, now, min_priority),
+                _SQLITE_CLAIM_SQL,
+                (min_priority, now),
             ).fetchone()
             if row is None:
                 self._conn.execute("COMMIT")

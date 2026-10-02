@@ -80,6 +80,7 @@ class Worker:
         concurrency: int = 256,
         high_ratio: float = 0.0,
         priority_threshold: int = 1,
+        trace: bool = False,
     ) -> None:
         self.store = store
         self.transport = transport
@@ -97,6 +98,7 @@ class Worker:
             concurrency,
             high_ratio,
             priority_threshold,
+            trace,
         )
 
     @staticmethod
@@ -112,6 +114,7 @@ class Worker:
         concurrency,
         high_ratio=0.0,
         priority_threshold=1,
+        trace=False,
     ):
         from harel.engine.aio import facade
 
@@ -128,6 +131,7 @@ class Worker:
                 clock,
                 resolver,
                 concurrency,
+                trace=trace,
                 high_ratio=high_ratio,
                 priority_threshold=priority_threshold,
             )
@@ -169,6 +173,7 @@ class DistributedRunner:
         self.definitions = definitions
         self.resolver = resolver
         self._clock = clock
+        self._trace = trace
         self._async = self._portal_build(store, transport, definitions, clock, resolver, trace)
 
     @staticmethod
@@ -245,6 +250,7 @@ class DistributedRunner:
             concurrency,
             high_ratio=high_ratio,
             priority_threshold=priority_threshold,
+            trace=self._trace,
         )
 
     # --- control plane (lifecycle commands; bypass the event queue) ---------

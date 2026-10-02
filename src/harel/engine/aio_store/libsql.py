@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
-from harel.engine.execution import Execution
+from harel.engine.execution import Execution, ExecutionPage, Status
 from harel.engine.store import OutboxEntry, SpawnEntry, TimerOp
 from harel.spec.states import Event
 
@@ -51,6 +51,27 @@ class AsyncLibsqlStore:
     async def load(self, execution_id: str) -> Optional[Execution]:
         async with self._lock:
             return await asyncio.to_thread(self._s.load, execution_id)
+
+    async def list_executions(
+        self,
+        *,
+        status: Optional[Iterable[Status]] = None,
+        definition_id: Optional[str] = None,
+        roots_only: bool = False,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> ExecutionPage:
+        """See `LibsqlStore.list_executions`."""
+        statuses = list(status) if status is not None else None
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._s.list_executions,
+                status=statuses,
+                definition_id=definition_id,
+                roots_only=roots_only,
+                limit=limit,
+                cursor=cursor,
+            )
 
     async def load_for_event(self, execution_id: str, event_id: str) -> tuple[Optional[Execution], bool]:
         async with self._lock:
