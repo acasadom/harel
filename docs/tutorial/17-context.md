@@ -35,22 +35,31 @@ equal or ordered.
 
 ## A typed context
 
-A machine may declare its context's fields, with the same field syntax as an event:
+A machine may declare its context's fields, with the same field syntax as an event — and,
+unlike an event's, a field may give a **default**, the value an execution starts with when the
+caller doesn't pass one:
 
 ```text
 machine job {
   context {
-    attempts: int
-    last_code: int?        # optional
+    attempts: int = 0      # starts at 0 unless create() passes it
+    max_attempts: int = 3
+    last_code: int?        # optional: may be absent
   }
   ...
 }
 ```
 
+A default is a literal of the field's type (`harel validate` checks it:
+`default_type_mismatch`); a field with one can't also be `?` — an execution always has it. A list
+default is copied for each execution. Defaults fill an execution created with `create()`, and the
+child of an `invoke` gets its own machine's defaults; an orthogonal region starts with only what
+its fork passes down (`with`), as below.
+
 The declaration is checked at three points:
 
-- **when an execution is created** — a required field missing, or a declared field of the wrong
-  type, raises `ContextError` (with `DistributedRunner.create(..., start_on_create=False)`, the
+- **when an execution is created** (after the defaults are filled in) — a required field
+  missing, or a declared field of the wrong type, raises `ContextError` (with `DistributedRunner.create(..., start_on_create=False)`, the
   required fields may still come with `start(data=...)`, and are checked there);
 - **by `harel validate`** — a guard or a `set` naming an undeclared field, or a `set` whose value
   can't be of the declared type, is an error;

@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from harel.definition.events import RESERVED_EVENTS
+from harel.definition.events import RESERVED_EVENTS, value_fits
 from harel.definition.model import (
     Definition,
     EventFilter,
@@ -474,6 +474,21 @@ def _check_compared_types(
         )
 
 
+def _check_context_defaults(defn: Definition, issues: list[Issue]) -> None:
+    """A context field's `default` must be of its declared type."""
+    for name, spec in defn.context_schema.items():
+        if spec.default is not None and not value_fits(spec.type, spec.default):
+            issues.append(
+                Issue(
+                    "default_type_mismatch",
+                    "error",
+                    "",
+                    f"the default of context field {name!r} ({spec.type}) is "
+                    f"{type(spec.default).__name__} {spec.default!r}",
+                )
+            )
+
+
 def _check_context_refs(defn: Definition, issues: list[Issue]) -> None:
     for node in defn.index.values():
         loop_var = node.invoke_each[0] if node.invoke_each is not None else None
@@ -901,6 +916,7 @@ def validate(defn: Definition) -> list[Issue]:
     _check_reachability(defn, issues)
     _check_events(defn, issues)
     _check_context_refs(defn, issues)
+    _check_context_defaults(defn, issues)
     _check_cancel_targets(defn, issues)
     _check_choose_can_hang(defn, issues)
     _check_ttl(defn, issues)

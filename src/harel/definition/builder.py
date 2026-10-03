@@ -138,7 +138,9 @@ def _build_field_spec(data: Any) -> FieldSpec:
     (`status: {type: string, required: false}`)."""
     if isinstance(data, str):
         return FieldSpec(type=data)
-    return FieldSpec(type=data.get("type", "any"), required=data.get("required", True))
+    return FieldSpec(
+        type=data.get("type", "any"), required=data.get("required", True), default=data.get("default")
+    )
 
 
 def _build_events(config: dict) -> dict[str, EventType]:

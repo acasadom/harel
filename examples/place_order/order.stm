@@ -22,8 +22,8 @@ machine order {
   # the order's own data, typed: `harel validate` checks every `context.x` the model
   # reads or writes against it, and `create()` checks the context it starts with
   context {
-    declines: int           # payment declines so far
-    max_retries: int        # how many declines get another attempt
+    declines: int = 0       # payment declines so far
+    max_retries: int = 1    # how many declines get another attempt
     last_decline: string?
     destination: string?    # read by the carrier selector
     weight_kg: float?

@@ -21,6 +21,7 @@ import time
 from typing import Any, Callable, Optional
 
 from harel import engine
+from harel.definition.events import with_defaults
 from harel.definition.model import Definition
 from harel.engine.execution import Execution, Status, stamp
 from harel.engine.resolve import ResolveError
@@ -212,6 +213,9 @@ class AsyncDriver:
             if self.resolve_machine is None:
                 raise ResolveError(f"invoke {fqn!r} but this runner has no machine resolver")
             child_defn = self.resolve_machine(fqn)
+            # an invoked machine starts with its own context defaults; a region (the same
+            # machine) starts with only what the fork passes down
+            context = with_defaults(child_defn.context_schema, context)
         else:
             child_defn = self.defn
         # a child (orthogonal region / invoke / fan-out instance) inherits the parent's

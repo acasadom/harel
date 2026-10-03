@@ -267,6 +267,23 @@ class _ToProgram(Transformer):
     def field_decl(self, name, type_, optional=None):
         return (str(name), {"type": str(type_), "required": optional is None})
 
+    @v_args(meta=True)
+    def context_field(self, meta, children):
+        name, type_, *rest = children
+        optional = any(isinstance(c, Token) and c.type == "OPTIONAL" for c in rest)
+        defaults = [c for c in rest if not (isinstance(c, Token) and c.type == "OPTIONAL")]
+        spec: dict = {"type": str(type_), "required": not optional}
+        if defaults:
+            if optional:
+                raise DslError(
+                    f"context field {str(name)!r} has a default, so it can't also be optional (`?`): "
+                    "an execution always starts with it",
+                    line=meta.line,
+                    column=meta.column,
+                )
+            spec["default"] = _coerce(defaults[0])
+        return (str(name), spec)
+
     @v_args(inline=True, meta=True)
     def event_decl(self, meta, name, *fields):
         return ("event", str(name), dict(fields), (meta.line, meta.column))

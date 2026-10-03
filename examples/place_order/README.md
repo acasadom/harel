@@ -14,7 +14,8 @@ What it shows:
 - **Lifecycle**: `Cart → AwaitingPayment → Paid → Fulfilling → Shipped → Delivered`,
   plus `Cancelled`.
 - **A typed context** (`context { ... }`): the order's own data, checked by
-  `harel validate` wherever the model reads or writes it, and by `create()`.
+  `harel validate` wherever the model reads or writes it, and by `create()`; its
+  defaults (`declines: int = 0`, `max_retries: int = 1`) are what a new order starts with.
 - **A `choose` with `set`** on `PaymentDeclined`: the model counts the decline
   (`set context.declines = context.declines + 1`) and retries while
   `context.declines < context.max_retries` — through a transient `Retrying` state

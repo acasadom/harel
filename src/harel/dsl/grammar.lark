@@ -56,7 +56,9 @@ timeout_spec: INT             -> timeout_literal
 // machine level only: seconds without a domain event before the execution is expired
 ttl:         "ttl" INT
 // machine level only: the typed fields of the execution context (same field syntax as an event)
-context_decl: "context" "{" field_decl* "}"
+context_decl: "context" "{" context_field* "}"
+// a context field may give the value an execution starts with when none is passed
+context_field: ref ":" TYPE OPTIONAL? ("=" value)?
 outcome:     "outcome" ref
 // context keys this (region) state propagates on its `Finished` (besides `outcome`)
 carry:       "carry" ref ("," ref)*

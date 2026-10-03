@@ -631,3 +631,100 @@ def test_a_fan_out_with_a_schema_runs():
     children = [store.load(c) for c in store.load(exe.id).children]
     assert sorted(c.context["topic"] for c in children) == ["a", "b"]
     assert all(c.context["depth"] == 2 for c in children)
+
+
+# --- context defaults ------------------------------------------------------------------------
+DEFAULTS = """
+event Fail {}
+machine M {
+  context {
+    retries: int = 0
+    max_retries: int = 2
+    tags: any = []
+    note: string?
+  }
+  initial A
+  state A {}
+  final GaveUp failed {}
+  from A choose on Fail set context.retries = context.retries + 1 {
+    when context.retries >= context.max_retries to GaveUp
+    else to A
+  }
+}
+"""
+
+
+def test_a_context_default_is_what_an_execution_starts_with():
+    runner, _, defn = _runner(DEFAULTS)
+    assert runner.create(defn.id).context == {"retries": 0, "max_retries": 2, "tags": []}
+    assert runner.create(defn.id, context={"max_retries": 5}).context["max_retries"] == 5  # passed wins
+    first, second = runner.create(defn.id), runner.create(defn.id)
+    first.context["tags"].append("x")
+    assert second.context["tags"] == []  # a list default is copied, never shared
+    exe = runner.create(defn.id)
+    paths = [runner.process(exe.id, Event(kind="Fail")).active_path for _ in range(3)]
+    assert paths == ["A", "A", "GaveUp"]
+
+
+def test_a_deferred_distributed_start_has_the_defaults_too():
+    defn = definition_from_dsl(DEFAULTS, "M", validate=True)
+    store = DictStore()
+    runner = DistributedRunner(store, InMemoryTransport(), {defn.id: defn})
+    exe = runner.create(defn.id, start_on_create=False)
+    assert store.load(exe.id).context["retries"] == 0
+    runner.start(exe.id, data={"max_retries": 1})
+
+
+def test_context_defaults_are_checked():
+    issues = validate(
+        definition_from_dsl(DEFAULTS.replace("max_retries: int = 2", 'max_retries: int = "two"'), "M")
+    )
+    assert [i.severity for i in issues if i.code == "default_type_mismatch"] == ["error"]
+    with pytest.raises(DslError, match="can't also be optional"):
+        definition_from_dsl(DEFAULTS.replace("retries: int = 0", "retries: int? = 0"), "M")
+    with pytest.raises(DslError):  # only a context field has a default, not an event's
+        definition_from_dsl("event E { x: int = 1 }\nmachine M {\n initial A\n state A {}\n}", "M")
+
+
+INVOKED_DEFAULTS = """
+event Go {}
+machine worker {
+  context { attempts: int = 3  job: string? }
+  initial W
+  state W {}
+  final Done success {}
+  from W to Done on Go
+}
+machine parent {
+  context { job: string  limit: int = 1 }
+  initial Run
+  state Run {
+    invoke worker with { job: job }
+  }
+  orthogonal Split {
+    with { job: job }
+    state R {
+      initial R1
+      state R1 {}
+    }
+  }
+  final Done success {}
+  from Run to Done on Returned
+}
+"""
+
+
+def test_an_invoked_machine_starts_with_its_defaults_and_a_region_with_what_it_is_given():
+    parent = definition_from_dsl(INVOKED_DEFAULTS, "parent")
+    worker = definition_from_dsl(INVOKED_DEFAULTS, "worker")
+    store = DictStore()
+    runner = DurableRunner(store, {parent.id: parent, worker.id: worker})
+    exe = runner.create(parent.id, context={"job": "j1"})
+    (child_id,) = store.load(exe.id).children
+    assert store.load(child_id).context == {"job": "j1", "attempts": 3}  # the worker's own default
+
+    split = definition_from_dsl(INVOKED_DEFAULTS.replace("initial Run", "initial Split"), "parent")
+    store2 = DictStore()
+    exe2 = DurableRunner(store2, {split.id: split}).create(split.id, context={"job": "j2"})
+    (region_id,) = store2.load(exe2.id).children
+    assert store2.load(region_id).context == {"job": "j2"}  # not the machine's `limit` default
