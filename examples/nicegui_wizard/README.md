@@ -26,20 +26,22 @@ python -m examples.nicegui_wizard.app           # open http://localhost:8080
 
 ## How it maps
 
-- **`wizard.stm`** — the machine: `Account → Profile → Verify → Done`, with `Back`,
-  and **guards** (`account_ok`/`profile_ok`) that read the field on the `Next` event
-  so the machine refuses to advance with an empty field (illegal states unreachable).
-- **`actions.py`** — `save` persists the typed field into the context (survives
-  Back/Next and the restart); `send_code` simulates emailing a verification code.
+- **`wizard.stm`** — the machine: `Account → Profile → Verify → Done`, with `Back`.
+  **Guards** (`account_ok`/`profile_ok`) read the field on the `Next` event, so the
+  machine refuses to advance with an empty field; **`set`** keeps the typed field in a
+  typed `context { ... }` (it survives Back/Next and the restart); and `Verify` only
+  completes `on Verified where event.code == context.code` — the typed code must match
+  the one the machine sent.
+- **`actions.py`** — `send_code` simulates emailing a verification code.
 - **`app.py`** — the glue (~40 lines): load-or-create the Execution for this session
   from a durable `SqliteStore`, render the step named by `exe.active_path`, and turn
   each click into an `Event`.
 
 ## Honest notes
 
-- **What the statechart owns:** the *step sequence* and the advance guards. Field
-  validation (the verification code match) stays in the UI — the model owns the flow,
-  the app owns the inputs.
+- **What the statechart owns:** the step sequence and its rules — the advance guards
+  and the code match. The app owns the inputs: it sends what was typed and shows where
+  the machine is.
 - The Mermaid panel shows the **static** diagram; highlighting the active node live is
   a natural next enhancement.
 - `wizard.db` and NiceGUI's `.nicegui/` session store are created on first run; delete

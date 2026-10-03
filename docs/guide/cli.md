@@ -58,7 +58,7 @@ Drive a machine with a sequence of events (each `-e` is one event; attach data a
 `KIND:'{...}'` for guarded transitions):
 
 ```text
-$ harel run examples/place_order/order.stm order \
+$ harel run examples/place_order/order.stm order --seed '{"declines": 0, "max_retries": 1}' \
     -e PlaceOrder -e PaymentAuthorized -e Picked -e Packed -e Dispatched -e Delivered
 (start)              -> Cart
 PlaceOrder           -> AwaitingPayment
@@ -66,6 +66,8 @@ PaymentAuthorized    -> Fulfilling.Picking
 ...
 status: DONE  outcome: success
 ```
+
+(`--seed` gives the order the context its `context { ... }` block requires.)
 
 `run` resolves a machine's action modules from the working directory (for package-qualified
 paths like `pkg.mod.fn`, run it from your project root) and from the `.stm` file's own

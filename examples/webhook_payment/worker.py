@@ -6,8 +6,9 @@ Run this as a separate process alongside the API server:
     python -m examples.webhook_payment.worker       # terminal 2
 
 Worker.run() loops: claim → process → ack, then fire_due_timers() on idle.
-Both the API server and this worker share the same SQLite files (WAL mode);
-they never share process memory.
+The API server and this worker share the same two SQLite files (the store and the
+queue; WAL mode); they never share process memory. Run one worker process: SQLite has
+one writer per file, so more don't add throughput.
 
 Separation of concerns:
   API server  — request/response only: create executions, publish webhook events
@@ -27,11 +28,12 @@ from harel.engine.transport.sqlite import SqliteTransport
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
 PAYMENT_STM = Path(__file__).parent / "payment.stm"
-DB_PATH = Path(__file__).parent / "payments.db"
+STORE_DB = Path(__file__).parent / "payments.db"  # the same two files as app.py
+QUEUE_DB = Path(__file__).parent / "payments-queue.db"
 
 defn = definition_from_dsl_file(PAYMENT_STM, "payment")
-store = SqliteStore(DB_PATH)
-transport = SqliteTransport(DB_PATH)
+store = SqliteStore(STORE_DB)
+transport = SqliteTransport(QUEUE_DB)
 runner = DistributedRunner(store, transport, {defn.id: defn})
 
 if __name__ == "__main__":

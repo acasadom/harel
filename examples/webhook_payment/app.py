@@ -45,15 +45,17 @@ from harel.engine.distributed import DistributedRunner
 from harel.engine.transport.sqlite import SqliteTransport
 
 # ---------------------------------------------------------------------------
-# Bootstrap — store and transport share the same .db file (WAL mode is safe)
+# Bootstrap — the store and the queue each in their own SQLite file: in one file,
+# commits and claims would wait for the same write lock
 # ---------------------------------------------------------------------------
 
 PAYMENT_STM = Path(__file__).parent / "payment.stm"
-DB_PATH = Path(__file__).parent / "payments.db"
+STORE_DB = Path(__file__).parent / "payments.db"
+QUEUE_DB = Path(__file__).parent / "payments-queue.db"
 
 defn = definition_from_dsl_file(PAYMENT_STM, "payment")
-store = SqliteStore(DB_PATH)
-transport = SqliteTransport(DB_PATH)
+store = SqliteStore(STORE_DB)
+transport = SqliteTransport(QUEUE_DB)
 runner = DistributedRunner(store, transport, {defn.id: defn})
 
 app = FastAPI(title="harel · webhook payment demo")

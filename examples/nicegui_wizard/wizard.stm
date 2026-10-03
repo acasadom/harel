@@ -1,6 +1,6 @@
 # A multi-step onboarding wizard, modelled as a statechart.
 #
-#   Account --Next[email]--> Profile --Next[full_name]--> Verify --Verified--> Done
+#   Account --Next[email]--> Profile --Next[full_name]--> Verify --Verified[code matches]--> Done
 #   Profile --Back--> Account               Verify --Back--> Profile
 #
 # The point of the example: this Execution is checkpointed to a DURABLE store
@@ -8,29 +8,37 @@
 # it resumes on the exact step the user had reached, with the data they typed.
 # A statechart on the server is something an in-browser XState cannot do.
 #
-# The step guards (`account_ok`/`profile_ok`) read the field carried on the `Next`
-# event, so the machine itself refuses to advance with an empty field — illegal
-# states are unreachable, not defended by scattered `if`s.
+# The machine owns the flow AND its rules: the step guards read the field carried on
+# the `Next` event, so it refuses to advance with an empty field, and `Verify` only
+# completes when the typed code equals the one it sent. Illegal states are
+# unreachable, not defended by scattered `if`s in the UI.
 guard account_ok = email != ""
 guard profile_ok = full_name != ""
 
-event Next { email: string  full_name: string }
+# each `Next` carries the field of the step it leaves
+event Next { email: string?  full_name: string? }
 event Back {}
-event Verified {}
+event Verified { code: string }
 
 machine wizard {
+  context {
+    email: string?
+    full_name: string?
+    code: string?        # the verification code `send_code` issued
+  }
+
   initial Account
 
-  # `on exit save` persists whatever the user typed (carried on the event) into the
-  # context, so it survives Back/Next and — being durable — a server restart.
-  state Account { on exit examples.nicegui_wizard.actions.save }
-  state Profile { on exit examples.nicegui_wizard.actions.save }
+  state Account {}
+  state Profile {}
   state Verify  { on enter examples.nicegui_wizard.actions.send_code }
   final Done success
 
-  from Account to Profile on Next where account_ok
+  # `set` keeps what the user typed in the (durable) context, so it survives Back/Next
+  # and a server restart — the guard has already checked the field is there.
+  from Account to Profile on Next where account_ok set context.email = event.email
   from Profile to Account on Back
-  from Profile to Verify  on Next where profile_ok
+  from Profile to Verify  on Next where profile_ok set context.full_name = event.full_name
   from Verify  to Profile on Back
-  from Verify  to Done    on Verified
+  from Verify  to Done    on Verified where event.code == context.code
 }
