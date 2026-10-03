@@ -816,3 +816,40 @@ def test_a_branch_set_is_drawn_on_its_branch():
         "Working_choose --> Refining: [context.retries < context.max_retries]\\n/ context.retries = context.retries + 1"
         in plantuml(defn)
     )
+
+
+def test_a_reset_starts_over_with_the_context_defaults():
+    source = """
+event Fail {}
+machine M {
+  context { retries: int = 0 }
+  initial A
+  state A {}
+  from A to A on Fail set context.retries = context.retries + 1
+}
+"""
+    runner, _, defn = _runner(source)
+    exe = runner.create(defn.id)
+    runner.process(exe.id, Event(kind="Fail"))
+    exe = runner.process(exe.id, Event(kind="Reset"))
+    assert exe.context == {"retries": 0}
+    exe = runner.process(exe.id, Event(kind="Fail"))
+    assert exe.status is Status.RUNNING and exe.context == {"retries": 1}
+
+
+def test_a_branch_set_writing_the_transitions_field_wins():
+    source = """
+event Go {}
+machine M {
+  context { n: int = 1 }
+  initial A
+  state A {}
+  final B success {}
+  from A choose on Go set context.n = 10 {
+    when context.n == 1 to B set context.n = context.n + 1
+  }
+}
+"""
+    runner, _, defn = _runner(source)
+    exe = runner.process(runner.create(defn.id).id, Event(kind="Go"))
+    assert exe.context["n"] == 2  # applied after the transition's own; both read n == 1

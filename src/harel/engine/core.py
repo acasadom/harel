@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Generator, Optional, Union
 
-from harel.definition.events import value_fits
+from harel.definition.events import value_fits, with_defaults
 from harel.definition.model import (
     ActionRef,
     Definition,
@@ -992,6 +992,11 @@ def process(defn: Definition, exe: Execution, event: Event) -> Step:
                 yield from _leave_regions(exe, site)
         exe.children.clear()
         exe.context.clear()
+        if exe.parent_id is None or exe.definition_fqn is not None:
+            # starting over is starting as created: a root or an invoked machine gets its
+            # context defaults back (an orthogonal region starts with only what its fork
+            # passed down, which a Reset of the region itself doesn't have)
+            exe.context.update(with_defaults(defn.context_schema, {}))
         exe.history.clear()
         exe.deferred.clear()
         exe.active_path = None

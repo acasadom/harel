@@ -53,8 +53,9 @@ machine job {
 A default is a literal of the field's type (`harel validate` checks it:
 `default_type_mismatch`); a field with one can't also be `?` — an execution always has it. A list
 default is copied for each execution. Defaults fill an execution created with `create()`, and the
-child of an `invoke` gets its own machine's defaults; an orthogonal region starts with only what
-its fork passes down (`with`), as below.
+child of an `invoke` gets its own machine's defaults; a `Reset`, which starts an execution over
+from scratch, gives them back. An orthogonal region starts with only what its fork passes down
+(`with`), as below.
 
 The declaration is checked at three points:
 

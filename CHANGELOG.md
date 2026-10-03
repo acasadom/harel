@@ -8,8 +8,10 @@ Since 0.4.1.
 
 - **Defaults for context fields**: `context { retries: int = 0  max_retries: int = 2 }`. An
   execution created without a defaulted field starts with its default (a list default is
-  copied per execution), and an invoked machine's child gets its own machine's defaults; an
-  orthogonal region still starts with only what its fork passes down. The default must be of
+  copied per execution), an invoked machine's child gets its own machine's defaults, and a
+  `Reset` starts over with them (it used to leave the context empty, so a `set` reading a
+  required field then failed); an orthogonal region still starts with only what its fork
+  passes down. The default must be of
   the field's type (`harel validate`: `default_type_mismatch`), and a field with one can't also
   be optional (`?`). Event fields take no default.
 - **A `set` on a `choose` branch**: `when ... to Refining set context.retries = context.retries + 1`
