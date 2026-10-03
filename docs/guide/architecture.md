@@ -388,8 +388,8 @@ execution model:
 | | interpreter | used by |
 |---|---|---|
 | coroutines | `flow.run_async` — awaits each request; a sync action runs in a thread pool; parallel work overlaps | `AsyncDurableRunner`, `AsyncDistributedRunner`, `AsyncWorker` (`python -m harel.worker`) |
-| background loop | the coroutine interpreter on one shared background loop the call blocks on (an [anyio](https://anyio.readthedocs.io/) portal) | the sync runners, `execution="background"` (the default) |
-| caller's thread | `flow.run_inline` — each request is a plain call, parallel work in order, no event loop | the sync runners, `execution="inline"` |
+| background loop | the coroutine interpreter on one shared background loop the call blocks on (an [anyio](https://anyio.readthedocs.io/) portal) | the sync runners and `Driver`, `execution="background"` (the default) |
+| caller's thread | `flow.run_inline` — each request is a plain call, parallel work in order, no event loop | the sync runners and `Driver`, `execution="inline"` |
 
 So a synchronous snippet in this guide, a web view running `execution="inline"` inside its
 transaction, and the async production worker run the same logic and the same commit. See

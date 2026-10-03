@@ -18,7 +18,7 @@ from harel import engine
 from harel.definition.events import with_defaults
 from harel.definition.model import Definition
 from harel.engine.execution import Execution, Status, stamp
-from harel.engine.flow import CallAction, Flow, call, parallel
+from harel.engine.flow import CallAction, Flow, call, parallel, run_inline
 from harel.engine.resolve import ResolveError
 from harel.engine.runtime import _CONTROL, _action_name, _Proxy, _resolve, _trace_step
 from harel.engine.store import TimerOp
@@ -438,3 +438,22 @@ class TransportDriverLogic(DriverLogic):
         # flushed either, so this does not change the at-least-once guarantee).
         if enqueued:
             yield from self._flush_flow(primary_priority={exe.id: exe.priority})
+
+
+class _InlineDriver(DriverLogic):
+    """`DriverLogic` run in the caller's thread over a sync store — the bare `Driver`'s
+    `execution="inline"`."""
+
+    def __init__(self, defn: Definition, store: Any, *args: Any, **kwargs: Any) -> None:
+        super().__init__(defn, *args, **kwargs)
+        self.store = store
+
+    @staticmethod
+    def store_flow(method: str, *args: Any) -> Flow:
+        return store(method, *args)
+
+    def serve(self, flow: Flow) -> Any:
+        from harel.engine.aio import facade
+
+        facade._guard_no_running_loop()
+        return run_inline(flow, {"store": self.store})

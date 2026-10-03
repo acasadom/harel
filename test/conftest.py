@@ -42,17 +42,17 @@ def pytest_addoption(parser):
 
 @pytest.fixture(autouse=True)
 def _sync_runners_execution(request, monkeypatch):
-    """With `--execution=inline`, every sync runner and worker a test builds runs in the
-    caller's thread unless the test picks a model itself — the same tests, another model."""
+    """With `--execution=inline`, every sync runner, worker and bare `Driver` a test builds
+    runs in the caller's thread unless the test picks a model itself — the same tests, another model."""
     execution = request.config.getoption("--execution")
     if execution == "background":
         yield
         return
     import functools
 
-    from harel.engine import distributed, durable
+    from harel.engine import distributed, durable, runtime
 
-    for cls in (durable.DurableRunner, distributed.DistributedRunner, distributed.Worker):
+    for cls in (durable.DurableRunner, distributed.DistributedRunner, distributed.Worker, runtime.Driver):
         init = cls.__init__
 
         @functools.wraps(init)

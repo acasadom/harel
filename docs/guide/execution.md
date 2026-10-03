@@ -1,8 +1,8 @@
 # Execution models
 
-A sync runner — `DurableRunner`, `DistributedRunner`, its `Worker` — takes an `execution=` that
-picks *how* its calls run; *what* they do is the same either way (see
-[semantics and execution models](architecture.md#semantics-and-execution-models)):
+A sync runner — `DurableRunner`, `DistributedRunner`, its `Worker`, and the bare in-memory
+`Driver` — takes an `execution=` that picks *how* its calls run; *what* they do is the same either
+way (see [semantics and execution models](architecture.md#semantics-and-execution-models)):
 
 | `execution=` | where a call runs | the store and transport | the actions |
 |---|---|---|---|
@@ -39,6 +39,10 @@ with transaction.atomic():
 
 `runner.worker()` uses the runner's model: an inline worker handles one message per `step()` in
 its own thread, and `run(stop)` loops over it.
+
+The bare `Driver` takes it too: `Driver(defn, execution="inline")` drives its executions in the
+caller's thread over a `DictStore` (or the sync store given), and propagates an action's error
+as it does in the background.
 
 ## When an action raises
 

@@ -1,8 +1,9 @@
 """Driving the pure engine over `Execution`s.
 
-The public `Driver` is now a thin **synchronous facade** over the async core
-(`harel.engine.aio.driver.AsyncDriver`), bridged by the shared anyio portal (see
-`harel.engine.aio.facade`). `_SyncDriver` (below) is the genuine sync engine, KEPT as the
+The public `Driver` is a **synchronous facade** over the driver's logic (`harel.engine.
+driving.DriverLogic`): by default run by the async core (`harel.engine.aio.driver.
+AsyncDriver`) on the shared anyio portal (see `harel.engine.aio.facade`), or with
+`execution="inline"` in the caller's thread. `_SyncDriver` (below) is the genuine sync engine, KEPT as the
 independent parity oracle (`scenarios.run_new`) and crash-simulation base in tests — it is
 NOT dead code, it is the reference the async core is checked against. `_resolve`/`_Proxy`/
 `_CONTROL` here are shared by both the sync engine and the async driver.
@@ -419,15 +420,20 @@ class _SyncDriver:
 class Driver:
     """In-memory runtime for a Definition: drives Executions through the pure engine.
 
-    This is now a thin **synchronous facade** over the async core (`AsyncDriver`), bridged
-    by the shared anyio portal (one background loop) — see `harel.engine.aio.facade`. The
-    bare driver propagates action errors (so test/scenario bugs surface), matching the old
-    sync `Driver`. A sync store passed in is adapted to the async interface, delegating to
-    the same object (so callers still introspect it); with no store it defaults to an async
-    in-memory store. Calling it from inside a running event loop is refused (use the async
-    API). The `Execution` is mutated in place on the portal loop and the bridged call blocks
-    until done, so callers see the mutation — preserving the in-place contract the test
-    harness relies on."""
+    The driver's logic is `harel.engine.driving.DriverLogic`; `execution=` picks how it runs:
+
+    - `"background"` (the default) — on the shared background event loop (`harel.engine.aio.
+      facade`), as `AsyncDriver`: each call blocks until the loop has done it. A sync store
+      is adapted to the async interface, delegating to the same object (so callers still
+      introspect it); with no store it defaults to an async in-memory store.
+    - `"inline"` — in the caller's own thread, with no event loop: every store call and every
+      action runs right there. It takes a sync store (a `DictStore` if none is given), and
+      refuses a coroutine action.
+
+    The bare driver propagates action errors (so test/scenario bugs surface). Calling it from
+    inside a running event loop is refused (use the async API), in either mode. The
+    `Execution` is mutated in place and the call returns when done, so callers see the
+    mutation — preserving the in-place contract the test harness relies on."""
 
     def __init__(
         self,
@@ -437,13 +443,27 @@ class Driver:
         definitions: Optional[dict[str, Definition]] = None,
         resolve_machine: Optional[Callable[[str], Definition]] = None,
         trace: bool = False,
+        *,
+        execution: str = "background",
     ) -> None:
+        from harel.engine.driving import _InlineDriver
+        from harel.engine.hosting import check_execution
+
+        check_execution(execution, *([("store", store)] if store is not None else []))
         self.defn = defn
         self.store = store
         self._clock = clock
         self._definitions = definitions
         self.resolve_machine = resolve_machine
-        self._async = self._portal_build(store, defn, clock, definitions, resolve_machine, trace)
+        self.execution = execution
+        self._inline: Optional[Any] = None  # a `driving._InlineDriver`
+        self._async: Any = None
+        if execution == "inline":
+            self._inline = _InlineDriver(
+                defn, store if store is not None else DictStore(), clock, definitions, resolve_machine, trace
+            )
+        else:
+            self._async = self._portal_build(store, defn, clock, definitions, resolve_machine, trace)
 
     @staticmethod
     def _portal_build(store, defn, clock, definitions, resolve_machine, trace=False):
@@ -458,32 +478,41 @@ class Driver:
 
         return facade.run(build)
 
-    def register(self, exe: Execution) -> None:
+    def _bridge(self, fn: Callable[..., Any], *args: Any) -> Any:
         from harel.engine.aio import facade
 
-        facade.run(self._async.store.save, exe)
+        return facade.run(fn, *args)
+
+    def register(self, exe: Execution) -> None:
+        if self._inline is not None:
+            self._inline.serve(self._inline.store_flow("save", exe))
+            return
+        self._bridge(self._async.store.save, exe)
 
     def get(self, execution_id: str) -> Optional[Execution]:
-        from harel.engine.aio import facade
-
-        return facade.run(self._async.store.load, execution_id)
+        if self._inline is not None:
+            return self._inline.serve(self._inline.store_flow("load", execution_id))
+        return self._bridge(self._async.store.load, execution_id)
 
     def start(self, exe: Execution) -> None:
-        from harel.engine.aio import facade
-
-        facade.run(self._async.start, exe)
+        if self._inline is not None:
+            self._inline.serve(self._inline.start_flow(exe))
+            return
+        self._bridge(self._async.start, exe)
 
     def inject(self, exe: Execution, event: Event) -> None:
-        from harel.engine.aio import facade
-
-        facade.run(self._async.inject, exe, event)
+        if self._inline is not None:
+            self._inline.serve(self._inline.inject_flow(exe, event))
+            return
+        self._bridge(self._async.inject, exe, event)
 
     def recover(self) -> None:
-        from harel.engine.aio import facade
-
-        facade.run(self._async.recover)
+        if self._inline is not None:
+            self._inline.serve(self._inline._flush_flow())
+            return
+        self._bridge(self._async.recover)
 
     def fire_due_timers(self) -> int:
-        from harel.engine.aio import facade
-
-        return facade.run(self._async.fire_due_timers)
+        if self._inline is not None:
+            return self._inline.serve(self._inline.fire_due_timers_flow())
+        return self._bridge(self._async.fire_due_timers)

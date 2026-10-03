@@ -1,4 +1,4 @@
-"""The sync runners' execution models: `execution="background"` (the shared background loop)
+"""The sync runners' (and the bare `Driver`'s) execution models: `execution="background"` (the shared background loop)
 and `execution="inline"` (the caller's own thread, no event loop), and the action-error
 policies (`on_action_error="fail"` / `"raise"`). The whole suite also runs with inline as
 the default (`pytest --execution=inline`); these pin down what only inline guarantees."""
@@ -13,7 +13,8 @@ from harel import DictStore, Event, SqliteStore, definition_from_dsl
 from harel.engine.aio_store import AsyncDictStore
 from harel.engine.distributed import DistributedRunner
 from harel.engine.durable import DurableRunner
-from harel.engine.execution import Status
+from harel.engine.execution import Execution, Status
+from harel.engine.runtime import Driver
 from harel.engine.transport import SqliteTransport
 
 DSL = """
@@ -153,3 +154,32 @@ def test_a_distributed_runner_and_its_worker_inline(tmp_path, actions):
     assert actions.threads == [threading.current_thread()]  # the worker ran the action right here
     store.close()
     transport.close()
+
+
+def test_the_bare_driver_inline(actions):
+    defn = _defn()
+    store = ThreadBoundStore()
+    driver = Driver(defn, store, execution="inline")
+    exe = Execution(definition_id=defn.id)
+    driver.register(exe)
+    driver.start(exe)
+    driver.inject(exe, Event(kind="Go"))
+    assert exe.active_path == "B" and driver.get(exe.id).active_path == "B"
+    assert actions.threads == [threading.current_thread()]
+
+
+def test_the_bare_driver_inline_defaults_to_a_dict_store_and_propagates_action_errors(actions):
+    defn = _defn()
+    driver = Driver(defn, execution="inline")
+    exe = Execution(definition_id=defn.id, context={"boom": True})
+    driver.start(exe)
+    with pytest.raises(RuntimeError, match="boom"):
+        driver.inject(exe, Event(kind="Go"))
+
+
+def test_the_bare_driver_inline_refuses_an_async_store():
+    defn = _defn()
+    with pytest.raises(TypeError, match="needs a sync store"):
+        Driver(defn, AsyncDictStore(), execution="inline")
+    with pytest.raises(ValueError, match="execution must be one of"):
+        Driver(defn, execution="threads")
