@@ -73,6 +73,97 @@ def test_a_reference_names_a_known_namespace_and_one_field():
         )
 
 
+# --- a guard comparing two references -------------------------------------------------------
+REF_GUARDS = """
+event Fail { code: int  limit: int }
+guard exhausted = context.retries >= context.max_retries
+machine M {
+  context {
+    retries: int
+    max_retries: int?
+    floor: float?
+  }
+  initial A
+  state A {}
+  final GaveUp failed {}
+  final OverLimit failed {}
+  final Floored failed {}
+  from A to GaveUp on Fail where exhausted
+  from A to OverLimit on Fail where code > event.limit
+  from A to Floored on Fail where context.floor >= event.code
+  from A to A on Fail set context.retries = context.retries + 1
+}
+"""
+
+
+@pytest.mark.parametrize(
+    "context,data,expected",
+    [
+        ({"retries": 2, "max_retries": 2}, {"code": 1, "limit": 5}, "GaveUp"),  # context vs context
+        ({"retries": 0, "max_retries": 2}, {"code": 7, "limit": 5}, "OverLimit"),  # event vs event
+        ({"retries": 0, "floor": 9.5}, {"code": 7, "limit": 9}, "Floored"),  # context vs event
+        ({"retries": 0, "floor": 1.0}, {"code": 7, "limit": 9}, "A"),
+        ({"retries": 5}, {"code": 1, "limit": 5}, "A"),  # the right side absent: doesn't hold
+    ],
+)
+def test_a_guard_compares_with_a_reference(context, data, expected):
+    runner, _, defn = _runner(REF_GUARDS)
+    exe = runner.create(defn.id, context=context)
+    assert runner.process(exe.id, Event(kind="Fail", data=data)).active_path == expected
+
+
+def test_a_reference_that_cant_be_compared_doesnt_hold():
+    runner, store, defn = _runner(REF_GUARDS)
+    exe = runner.create(defn.id, context={"retries": 3})
+    store.load(exe.id).context["max_retries"] = "three"  # as an action could leave it
+    assert runner.process(exe.id, Event(kind="Fail", data={"code": 1, "limit": 5})).active_path == "A"
+
+
+def test_retries_run_out_against_the_context():
+    runner, _, defn = _runner(REF_GUARDS)
+    exe = runner.create(defn.id, context={"retries": 0, "max_retries": 2})
+    paths = [
+        runner.process(exe.id, Event(kind="Fail", data={"code": 1, "limit": 5})).active_path for _ in range(3)
+    ]
+    assert paths == ["A", "A", "GaveUp"]
+
+
+def test_the_right_side_reference_is_checked_like_the_left():
+    assert _codes(REF_GUARDS) == set()
+    assert "unknown_context_field" in _codes(
+        REF_GUARDS.replace(">= context.max_retries", ">= context.max_retry")
+    )
+    assert "unknown_event_field" in _codes(REF_GUARDS.replace("event.limit", "event.ceiling"))
+    automatic = """
+machine M {
+  context { n: int }
+  initial A
+  state A {}
+  final B success {}
+  from A choose {
+    when context.n > event.limit to B
+    else to A
+  }
+}
+"""
+    assert "event_ref_without_event" in _codes(automatic)
+
+
+def test_comparing_references_of_different_types_is_a_warning():
+    mixed = REF_GUARDS.replace(
+        "event Fail { code: int  limit: int }", "event Fail { code: string  limit: int }"
+    )
+    issues = [i for i in validate(definition_from_dsl(mixed, "M")) if i.code == "compare_type_mismatch"]
+    assert issues and all(i.severity == "warning" for i in issues)
+    assert any("context.floor (float) with event.code (string)" in i.message for i in issues)
+    assert "compare_type_mismatch" not in _codes(REF_GUARDS)  # float vs int, int vs int: fine
+
+
+def test_a_bare_name_on_the_right_is_not_a_reference():
+    with pytest.raises(DslError):
+        definition_from_dsl("machine M {\n initial A\n state A {}\n from A to A on E where x == y\n}", "M")
+
+
 # --- regions see the parent's context -------------------------------------------------------
 REGIONS = """
 event Go {}

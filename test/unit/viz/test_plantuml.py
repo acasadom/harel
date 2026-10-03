@@ -70,3 +70,19 @@ def test_choose_and_set_are_rendered():
     )
     assert "Working_choose --> GaveUp: [context.attempts >= 3]" in text
     assert "Working_choose --> Cooling: else" in text
+
+
+def test_a_guard_comparing_two_references_is_rendered():
+    source = """
+event Fail { code: int }
+machine M {
+  context { retries: int  max_retries: int }
+  initial A
+  state A {}
+  final B failed {}
+  from A to B on Fail where context.retries >= context.max_retries
+}
+"""
+    assert "A --> B: Fail\\n[context.retries >= context.max_retries]" in render(
+        definition_from_dsl(source, "M")
+    )

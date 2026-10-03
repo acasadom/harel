@@ -121,13 +121,17 @@ field >  value     field >= value
 field in [a, b]
 event.field == value               # the same as the bare `field`: the event's data
 context.field == value             # the execution context
+context.n >= context.max           # the right side may be a reference too (namespaced)
+field < event.limit
 guardName                          # a named guard, as an atom
 P and Q     P or Q     not P       # composable; parenthesize as needed
 ```
 
-A predicate on a field the event (or, for `context.x`, the context) **does not carry** is
-**false** (not an error), and so is a comparison between values that can't be compared (`"abc" <
-3`, `null < 3`, `x in 5`). A reference names one field of its namespace — no nested paths.
+A predicate on a field the event (or, for `context.x`, the context) **does not carry** — on
+either side — is **false** (not an error), and so is a comparison between values that can't be
+compared (`"abc" < 3`, `null < 3`, `x in 5`). A reference names one field of its namespace — no
+nested paths. On the right side it is always namespaced (`context.x`, `event.x`); a bare name
+there is not a reference.
 
 ## Actions
 

@@ -20,6 +20,19 @@ guard exhausted = context.attempts >= 3          # named guards may read it too
 As with an event field, a guard on a context field that isn't there — or whose value can't be
 compared (`"abc" < 3`) — simply doesn't hold.
 
+The right side of a comparison is a literal or another reference, written with its namespace
+(a bare name on the right is not a reference):
+
+```text
+from Working to GaveUp on Fail where context.attempts >= context.max_attempts
+from Working to Retry  on Fail where event.code != context.last_code
+```
+
+If either side is missing, or the two values can't be compared, the guard doesn't hold. When
+both sides have a declared type (the context schema, the event's fields) and the types differ —
+an `int` with a `string` — `harel validate` warns (`compare_type_mismatch`): such values are never
+equal or ordered.
+
 ## A typed context
 
 A machine may declare its context's fields, with the same field syntax as an event:

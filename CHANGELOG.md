@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **A guard can compare two references**: the right side of a comparison may be `context.x` or
+  `event.x`, not only a literal — `where context.retries >= context.max_retries`. Either side
+  missing, or values that can't be compared, make it not hold. `harel validate` checks the
+  right side like the left (declared context field, existing event field, no event on an
+  automatic transition) and warns when the two declared types differ
+  (`compare_type_mismatch`).
+
 ## 0.4.0 — 2026-10-02
 
 Since 0.3.1. The changes under [Behavior changes](#behavior-changes) can change what an existing

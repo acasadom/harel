@@ -40,7 +40,9 @@ class Predicate:
     """A composable predicate. Exactly one shape per node: a `leaf` (field/op/value)
     or a combinator `all`/`any`/`not` over children (`not` has a single child). Leaf op
     is one of eq/ne/lt/le/gt/ge/in. A leaf reads `field` from its `source` namespace:
-    the triggering event's data (`event`, the default) or the execution's `context`."""
+    the triggering event's data (`event`, the default) or the execution's `context`. It
+    compares it with `value`, a literal — or, when `value_ref` is set (a `ref` `Expr`:
+    `event.x` / `context.x`), with the value that reference reads."""
 
     node: str  # "leaf" | "all" | "any" | "not"
     # `children` first so the dataclasses `field()` call is not shadowed by the
@@ -50,6 +52,7 @@ class Predicate:
     op: Optional[str] = None
     value: Any = None
     source: str = "event"  # "event" | "context"
+    value_ref: Optional[Expr] = None  # the right side is this reference, not `value`
 
 
 @dataclass

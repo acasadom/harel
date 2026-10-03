@@ -70,7 +70,9 @@ Distinct problems, each a structured `Issue` (`severity`, `code`, `path`, `messa
   the event on an automatic transition — which has no event — is an error; so is an automatic
   `choose` without `else` in a state nothing can re-run it from (see [the context in the
   model](17-context));
-- a `with` anywhere but an `invoke` or an orthogonal node is a warning (nothing reads it).
+- a `with` anywhere but an `invoke` or an orthogonal node is a warning (nothing reads it);
+- a guard comparing two references whose declared types differ (`context.n >= event.name`, an
+  `int` and a `string`) is a warning (`compare_type_mismatch`): they are never equal or ordered.
 
 ## Fix it, and fail the build on errors
 
