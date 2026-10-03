@@ -245,7 +245,7 @@ def _build_transition(scope: Node, raw: dict, global_context: Optional[dict]) ->
         event_filter=_build_event_filter(raw["on_event"]) if raw.get("on_event") is not None else None,
         selector=_build_selector(sel, global_context) if sel is not None else None,
         choice=_build_choice(scope, choice, pos) if choice is not None else None,
-        assignments=tuple(Assign(field=a["field"], expr=_build_expr(a["expr"])) for a in raw.get("set", ())),
+        assignments=_build_assignments(raw.get("set", ())),
     )
 
 
@@ -258,14 +258,24 @@ def _build_choice(scope: Node, raw: dict, pos: Any) -> Choice:
             raise BuildError(f"cannot resolve choice target {name!r} from scope {scope.full_path!r}", pos)
         return node
 
-    branches = []
+    branches, branch_assignments = [], []
     for b in raw["branches"]:
         guard = _parse_predicate(b["when"])
         if guard is None:
             raise BuildError("a `when` branch needs a guard", pos)
         branches.append((guard, target(b["to"])))
+        branch_assignments.append(_build_assignments(b.get("set", ())))
     default = raw.get("default")
-    return Choice(branches=branches, default=target(default) if default is not None else None)
+    return Choice(
+        branches=branches,
+        default=target(default) if default is not None else None,
+        branch_assignments=branch_assignments,
+        default_assignments=_build_assignments(raw.get("default_set", ())),
+    )
+
+
+def _build_assignments(raw: Any) -> tuple[Assign, ...]:
+    return tuple(Assign(field=a["field"], expr=_build_expr(a["expr"])) for a in raw)
 
 
 def _build_expr(raw: dict) -> Expr:

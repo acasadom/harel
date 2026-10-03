@@ -281,14 +281,31 @@ def _event_pred(event: Event, context: dict):
     )
 
 
+def _choice_index(t, event_data: dict, context: dict) -> Optional[int]:
+    """The index of the first branch of a `choose` whose guard holds (None: none does)."""
+    scopes = {"event": event_data, "context": context}
+    return next((i for i, (guard, _) in enumerate(t.choice.branches) if _eval(guard, scopes)), None)
+
+
 def _choice_branch(t, event_data: dict, context: dict):
     """The target a `choose` picks: its first branch whose guard holds, else its `default`
     (None if neither — the transition then doesn't fire)."""
-    scopes = {"event": event_data, "context": context}
-    for guard, target in t.choice.branches:
-        if _eval(guard, scopes):
-            return target
-    return t.choice.default
+    i = _choice_index(t, event_data, context)
+    return t.choice.branches[i][1] if i is not None else t.choice.default
+
+
+def _effect(t, event: Optional[Event], context: dict) -> tuple:
+    """A transition's assignments: its own `set`, then — for a `choose` — the `set` of the
+    branch it takes (picked from the same event and context as its target, before either
+    changes)."""
+    if t.choice is None:
+        return t.assignments
+    i = _choice_index(t, event.data if event is not None else {}, context)
+    if i is None:
+        branch = t.choice.default_assignments
+    else:  # a Choice built without per-branch assignments has none
+        branch = t.choice.branch_assignments[i] if i < len(t.choice.branch_assignments) else ()
+    return t.assignments + tuple(branch)
 
 
 def _choice_open(t, event_data: dict, context: dict) -> bool:
@@ -486,7 +503,7 @@ def _expire(defn: Definition, exe: Execution, event: Event) -> Step:
     if found is not None:
         scope, t = found
         dest = yield from _target_of(defn, exe, scope, t, expired)
-        yield from _take(defn, exe, dest, expired, t.assignments)
+        yield from _take(defn, exe, dest, expired, _effect(t, expired, exe.context))
         yield from _drain(defn, exe)
         return
     site = defn.index.get(exe.active_path) if exe.active_path is not None else None
@@ -807,7 +824,7 @@ def _drain(defn: Definition, exe: Execution) -> Step:
         if auto is not None:
             scope, t = auto
             target = yield from _target_of(defn, exe, scope, t, None)
-            yield from _take(defn, exe, target, None, t.assignments)
+            yield from _take(defn, exe, target, None, _effect(t, None, exe.context))
             continue
 
         if _resolve(defn, exe, _any_pred, allow_parent=False) is not None:
@@ -815,7 +832,7 @@ def _drain(defn: Definition, exe: Execution) -> Step:
             if found is not None:
                 ev, (scope, t) = found
                 target = yield from _target_of(defn, exe, scope, t, ev)
-                yield from _take(defn, exe, target, ev, t.assignments)
+                yield from _take(defn, exe, target, ev, _effect(t, ev, exe.context))
                 continue
             return  # has a transition at its own scope (waiting for an event)
 
@@ -1004,7 +1021,7 @@ def process(defn: Definition, exe: Execution, event: Event) -> Step:
         exe.status = Status.RUNNING
         scope, t = found
         dest = yield from _target_of(defn, exe, scope, t, event)
-        yield from _take(defn, exe, dest, event, t.assignments)
+        yield from _take(defn, exe, dest, event, _effect(t, event, exe.context))
         yield from _drain(defn, exe)
         exe.processed_events += 1
         return
@@ -1063,7 +1080,7 @@ def process(defn: Definition, exe: Execution, event: Event) -> Step:
                     exe.children.pop(cid, None)
                     scope, t = found
                     dest = yield from _target_of(defn, exe, scope, t, completion)
-                    yield from _take(defn, exe, dest, completion, t.assignments)
+                    yield from _take(defn, exe, dest, completion, _effect(t, completion, exe.context))
                     yield from _drain(defn, exe)
             return
         # otherwise this is an orthogonal region's join: re-drain (the AND-state's
@@ -1088,7 +1105,7 @@ def process(defn: Definition, exe: Execution, event: Event) -> Step:
         if found is not None:
             scope, t = found
             dest = yield from _target_of(defn, exe, scope, t, event)
-            yield from _take(defn, exe, dest, event, t.assignments)
+            yield from _take(defn, exe, dest, event, _effect(t, event, exe.context))
             yield from _drain(defn, exe)
             exe.processed_events += 1
         return
@@ -1101,7 +1118,7 @@ def process(defn: Definition, exe: Execution, event: Event) -> Step:
     if found is not None:
         scope, t = found
         target = yield from _target_of(defn, exe, scope, t, event)
-        yield from _take(defn, exe, target, event, t.assignments)
+        yield from _take(defn, exe, target, event, _effect(t, event, exe.context))
     else:
         assert exe.active_path is not None
         if event.kind in _deferred_kinds(defn, exe):

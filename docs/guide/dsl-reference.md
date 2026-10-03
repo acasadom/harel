@@ -92,6 +92,7 @@ from Fork join any to X else to Y          # …at least one
 
 from A choose on Event {          # guarded choice: the first `when` that holds wins
   when context.n > 3 to B
+  when context.n > 0 to D set context.n = context.n - 1   # a branch's own `set`, if it's taken
   else to C                       # optional; without it, no match = the transition doesn't fire
 }
 

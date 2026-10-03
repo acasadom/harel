@@ -329,16 +329,24 @@ class _ToProgram(Transformer):
 
     @v_args(inline=True, meta=True)
     def choice_trans(self, meta, src, *rest):
-        branches = [{"when": pred, "to": tgt} for tag, pred, tgt in (r for r in rest if _tagged(r, "when"))]
+        branches = [
+            {"when": pred, "to": tgt, **({"set": assigns} if assigns else {})}
+            for _, pred, tgt, assigns in (r for r in rest if _tagged(r, "when"))
+        ]
         choice: dict = {"branches": branches}
-        default = next((r[1] for r in rest if _tagged(r, "else")), None)
+        default = next((r for r in rest if _tagged(r, "choice_else")), None)
         if default is not None:
-            choice["default"] = default
+            choice["default"] = default[1]
+            if default[2]:
+                choice["default_set"] = default[2]
         t: dict = {"from": str(src), "choice": choice, "__pos__": (meta.line, meta.column)}
         return ("transition", _with_trigger_and_set(t, rest))
 
-    def when_branch(self, pred, tgt):
-        return ("when", _pred_to_dict(pred), str(tgt))
+    def when_branch(self, pred, tgt, assigns=None):
+        return ("when", _pred_to_dict(pred), str(tgt), assigns[1] if assigns else None)
+
+    def choice_else(self, tgt, assigns=None):
+        return ("choice_else", str(tgt), assigns[1] if assigns else None)
 
     # --- assignments (`set`) ---
     @v_args(inline=True, meta=True)

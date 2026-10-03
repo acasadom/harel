@@ -103,10 +103,19 @@ def _emit_choice(source: Node, t: Transition, pad: str, out: list[str]) -> None:
     node = f"{src}__choose"
     out.append(f"{pad}state {node} <<choice>>")
     out.append(f"{pad}{src} --> {node}{_edge_suffix(t.event_filter, t.assignments)}")
-    for guard, target in choice.branches:
-        out.append(f"{pad}{node} --> {_nid(target)} : [{branch_text(guard)}]")
+    for i, (guard, target) in enumerate(choice.branches):
+        assigns = choice.branch_assignments[i] if i < len(choice.branch_assignments) else ()
+        out.append(f"{pad}{node} --> {_nid(target)} : [{branch_text(guard)}]" + _branch_effect(assigns))
     if choice.default is not None:
-        out.append(f"{pad}{node} --> {_nid(choice.default)} : else")
+        out.append(
+            f"{pad}{node} --> {_nid(choice.default)} : else" + _branch_effect(choice.default_assignments)
+        )
+
+
+def _branch_effect(assignments: tuple) -> str:
+    """A `choose` branch's own `set`, appended to its edge label (empty if it has none)."""
+    effect = effect_text(assignments)
+    return "<br/>/ " + effect if effect else ""
 
 
 def _emit_selector(comp: Node, source: Node, t: Transition, pad: str, out: list[str]) -> None:

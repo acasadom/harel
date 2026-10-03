@@ -112,6 +112,18 @@ forever if no branch holds: `harel validate` reports it (`choose_can_hang`).
 Its guards are evaluated when the transition is picked, so they see the context **before** the
 transition's own `set`, as in UML — above, the fourth failure is the one that gives up.
 
+A branch may carry its own `set`, applied only when that branch is taken — after the transition's
+own `set`, and, like it, evaluated against the context as the transition starts:
+
+```text
+from Working choose on Fail set context.last_code = event.code {
+  when context.retries < context.max_retries to Refining set context.retries = context.retries + 1
+  else to GaveUp set context.gave_up = true
+}
+```
+
+Every failure records its code; only a retry counts one, and only giving up sets `gave_up`.
+
 A full example:
 
 ```python

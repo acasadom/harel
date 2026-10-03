@@ -110,10 +110,14 @@ class Choice:
     """A guarded choice (`choose`): `branches` are (guard, target) pairs tried in order —
     the first whose guard holds wins, else the `default` (`else`) target. With no branch
     holding and no `default`, the transition doesn't fire at all. Guards read the event
-    and the execution context, like a `where`."""
+    and the execution context, like a `where`. A branch may carry its own `set`
+    (`branch_assignments[i]` for `branches[i]`, `default_assignments` for the `else`),
+    applied after the transition's own when that branch is taken."""
 
     branches: list[tuple[Predicate, "Node"]] = field(default_factory=list)
     default: Optional["Node"] = None
+    branch_assignments: list[tuple[Assign, ...]] = field(default_factory=list)
+    default_assignments: tuple[Assign, ...] = ()
 
 
 @dataclass

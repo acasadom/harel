@@ -95,7 +95,7 @@ arg_value:    NAME             -> a_name
 // or a selector branch — is still `... to <state>` (one meaning for `to`)
 transition:     "from" ref "to" ref trigger? assign_clause?
 // a guarded choice: the first `when` whose guard holds wins, else the `else` target
-choice_trans:   "from" ref "choose" trigger? assign_clause? "{" when_branch+ else_branch? "}"
+choice_trans:   "from" ref "choose" trigger? assign_clause? "{" when_branch+ choice_else? "}"
 selector_trans: "from" ref "select" action enum_decl? trigger? "{" branch+ else_branch? "}"
 // sugar: orthogonal-join aggregation — route by whether all/any region succeeded
 join_trans:     "from" ref "join" "all" "to" ref "else" "to" ref -> join_all
@@ -103,7 +103,9 @@ join_trans:     "from" ref "join" "all" "to" ref "else" "to" ref -> join_all
 enum_decl:      "returns" "{" value ("," value)* "}"
 branch:         value "to" ref
 else_branch:    "else" "to" ref
-when_branch:    "when" predicate "to" ref
+// a `choose` branch may carry its own `set`, applied only when that branch is taken
+when_branch:    "when" predicate "to" ref assign_clause?
+choice_else:    "else" "to" ref assign_clause?
 
 // context assignments on a transition: `set context.n = context.n + 1, context.last = event.id`.
 // A right-hand side is a reference, a literal, or ONE arithmetic operation over two of them.

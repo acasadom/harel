@@ -728,3 +728,91 @@ def test_an_invoked_machine_starts_with_its_defaults_and_a_region_with_what_it_i
     exe2 = DurableRunner(store2, {split.id: split}).create(split.id, context={"job": "j2"})
     (region_id,) = store2.load(exe2.id).children
     assert store2.load(region_id).context == {"job": "j2"}  # not the machine's `limit` default
+
+
+# --- a `set` on a `choose` branch ------------------------------------------------------------
+BRANCH_SET = """
+event Fail { reason: string? }
+machine M {
+  context {
+    retries: int = 0
+    max_retries: int = 2
+    last: string?
+    gave_up: bool?
+  }
+  initial Working
+  state Working {}
+  state Refining {}
+  final GaveUp failed {}
+  from Working choose on Fail set context.last = event.reason {
+    when context.retries < context.max_retries to Refining set context.retries = context.retries + 1
+    else to GaveUp set context.gave_up = true, context.retries = context.retries * 10
+  }
+  from Refining to Working
+}
+"""
+
+
+def test_only_the_taken_branch_applies_its_set():
+    runner, _, defn = _runner(BRANCH_SET)
+    exe = runner.create(defn.id)
+    seen = []
+    for i in range(3):
+        e = runner.process(exe.id, Event(kind="Fail", data={"reason": f"r{i}"}))
+        seen.append((e.active_path, dict(e.context)))  # a snapshot: the in-memory store hands back one object
+    assert [(path, ctx["retries"]) for path, ctx in seen] == [("Working", 1), ("Working", 2), ("GaveUp", 20)]
+    assert (
+        seen[-1][1]["last"] == "r2" and seen[-1][1]["gave_up"] is True
+    )  # the transition's own set: every branch
+    assert "gave_up" not in seen[0][1]  # the else's set only when the else is taken
+
+
+def test_a_branch_set_reads_the_context_from_before_the_transition():
+    source = BRANCH_SET.replace(
+        "to Refining set context.retries = context.retries + 1",
+        "to Refining set context.retries = context.retries + 1, context.last = context.last",
+    )
+    runner, _, defn = _runner(source)
+    exe = runner.create(defn.id, context={"last": "before"})
+    exe = runner.process(exe.id, Event(kind="Fail", data={"reason": "now"}))
+    assert exe.context["last"] == "before"  # evaluated with the transition's own, up front
+
+
+def test_a_branch_set_is_validated_like_a_transitions():
+    assert _codes(BRANCH_SET) == set()
+    assert "unknown_context_field" in _codes(
+        BRANCH_SET.replace("set context.gave_up = true", "set context.gaveup = true")
+    )
+    automatic = """
+machine M {
+  context { n: int = 0 }
+  initial A
+  state A {}
+  final B success {}
+  from A choose {
+    when context.n > 0 to B set context.n = event.n
+    else to B
+  }
+}
+"""
+    assert "event_ref_without_event" in _codes(automatic)
+
+
+def test_a_branch_set_is_drawn_on_its_branch():
+    from harel.viz.mermaid import render as mermaid
+    from harel.viz.plantuml import render as plantuml
+
+    defn = definition_from_dsl(BRANCH_SET, "M")
+    lines = mermaid(defn).splitlines()
+    assert (
+        "Working__choose --> Refining : [context.retries < context.max_retries]<br/>"
+        "/ context.retries = context.retries + 1"
+    ) in lines
+    assert (
+        "Working__choose --> GaveUp : else<br/>/ context.gave_up = true, context.retries = context.retries * 10"
+        in lines
+    )
+    assert (
+        "Working_choose --> Refining: [context.retries < context.max_retries]\\n/ context.retries = context.retries + 1"
+        in plantuml(defn)
+    )

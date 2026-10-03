@@ -351,9 +351,18 @@ def _expr_type(expr: Expr, defn: Definition) -> Optional[str]:
     return None
 
 
+def _all_assignments(t: Transition) -> tuple:
+    """Every `set` a transition can apply: its own, and each of its `choose` branches'."""
+    if t.choice is None:
+        return t.assignments
+    branches = tuple(a for assigns in t.choice.branch_assignments for a in assigns)
+    return t.assignments + branches + tuple(t.choice.default_assignments)
+
+
 def _check_assignments(node: Node, t: Transition, defn: Definition, issues: list[Issue]) -> None:
-    """A transition's `set`: what it reads must be readable, what it writes must fit."""
-    for assign in t.assignments:
+    """A transition's `set` (and its `choose` branches'): what it reads must be readable,
+    what it writes must fit."""
+    for assign in _all_assignments(t):
         for ref in _expr_refs(assign.expr):
             if ref.source == "context" and ref.field:
                 _check_context_ref(node, ref.field, "eq", defn, issues)
@@ -528,7 +537,7 @@ def _check_events(defn: Definition, issues: list[Issue]) -> None:
                 ]
                 extra += [
                     (r.field, "eq")
-                    for a in t.assignments
+                    for a in _all_assignments(t)
                     for r in _expr_refs(a.expr)
                     if r.source == "event" and r.field
                 ]
