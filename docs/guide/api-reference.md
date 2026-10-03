@@ -44,7 +44,8 @@ See [static validation](../tutorial/14-validation).
 ## Running (single process)
 
 ```text
-DurableRunner(store, definitions, clock=time.time, resolver=None, trace=False)
+DurableRunner(store, definitions, clock=time.time, resolver=None, trace=False,
+              *, execution="background", on_action_error="fail")
     .create(definition_id, context=None, execution_id=None, priority=0) -> Execution
     .process(execution_id, event) -> Execution
     .fire_due_timers() -> int
@@ -67,6 +68,10 @@ purge_finished(store, *, older_than, statuses=(DONE, CANCELLED), archive=None,
 - `resolver` resolves submachine `invoke` FQNs not already in `definitions`.
 - `trace=True` records the opt-in execution timeline in each commit (env `STM_TRACE`); off by
   default. See [stores](stores) and the [monitor](monitor).
+- `execution` is `"background"` (a shared background event loop, the default) or `"inline"`
+  (the caller's own thread, no event loop, sync store only); `on_action_error` is `"fail"`
+  (dead-letter the execution) or `"raise"` (the exception reaches the caller, the step isn't
+  committed). See [execution models](execution).
 
 ## Running (distributed)
 
@@ -74,13 +79,14 @@ purge_finished(store, *, older_than, statuses=(DONE, CANCELLED), archive=None,
 from harel.engine.distributed import DistributedRunner
 from harel.engine.transport import InMemoryTransport   # + Sqlite/Libsql/Redis/Postgres/Rqlite/Mongo/Sqs
 
-DistributedRunner(store, transport, definitions, clock=time.time, resolver=None, trace=False)
+DistributedRunner(store, transport, definitions, clock=time.time, resolver=None, trace=False,
+                  *, execution="background")
     .create(definition_id, context=None, execution_id=None, priority=0, start_on_create=True) -> Execution
     .start(execution_id, data=None) -> None  # publishes Start; a worker runs it, not the caller.
                                    # create()'s start_on_create=True already does this;
                                    # data seeds the context — the only way to attach one to Start
     .send(execution_id, event) -> None  # refuses a caller-supplied Start (raises ValueError)
-    .worker(...) -> Worker        # .step() one message; .run(stop_event) loops
+    .worker(...) -> Worker        # .step() one message; .run(stop_event) loops; same `execution`
     .cancel / .terminate / .suspend / .resume / .redrive / .purge
 ```
 

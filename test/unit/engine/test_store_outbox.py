@@ -1,13 +1,13 @@
 """Outbox-seq contract of `commit` over every in-process backend, sync and async (no
 Docker). The networked servers (Postgres, rqlite, Mongo, DynamoDB-on-LocalStack) are
 covered in test/integration/test_store_outbox.py (stack). Shared seed + assertions live in
-`outbox_contract`."""
+`harel.testing`."""
 
 import pytest
-from outbox_contract import assert_async_outbox_contract, assert_outbox_contract
 
 from harel.engine.aio_store import AsyncDictStore, AsyncSqliteStore
 from harel.engine.store import DictStore, SqliteStore
+from harel.testing import assert_async_outbox_contract, assert_outbox_contract
 
 
 def test_dict_outbox():

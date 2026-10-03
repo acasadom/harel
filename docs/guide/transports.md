@@ -64,6 +64,21 @@ serialization primitive (SQLite's write-lock, Postgres's row-lock, SQS's native 
 leans on it; the others (Redis, Mongo) build a per-group lock record by hand, indexed by when the
 group next becomes claimable so `claim` reads only the few due groups instead of scanning.
 
+A transport outside harel builds on `harel.engine.transport.base` (`Transport`,
+`AsyncTransport`, `Lease`, `PARKED`) and checks itself against the contract with
+`harel.testing`:
+
+```text
+from harel.testing import assert_transport_contract
+
+def test_my_transport():
+    assert_transport_contract(lambda clock: MyTransport(clock=clock))
+```
+
+`make(clock)` returns a fresh, empty transport for each check. Pass `timing=False` if it keeps
+its deadlines elsewhere than the injected clock (server-side TTLs, a queue service's visibility)
+and `priorities=False` if it has none.
+
 ## The backends
 
 Each backend has its own page with the full queue layout and every operation broken down with the

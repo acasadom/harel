@@ -1,19 +1,25 @@
 """Distributed execution (sync API): stateless workers drive Executions off a `Transport`.
 
-`DistributedRunner` and `Worker` are now thin **synchronous facades** over the async core
-(`harel.engine.aio.distributed`), bridged by the shared anyio portal (one background loop —
-see `harel.engine.aio.facade`). The pure engine is unchanged; this only changes *how events
-move*: a `Worker` loops `claim`→`load`→dedupe→`route`→`ack`; the transport guarantees one
-in-flight message per group, so each Execution is driven by at most one worker at a time.
+The pure engine is unchanged; this only changes *how events move*: a `Worker` loops
+`claim`→`load`→dedupe→`route`→`ack`; the transport guarantees one in-flight message per
+group, so each Execution is driven by at most one worker at a time. `DistributedRunner` is the
+sending side — create/start/send and the control plane — and never runs a machine's actions.
 
-The facade `Worker.run(stop)` is a plain sync loop over `step()` (each `step` bridges to the
-async worker via the portal), so it runs in the caller's thread and honours a `threading.Event`
-without any threading↔asyncio event translation. For native async concurrency (many events in
-flight on one loop) use `harel.engine.aio.distributed.AsyncWorker` directly.
+Their logic is `harel.engine.hosting.SenderLogic` / `WorkerLogic`; `execution=` picks how it
+runs:
 
-A sync store/transport passed here is adapted to the async interface (delegating to the same
-object); pass async backends directly for the native path. Calling the sync facade from inside
-a running event loop is refused (use the async API).
+- `"background"` (the default) — on the shared background event loop (`harel.engine.aio.
+  facade`), as `AsyncDistributedRunner` / `AsyncWorker`: each call blocks until the loop has
+  done it. A sync store/transport is adapted to the async interface (delegating to the same
+  object); async backends may be passed directly.
+- `"inline"` — in the caller's own thread, with no event loop: every store and transport call
+  (and, in a worker, every action) runs right there, inside the caller's transaction. It takes
+  a sync store and transport, and refuses a coroutine action.
+
+`Worker.run(stop)` is a plain sync loop over `step()` in either mode, so it runs in the
+caller's thread and honours a `threading.Event`. For native async concurrency (many events in
+flight on one loop) use `harel.engine.aio.distributed.AsyncWorker` directly. Calling the sync
+facade from inside a running event loop is refused (use the async API).
 """
 
 from __future__ import annotations
@@ -23,49 +29,27 @@ import time
 from typing import Any, Callable, Optional
 
 from harel.definition.model import Definition
+from harel.engine import control
 from harel.engine.execution import Execution
-from harel.engine.resolve import MachineResolver, ResolveError
+from harel.engine.flow import Flow, run_inline
+from harel.engine.hosting import (  # noqa: F401 (re-exported)
+    ControlPort,
+    SenderLogic,
+    WorkerLogic,
+    _defn_for,
+    _register_submachines,
+    _resolve_machine,
+    check_execution,
+)
+from harel.engine.resolve import MachineResolver
 from harel.spec.states import Event
 
 
-def _register_submachines(definitions: dict) -> None:
-    """Fold every registered Definition's inline `invoke` targets into `definitions`
-    by id (= their synthetic FQN), so they resolve without an external resolver."""
-    for defn in list(definitions.values()):
-        definitions.update({s.id: s for s in defn.submachines.values()})
-
-
-def _resolve_machine(definitions: dict, resolver: Optional[MachineResolver], fqn: str) -> Definition:
-    """Resolve a submachine FQN and register it in `definitions` (so the child then
-    routes by its own id). Inline targets (id == FQN) are already registered; an
-    external FQN goes through the resolver. Raises if neither has it."""
-    if fqn in definitions:  # an inline submachine (id == synthetic FQN)
-        return definitions[fqn]
-    if resolver is None:
-        raise ResolveError(f"invoke {fqn!r} but this runner has no machine resolver")
-    defn = resolver.resolve(fqn)
-    definitions[defn.id] = defn
-    return defn
-
-
-def _defn_for(definitions: dict, resolver: Optional[MachineResolver], exe: Execution) -> Definition:
-    """The Definition to drive `exe`: from the registry, or — for a submachine child
-    whose Definition this worker has not built yet — lazily resolved by its persisted
-    FQN (the spawning worker may be a different process)."""
-    defn = definitions.get(exe.definition_id)
-    if defn is None and exe.definition_fqn is not None:
-        defn = _resolve_machine(definitions, resolver, exe.definition_fqn)
-    if defn is None:
-        raise KeyError(exe.definition_id)
-    return defn
-
-
 class Worker:
-    """Sync facade over `aio.distributed.AsyncWorker` (same constructor as the old sync
-    Worker, so direct construction keeps working): `step()` bridges one claim→route→ack to
-    the async worker; `run(stop)` is a plain sync loop over `step()`/`fire_due_timers()`
-    honouring a `threading.Event` (so it runs in a thread without event translation). A sync
-    store/transport is adapted to the async interface (delegating to the same object)."""
+    """A sync worker: `step()` handles one claim→route→ack — by `WorkerLogic`, inline or on
+    the background loop as `AsyncWorker` (see the module docstring); `run(stop)` is a plain
+    sync loop over `step()`/`fire_due_timers()` honouring a `threading.Event`, one message
+    at a time (`concurrency` is `AsyncWorker.run`'s; this loop doesn't use it)."""
 
     def __init__(
         self,
@@ -81,11 +65,30 @@ class Worker:
         high_ratio: float = 0.0,
         priority_threshold: int = 1,
         trace: bool = False,
+        *,
+        execution: str = "background",
     ) -> None:
+        check_execution(execution, ("store", store), ("transport", transport))
         self.store = store
         self.transport = transport
         self.definitions = definitions
         self.worker_id = worker_id
+        self.execution = execution
+        if execution == "inline":
+            self._inline: Optional[WorkerLogic] = WorkerLogic(
+                definitions,
+                worker_id,
+                visibility,
+                suspend_recheck,
+                clock,
+                resolver,
+                trace=trace,
+                high_ratio=high_ratio,
+                priority_threshold=priority_threshold,
+            )
+            self._ports = {"store": store, "transport": transport}
+            return
+        self._inline = None
         self._async = self._portal_build(
             store,
             transport,
@@ -138,12 +141,24 @@ class Worker:
 
         return facade.run(build)
 
+    def _serve_inline(self, flow: Flow) -> Any:
+        from harel.engine.aio import facade
+
+        facade._guard_no_running_loop()
+        return run_inline(flow, self._ports)
+
     def step(self) -> bool:
+        """Process at most one message. Returns False if nothing was claimable."""
+        if self._inline is not None:
+            combined = getattr(self.store, "load_for_event", None) is not None
+            return self._serve_inline(self._inline.step_flow(combined_load=combined))
         from harel.engine.aio import facade
 
         return facade.run(self._async.step)
 
     def fire_due_timers(self) -> int:
+        if self._inline is not None:
+            return self._serve_inline(self._inline.fire_due_timers_flow())
         from harel.engine.aio import facade
 
         return facade.run(self._async.fire_due_timers)
@@ -157,7 +172,8 @@ class Worker:
 
 
 class DistributedRunner:
-    """Sync facade over `aio.distributed.AsyncDistributedRunner`."""
+    """The sync sending side: `SenderLogic`, inline or on the background loop as
+    `AsyncDistributedRunner` (see the module docstring)."""
 
     def __init__(
         self,
@@ -167,13 +183,27 @@ class DistributedRunner:
         clock: Callable[[], float] = time.time,
         resolver: Optional[MachineResolver] = None,
         trace: bool = False,
+        *,
+        execution: str = "background",
     ) -> None:
+        """`execution` is `"background"` (the shared background event loop, the default)
+        or `"inline"` (the caller's own thread, no event loop: create/start/send and the
+        control plane write to the store and transport right there, inside the caller's
+        transaction, over sync backends) — see the module docstring. Its `worker()` uses the
+        same execution model."""
+        check_execution(execution, ("store", store), ("transport", transport))
         self.store = store
         self.transport = transport
         self.definitions = definitions
         self.resolver = resolver
         self._clock = clock
         self._trace = trace
+        self.execution = execution
+        if execution == "inline":
+            self._inline: Optional[SenderLogic] = SenderLogic(definitions, clock, resolver, trace)
+            self._ports = {"store": store, "transport": transport, "control": ControlPort(control, store)}
+            return
+        self._inline = None
         self._async = self._portal_build(store, transport, definitions, clock, resolver, trace)
 
     @staticmethod
@@ -194,6 +224,16 @@ class DistributedRunner:
 
         return facade.run(build)
 
+    def _do(self, name: str, *args: Any, **kwargs: Any) -> Any:
+        """Run operation `name` — `SenderLogic.<name>_flow` inline, or the async runner's
+        `<name>` on the background loop."""
+        from harel.engine.aio import facade
+
+        if self._inline is not None:
+            facade._guard_no_running_loop()
+            return run_inline(getattr(self._inline, f"{name}_flow")(*args, **kwargs), self._ports)
+        return facade.run(getattr(self._async, name), *args, **kwargs)
+
     def create(
         self,
         definition_id: str,
@@ -206,9 +246,7 @@ class DistributedRunner:
         `AsyncDistributedRunner.create`). By default (`start_on_create=True`) this
         also publishes `Start`, so a worker picks it up right away; pass `False`
         to defer that and call `start(execution_id)` yourself later."""
-        from harel.engine.aio import facade
-
-        return facade.run(self._async.create, definition_id, context, execution_id, priority, start_on_create)
+        return self._do("create", definition_id, context, execution_id, priority, start_on_create)
 
     def start(self, execution_id: str, data: Optional[dict] = None) -> None:
         """Publish a `Start` for `execution_id` — a worker runs it, not this caller.
@@ -216,17 +254,13 @@ class DistributedRunner:
         context before the machine runs (start-with-parameters) — the only
         sanctioned way to attach a payload to `Start`; `send()` refuses the kind
         outright."""
-        from harel.engine.aio import facade
-
-        facade.run(self._async.start, execution_id, data)
+        self._do("start", execution_id, data)
 
     def send(self, execution_id: str, event: Event) -> None:
         """Publish a domain event — a worker processes it, not this caller. Refuses
         a caller-supplied `Start` event (raises `ValueError`): use `create()` or
         `start(execution_id, data=...)` instead."""
-        from harel.engine.aio import facade
-
-        facade.run(self._async.send, execution_id, event)
+        self._do("send", execution_id, event)
 
     def worker(
         self,
@@ -251,40 +285,29 @@ class DistributedRunner:
             high_ratio=high_ratio,
             priority_threshold=priority_threshold,
             trace=self._trace,
+            execution=self.execution,
         )
 
     # --- control plane (lifecycle commands; bypass the event queue) ---------
     def cancel(self, execution_id: str, *, reason: Optional[dict] = None) -> None:
-        from harel.engine.aio import facade
-
-        facade.run(self._async.cancel, execution_id, reason=reason)
+        self._do("cancel", execution_id, reason=reason)
 
     def terminate(self, execution_id: str) -> None:
-        from harel.engine.aio import facade
-
-        facade.run(self._async.terminate, execution_id)
+        self._do("terminate", execution_id)
 
     def suspend(self, execution_id: str) -> None:
-        from harel.engine.aio import facade
-
-        facade.run(self._async.suspend, execution_id)
+        self._do("suspend", execution_id)
 
     def resume(self, execution_id: str) -> None:
-        from harel.engine.aio import facade
-
-        facade.run(self._async.resume, execution_id)
+        self._do("resume", execution_id)
 
     def purge(self, execution_id: str, *, archive: Optional[Callable[[dict], Any]] = None) -> bool:
         """Permanently delete a finished execution tree (root, regions, invokes and all
         their store rows), passing it to `archive` first if given. Refuses a child or a
         tree with a member not DONE/CANCELLED. False if it no longer exists."""
-        from harel.engine.aio import facade
-
-        return facade.run(self._async.purge, execution_id, archive=archive)
+        return self._do("purge", execution_id, archive=archive)
 
     def redrive(self, execution_id: str, target_path: str) -> None:
         """Force a dead-lettered (FAILED) `execution_id` back to RUNNING at
         `target_path` (a leaf state you choose). No-op if not FAILED."""
-        from harel.engine.aio import facade
-
-        facade.run(self._async.redrive, execution_id, target_path)
+        self._do("redrive", execution_id, target_path)

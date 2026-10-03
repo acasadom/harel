@@ -8,14 +8,17 @@ module layout.
 """
 
 from harel.archive import JsonlArchive
+from harel.definition.events import ContextError
 from harel.definition.validate import Issue, ValidationError, validate, validate_or_raise
 from harel.dsl import DslError, definition_from_dsl, definition_from_dsl_file
 from harel.dsl.resolve import FileResolver, ModuleResolver, SourceResolver
+from harel.engine.control import PurgeRefused
+from harel.engine.core import ExpressionError
 from harel.engine.durable import DurableRunner
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary
 from harel.engine.resolve import DictResolver, MachineResolver, ResolveError
 from harel.engine.runtime import Driver
-from harel.engine.store import DictStore, ExecutionAlreadyExists, ExecutionStore, SqliteStore
+from harel.engine.store import DictStore, ExecutionAlreadyExists, ExecutionStore, SqliteStore, StoreConflict
 from harel.faas import handler, http_action, lambda_action, openfaas_action, remote_action
 from harel.idempotency import DictIdempotency, IdempotencyBackend, idempotent
 from harel.spec.states import Action, Event, EventFilter, LogEvent, Selector, Transition
@@ -33,6 +36,10 @@ __all__ = [
     "definition_from_dsl",
     "definition_from_dsl_file",
     "DslError",
+    "ContextError",
+    "ExpressionError",
+    "StoreConflict",
+    "PurgeRefused",
     "validate",
     "validate_or_raise",
     "Issue",

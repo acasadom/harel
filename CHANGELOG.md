@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Execution models for the sync runners**: `DurableRunner`, `DistributedRunner`, `Worker`
+  and the bare `Driver` take `execution="background"` (the default: the shared background event loop, as before) or
+  `execution="inline"` — the caller's own thread, with no event loop, over a sync store and
+  transport. Inline, every store call and action runs on the caller's connection and inside its
+  transaction (Django, SQLAlchemy sessions); a coroutine action is refused.
+- **`harel.testing`**: the contracts harel runs on its own backends, for a backend written
+  outside harel to run on itself — listing, purge and outbox for a store, and a new one for a
+  transport (FIFO per group, one in flight per group, ack/nack, parking, lease expiry,
+  round-robin, priorities), sync and async. The transport contract now also runs on every
+  built-in transport.
+- **`harel.engine.store.base` and `harel.engine.transport.base`**: the stable API for a backend
+  author — the protocols, records, errors and the helpers the built-in backends share
+  (`encode_offset`, `decode_offset`, `matches`, `listing_page`, `like_prefix`, `PARKED`).
+- **`ContextError`, `ExpressionError`, `StoreConflict` and `PurgeRefused`** are exported from
+  `harel`.
+- **`on_action_error`** on `DurableRunner` and `AsyncDurableRunner`: `"fail"` (default:
+  dead-letter the execution) or `"raise"` (the exception reaches the caller and the step isn't
+  committed, so it rolls back with the caller's transaction).
+
+### Changed
+
+- The driver and the runners are written once, as flows that yield IO requests
+  (`harel.engine.flow`, `driving`, `hosting`), run by an interpreter per execution model. The
+  async runners keep their API and behaviour.
+
 ## 0.5.0 — 2026-10-03
 
 Since 0.4.1.

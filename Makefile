@@ -15,8 +15,9 @@ help: ## Show this help
 sync: ## Install/refresh the virtualenv from pyproject + lock
 	uv sync
 
-test: ## Run the test suite (unit + in-process fakes; no Docker needed)
+test: ## Run the test suite (unit + in-process fakes; no Docker needed), under both execution models
 	uv run pytest
+	uv run pytest --execution=inline
 
 test-stack: ## Run each backend's tests directly against the real stack (needs Docker)
 	@docker compose -f deploy/docker-compose.yml down -v 2>/dev/null || true
@@ -38,7 +39,8 @@ test-stack: ## Run each backend's tests directly against the real stack (needs D
 	    "test/integration/test_store_purge.py::test_postgres_purge" \
 	    "test/integration/test_store_purge.py::test_async_postgres_purge" \
 	    "test/integration/test_store_outbox.py::test_postgres_outbox" \
-	    "test/integration/test_store_outbox.py::test_async_postgres_outbox" -v || EXIT=1; \
+	    "test/integration/test_store_outbox.py::test_async_postgres_outbox" \
+	    "test/integration/test_transport_contract.py::test_postgres_transport_contract" -v || EXIT=1; \
 	echo "=== rqlite ===" && \
 	$$DC -e STM_STORE_BACKEND=rqlite -e STM_TRANSPORT_BACKEND=rqlite \
 	    test uv run pytest -m stack \
@@ -49,7 +51,8 @@ test-stack: ## Run each backend's tests directly against the real stack (needs D
 	    "test/integration/test_store_purge.py::test_rqlite_purge" \
 	    "test/integration/test_store_purge.py::test_async_rqlite_purge" \
 	    "test/integration/test_store_outbox.py::test_rqlite_outbox" \
-	    "test/integration/test_store_outbox.py::test_async_rqlite_outbox" -v || EXIT=1; \
+	    "test/integration/test_store_outbox.py::test_async_rqlite_outbox" \
+	    "test/integration/test_transport_contract.py::test_rqlite_transport_contract" -v || EXIT=1; \
 	echo "=== mongo ===" && \
 	$$DC -e STM_STORE_BACKEND=mongo -e STM_TRANSPORT_BACKEND=mongo \
 	    test uv run pytest -m stack \
@@ -60,7 +63,8 @@ test-stack: ## Run each backend's tests directly against the real stack (needs D
 	    "test/integration/test_store_purge.py::test_mongo_purge" \
 	    "test/integration/test_store_purge.py::test_async_mongo_purge" \
 	    "test/integration/test_store_outbox.py::test_mongo_outbox" \
-	    "test/integration/test_store_outbox.py::test_async_mongo_outbox" -v || EXIT=1; \
+	    "test/integration/test_store_outbox.py::test_async_mongo_outbox" \
+	    "test/integration/test_transport_contract.py::test_mongo_transport_contract" -v || EXIT=1; \
 	echo "=== dynamodb+sqs ===" && \
 	$$DC -e STM_STORE_BACKEND=dynamodb -e STM_TRANSPORT_BACKEND=sqs \
 	    test uv run pytest -m stack \
@@ -70,7 +74,8 @@ test-stack: ## Run each backend's tests directly against the real stack (needs D
 	    "test/integration/test_store_purge.py::test_dynamodb_purge" \
 	    "test/integration/test_store_purge.py::test_async_dynamodb_purge" \
 	    "test/integration/test_store_outbox.py::test_dynamodb_outbox" \
-	    "test/integration/test_store_outbox.py::test_async_dynamodb_outbox" -v || EXIT=1; \
+	    "test/integration/test_store_outbox.py::test_async_dynamodb_outbox" \
+	    "test/integration/test_transport_contract.py::test_sqs_transport_contract" -v || EXIT=1; \
 	docker compose -f deploy/docker-compose.yml down -v; \
 	exit $$EXIT
 

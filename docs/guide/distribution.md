@@ -100,9 +100,12 @@ loop (via `anyio.run`) that drives up to `STM_CONCURRENCY` events in flight at o
 (`AsyncWorker.run`, default 256): while one execution's action awaits IO, the loop processes
 others — so one worker process overlaps many events' IO on a single event loop, with no thread
 per event.
-The synchronous façades shown above (`DistributedRunner`, `worker.step()`) are thin wrappers
-over that async core through an [anyio](https://anyio.readthedocs.io/) blocking portal, so the
-deterministic `step()`-in-a-loop style still works for embedding and tests.
+The synchronous façades shown above (`DistributedRunner`, `worker.step()`) run the same logic
+either on a shared background event loop (an [anyio](https://anyio.readthedocs.io/) blocking
+portal, the default) or, with `execution="inline"`, in the caller's own thread — so the
+deterministic `step()`-in-a-loop style works for embedding and tests, and a web view can create
+an execution and queue its `Start` inside its own transaction. See
+[execution models](execution).
 
 Scale out by running more worker **processes** (or machines) against the same store and
 transport — the single-active-consumer-per-group property keeps each execution on one worker at

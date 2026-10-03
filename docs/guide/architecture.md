@@ -186,7 +186,8 @@ it idempotently.
 ## Walkthrough — creating and running a machine (in-memory)
 
 `DurableRunner` ([durable.py](https://github.com/acasadom/harel/blob/main/src/harel/engine/durable.py)) is the headless host over a
-store (a synchronous façade over the async core — see *Async core, sync façade* below).
+store (its logic written once and run by the model `execution=` picks — see
+[semantics and execution models](#semantics-and-execution-models) below).
 **Create** starts the engine and checkpoints; **process** loads, runs the
 engine, checkpoints, and flushes.
 
@@ -365,19 +366,35 @@ the worker's `run` loop with its traceback, and the message is `nack`ed to come 
 that persists. If that `nack` fails too, the message returns when its lease expires. (An action that
 raises is not this case: the driver routes it to `on error` or dead-letters the execution.)
 
-### Async core, sync façade
+### Semantics and execution models
 
-The engine in `core.py` is a **synchronous generator that does no IO** — it only `yield`s
-effects. That is exactly what lets the *shell* be either synchronous or asynchronous without
-touching the engine: the runner that interprets the effect stream decides whether to `await` the
-action or call it inline. harel's runtime is **async-first** — the real implementation lives in
-`harel/engine/aio/` (`AsyncDriver` / `AsyncDurableRunner` / `AsyncWorker`), and `python -m
-harel.worker` runs one `asyncio` loop driving up to `STM_CONCURRENCY` events in flight. The
-public **synchronous** API (`Driver`, `DurableRunner`, `DistributedRunner`, `Worker`) is a thin
-**façade** that bridges to the async core through an [anyio](https://anyio.readthedocs.io/)
-blocking portal (one background event loop), the way Starlette/FastAPI expose sync over async.
-So the deterministic, synchronous snippets in this guide and the async production worker are the
-same engine and the same commit, just two interpreters of the effect stream.
+Two separate questions describe how a runner behaves:
+
+- **Its semantics — does the caller wait for the result?** `DurableRunner.process` returns the
+  execution once the event has been processed: *synchronous*. `DistributedRunner.send` queues
+  the event and returns; a worker processes it later: *asynchronous*. That is in the runner's
+  name.
+- **Its execution model — how does the call run?** In the caller's own thread; on a background
+  event loop the call blocks on; or as a coroutine the caller awaits.
+
+The engine in `core.py` is a generator that does no IO — it only yields effects — and the code
+that drives it follows the same approach one level up. The driver and the runners are written
+once as **flows** (`harel/engine/flow.py`): generators that yield IO requests — a call on the
+store or the transport, a user action, independent work in parallel — and receive their results.
+The logic lives in `harel/engine/driving.py` (run the engine for an event, call the actions and
+route their errors, commit, relay the outbox) and `harel/engine/hosting.py` (the durable host,
+the distributed sender, the worker). An **interpreter** serves those requests, and that is the
+execution model:
+
+| | interpreter | used by |
+|---|---|---|
+| coroutines | `flow.run_async` — awaits each request; a sync action runs in a thread pool; parallel work overlaps | `AsyncDurableRunner`, `AsyncDistributedRunner`, `AsyncWorker` (`python -m harel.worker`) |
+| background loop | the coroutine interpreter on one shared background loop the call blocks on (an [anyio](https://anyio.readthedocs.io/) portal) | the sync runners and `Driver`, `execution="background"` (the default) |
+| caller's thread | `flow.run_inline` — each request is a plain call, parallel work in order, no event loop | the sync runners and `Driver`, `execution="inline"` |
+
+So a synchronous snippet in this guide, a web view running `execution="inline"` inside its
+transaction, and the async production worker run the same logic and the same commit. See
+[execution models](execution) for when to pick each.
 
 A `Transport` is a queue with **single-active-consumer per group**, where `group_id =
 execution_id` — so at most one message per Execution is in flight, which is what upholds the

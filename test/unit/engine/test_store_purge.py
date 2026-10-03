@@ -1,13 +1,13 @@
 """`purge` contract over every in-process backend, sync and async (no Docker). The
 networked servers (Postgres, rqlite, Mongo, DynamoDB-on-LocalStack) are covered in
 test/integration/test_store_purge.py (stack). Shared seed + assertions live in
-`purge_contract`."""
+`harel.testing`."""
 
 import pytest
-from purge_contract import assert_async_purge_contract, assert_purge_contract
 
 from harel.engine.aio_store import AsyncDictStore, AsyncSqliteStore
 from harel.engine.store import DictStore, SqliteStore
+from harel.testing import assert_async_purge_contract, assert_purge_contract
 
 
 def test_dict_purge():

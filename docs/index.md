@@ -54,6 +54,7 @@ How these machines run for real — and the reference material.
 guide/cli
 guide/visualization
 guide/durability
+guide/execution
 guide/stores
 guide/distribution
 guide/transports

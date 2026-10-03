@@ -2,7 +2,7 @@
 rqlite / Mongo / DynamoDB-on-LocalStack), sync and async, in the stack.
 
 The in-process backends are covered in test/unit/engine/test_store_outbox.py; this runs
-the same shared contract (`outbox_contract`) over a real server, gated by
+the same shared contract (`harel.testing`) over a real server, gated by
 STM_STORE_BACKEND (one backend active per compose run; the rest skip). A unique `ns`
 per run isolates the seed from any other executions sharing the backend's tables.
 """
@@ -11,7 +11,8 @@ import os
 import uuid
 
 import pytest
-from outbox_contract import assert_async_outbox_contract, assert_outbox_contract
+
+from harel.testing import assert_async_outbox_contract, assert_outbox_contract
 
 pytestmark = pytest.mark.stack
 

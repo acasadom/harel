@@ -1,6 +1,6 @@
-"""Shared `ExecutionStore.purge` contract: seed + assertions reused by the unit tests
-(in-process backends) and the integration tests (real servers, stack-marked, SHARED
-tables), for both the sync and the async stores.
+"""The `ExecutionStore.purge` and `ids_with_prefix` contract: `assert_purge_contract(store)`
+(and `assert_async_purge_contract` for an async store) seeds executions and checks a store
+purges them as harel expects. harel runs it on its own backends; run it on yours.
 
 The contract: `purge(id, expected_version)` deletes the Execution and everything keyed
 by it (dedupe, trace, timers, outbox entries addressed to it, spawn intents it issued)
@@ -11,8 +11,6 @@ Execution's rows are untouched.
 Everything is namespaced by `ns`, and every assertion filters by the seeded ids, so it
 holds on a real backend shared with other executions.
 """
-
-import pytest
 
 from harel.engine.execution import Execution, Status
 from harel.engine.store import StoreConflict, TimerOp
@@ -64,8 +62,12 @@ def assert_purge_contract(store, ns: str = "") -> None:
     assert store.is_processed(bystander.id, f"{bystander.id}-ev")
 
     assert store.purge(victim.id, version) is False  # already gone: harmless
-    with pytest.raises(StoreConflict):
+    try:
         store.commit(stale, [])  # a stale copy can't resurrect it
+    except StoreConflict:
+        pass
+    else:
+        raise AssertionError("committing a purged execution's stale copy must raise StoreConflict")
     assert store.load(victim.id) is None
 
     reborn = _new(ns, "victim")  # a brand-new Execution may reuse the id
@@ -102,8 +104,12 @@ async def assert_async_purge_contract(store, ns: str = "") -> None:
     assert await store.is_processed(bystander.id, f"{bystander.id}-ev")
 
     assert await store.purge(victim.id, version) is False
-    with pytest.raises(StoreConflict):
+    try:
         await store.commit(stale, [])
+    except StoreConflict:
+        pass
+    else:
+        raise AssertionError("committing a purged execution's stale copy must raise StoreConflict")
     assert await store.load(victim.id) is None
 
     reborn = _new(ns, "victim")
