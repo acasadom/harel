@@ -82,6 +82,47 @@ def test_run_with_event_data(tmp_path, capsys):
     assert "outcome: success" in out
 
 
+TYPED = """
+event Go {}
+machine M {
+  context { n: int }
+  initial A
+  state A {}
+  final B success {}
+  from A to B on Go where context.n > 0
+}
+"""
+
+
+def test_run_reports_a_context_the_schema_refuses(tmp_path, capsys):
+    m = tmp_path / "m.stm"
+    m.write_text(TYPED)
+    assert main(["run", str(m), "-e", "Go"]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: ") and "missing required field 'n'" in err and "--seed" in err
+    assert main(["run", str(m), "--seed", '{"n": 1}', "-e", "Go"]) == 0
+    assert "outcome: success" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "args,message",
+    [
+        (["--seed", "{bad"], "--seed is not valid JSON"),
+        (["--seed", "[1]"], "--seed must be a JSON object, got list"),
+        (["-e", "Go:{x"], "the data of -e Go is not valid JSON"),
+        (["-e", "Go:3"], "the data of -e Go must be a JSON object, got int"),
+    ],
+)
+def test_run_reports_malformed_json_before_running(tmp_path, capsys, args, message):
+    m = tmp_path / "m.stm"
+    m.write_text(TYPED)
+    seed = [] if "--seed" in args else ["--seed", '{"n": 1}']
+    assert main(["run", str(m), *seed, *args]) == 1
+    out, err = capsys.readouterr()
+    assert message in err
+    assert out == ""  # nothing ran
+
+
 def test_fmt_check_on_formatted_file(capsys):
     # the corpus files are canonically formatted, so --check passes (rc 0)
     rc = main(["fmt", "--check", ORDER])

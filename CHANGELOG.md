@@ -11,6 +11,22 @@
   automatic transition) and warns when the two declared types differ
   (`compare_type_mismatch`).
 
+### Fixed
+
+- `harel run` reports a context its machine's `context { ... }` refuses (pass it with
+  `--seed`), and malformed JSON in `--seed` or an event's data, as `error: ...` — checked
+  before anything runs — instead of a traceback.
+
+### Documentation
+
+- The examples are up to date with 0.4.0 (#93): typed contexts, `set`, `choose`, guards
+  over references, and a carrier selector in `place_order`. `webhook_payment` keeps its
+  store and queue in two SQLite files, and its timeout terminal is `Abandoned`. The monitor
+  demo's seed runs the machines, as `python -m examples.monitor_demo.seed`. A test runs
+  every example.
+- The timers tutorial uses the DSL's syntax for a delay read from the context,
+  `timeout context backoff`.
+
 ## 0.4.0 — 2026-10-02
 
 Since 0.3.1. The changes under [Behavior changes](#behavior-changes) can change what an existing
