@@ -2,9 +2,9 @@
 
 Every action has the engine's contract ``(stm, event, **inputs)`` and may read
 or mutate the order's context (``stm.execution_ctx``). Here they just record a
-human-readable step in ``execution_ctx["history"]`` (and the payment selector
-decides whether to retry). A real app would charge a card, reserve stock, call a
-carrier, etc.
+human-readable step in ``execution_ctx["history"]``, and the carrier selector picks
+a shipping service. A real app would charge a card, reserve stock, call a carrier,
+etc. (The payment retry needs no function: the model counts declines and decides.)
 """
 
 
@@ -20,21 +20,9 @@ def request_payment(stm, event, **kw):
     _record(stm, "payment requested")
 
 
-def payment_retry(stm, event, **kw):
-    """Selector: count the attempt and decide whether to retry or give up.
-
-    Returns a branch key ("retry"/"giveup") that the transition's mapper turns
-    into the next state.
-    """
-    attempts = stm.execution_ctx.get("attempts", 0) + 1
-    stm.execution_ctx["attempts"] = attempts
-    decision = "retry" if attempts < stm.execution_ctx.get("max_attempts", 2) else "giveup"
-    _record(stm, f"payment declined (attempt {attempts}) -> {decision}")
-    return decision
-
-
 def on_retry(stm, event, **kw):
-    _record(stm, "scheduling a payment retry")
+    ctx = stm.execution_ctx
+    _record(stm, f"payment declined ({ctx.get('last_decline') or 'no reason'}) -> retrying")
 
 
 def capture_payment(stm, event, **kw):
@@ -57,8 +45,24 @@ def pack(stm, event, **kw):
     _record(stm, "items packed")
 
 
-def ready(stm, event, **kw):
-    _record(stm, "ready to ship")
+def choose_carrier(stm, event, **kw):
+    """Selector: pick the shipping service for the packed order.
+
+    A real app would ask a shipping-rates API; here, heavy parcels and international
+    destinations go standard, everything else express. Returns one of the branch keys
+    the transition declares (`returns {"express", "standard"}`).
+    """
+    ctx = stm.execution_ctx
+    domestic = ctx.get("destination", "ES") == "ES"
+    return "express" if domestic and ctx.get("weight_kg", 1.0) <= 5 else "standard"
+
+
+def book_express(stm, event, **kw):
+    _record(stm, "express courier booked")
+
+
+def book_standard(stm, event, **kw):
+    _record(stm, "standard carrier booked")
 
 
 def ship(stm, event, **kw):
@@ -70,7 +74,9 @@ def deliver(stm, event, **kw):
 
 
 def cancel_order(stm, event, **kw):
-    _record(stm, "order cancelled")
+    ctx = stm.execution_ctx
+    reason = f" after {ctx['declines']} declines" if ctx.get("declines") else ""
+    _record(stm, f"order cancelled{reason}")
 
 
 def on_payment_error(stm, event, **kw):

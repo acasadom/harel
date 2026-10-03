@@ -33,7 +33,7 @@ def test_happy_path_reaches_done(runner: DurableRunner) -> None:
     assert exe.active_path == "Profile"
     exe = runner.process(exe.id, Event(kind="Next", data={"full_name": "Ada"}))
     assert exe.active_path == "Verify"
-    exe = runner.process(exe.id, Event(kind="Verified"))
+    exe = runner.process(exe.id, Event(kind="Verified", data={"code": exe.context["code"]}))
 
     assert exe.active_path == "Done"
     assert exe.status.name == "DONE"
@@ -50,6 +50,17 @@ def test_guard_blocks_empty_field(runner: DurableRunner) -> None:
     assert exe.active_path == "Account"
     exe = runner.process(exe.id, Event(kind="Next", data={"email": "x@y.z"}))
     assert exe.active_path == "Profile"
+
+
+def test_a_wrong_code_does_not_complete(runner: DurableRunner) -> None:
+    exe = runner.create(_defn_id(runner))
+    exe = runner.process(exe.id, Event(kind="Next", data={"email": "a@b.c"}))
+    exe = runner.process(exe.id, Event(kind="Next", data={"full_name": "Ada"}))
+    wrong = "x" + exe.context["code"]
+    exe = runner.process(exe.id, Event(kind="Verified", data={"code": wrong}))
+    assert exe.active_path == "Verify"  # the machine checks the code, not the UI
+    exe = runner.process(exe.id, Event(kind="Verified", data={"code": exe.context["code"]}))
+    assert exe.active_path == "Done"
 
 
 def test_back_preserves_typed_data(runner: DurableRunner) -> None:

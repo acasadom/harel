@@ -34,7 +34,7 @@ delivery of the same event.
 
 `timeout 15` in `payment.stm` arms a durable timer when the machine enters
 `AwaitingPayment`. If no webhook arrives within the window the machine moves
-to `Expired`, even across process restarts. No celery-beat, no cron, no
+to `Abandoned`, even across process restarts. No celery-beat, no cron, no
 separate cleanup job — the timer is committed in the same transaction as the
 execution state.
 
@@ -67,18 +67,23 @@ scattered across handler code.
 ## The statechart
 
 ```
-AwaitingPayment ──PaymentSucceeded──► Fulfilling ──(auto)──► Done   ✓ success
-                ──PaymentFailed─────────────────────────────► Failed  ✗ failed
-                ──Timeout (15 s)─────────────────────────────► Expired ✗ abandoned
+AwaitingPayment ──PaymentSucceeded──► Fulfilling ──(auto)──► Done      ✓ success
+                │                                  ──error───► SvcError  ✗ failed
+                ──PaymentFailed─────────────────────────────► Failed    ✗ failed
+                ──Timeout (15 s)─────────────────────────────► Abandoned ✗ abandoned
 ```
 
 ## Files
 
-- **`payment.stm`** — the machine. Three terminal states, one durable timeout.
-- **`actions.py`** — `start_fulfillment` / `on_done` / `on_failed` / `on_expired`.
+- **`payment.stm`** — the machine. Four terminal states, one durable timeout.
+- **`actions.py`** — `setup_order` / `start_fulfillment` / `on_done` / `on_failed` /
+  `on_abandoned` / `on_svc_error`.
   In a real app: call a fulfillment service, send email, update inventory.
-- **`app.py`** — the FastAPI glue: create/get orders, receive Stripe webhooks,
-  fire due timers in the background.
+- **`app.py`** — the FastAPI glue: create/get orders, receive Stripe webhooks and
+  enqueue them.
+- **`worker.py`** — the worker: processes the queued events and fires due timers.
+  The store and the queue are two SQLite files (`payments.db`, `payments-queue.db`),
+  shared by both processes; run one worker, as SQLite has one writer per file.
 - **`simulate.py`** — sends fake Stripe payloads so you can demo all paths
   without a Stripe account.
 
@@ -86,9 +91,10 @@ AwaitingPayment ──PaymentSucceeded──► Fulfilling ──(auto)──►
 
 - **Multiple webhook types** — add entries to `_KIND` in `app.py` and new
   `event` declarations to `payment.stm`.
-- **Retries with backoff** — add a `Retrying` composite state that uses
-  `harel.lib.exponential_backoff` (see the [place_order](../place_order/) example
-  and `lib.py`).
+- **Retries with backoff** — add a `Retrying` state whose `timeout` reads its delay
+  from the context, set by `harel.lib.exponential_backoff` (see the timers tutorial,
+  `docs/tutorial/07-timers.md`). For a retry decision over the order's own data, see
+  the `choose` in the [place_order](../place_order/) example.
 - **Fan-out** — use `invoke X for item in cart` + `join all` to process
   multiple line items in parallel with a single `join all` barrier.
 - **Stripe signature validation** — add `stripe.WebhookSignature.verify_header()`

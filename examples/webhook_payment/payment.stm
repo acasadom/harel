@@ -1,8 +1,9 @@
 # Stripe-style payment webhook flow.
 #
 # Design:
-#   POST /orders              -> creates this Execution; returns its id
-#   POST /webhooks/stripe     -> maps the Stripe event to a harel Event, calls runner.process()
+#   POST /orders              -> creates this Execution (a worker runs its Start); returns its id
+#   POST /webhooks/stripe     -> maps the Stripe event to a harel Event and enqueues it
+#                                (runner.send); a worker processes it
 #   GET  /orders/{id}         -> reads current state from the store
 #
 # Things worth noting:
@@ -11,27 +12,21 @@
 #   Passing Event(id=stripe_event_id) deduplicates at the engine level:
 #   a retried webhook is a safe no-op.  No manual idempotency table needed.
 #
-#   Deferred events — `defer PaymentSucceeded` holds a webhook that arrives
-#   while the machine is still in Initializing (before AwaitingPayment is
-#   active).  When AwaitingPayment becomes active the held event is replayed
-#   automatically: at-least-once delivery never drops a fast retry.
+#   Order of arrival — create() publishes the Start before it returns, and the
+#   transport delivers one execution's events in order, so a webhook sent for an
+#   order is processed after its Start has taken it to AwaitingPayment.
 #
 #   Durable timeout — `timeout 15` fires a Timeout even across process restarts.
 #   No cron job, no celery-beat.  Change to 600 (10 min) for production.
 #
 #   on error — if start_fulfillment raises (service unavailable, network error, …)
-#   the `on error` transition routes to SvcError instead of crashing the execution.
+#   the `on error` transition routes to SvcError instead of dead-lettering the order.
 #   Contrast with PaymentFailed (expected, modelled as a domain event).
 
 event PaymentSucceeded { payment_id: string  amount: int }
 event PaymentFailed    { reason: string }
 
 machine payment {
-  # Hold PaymentSucceeded webhooks that arrive before AwaitingPayment is active
-  # (during Initializing). At-least-once delivery means a fast retry can race
-  # ahead of the ack; defer makes that a safe, automatic re-delivery.
-  defer PaymentSucceeded
-
   initial Initializing
 
   state Initializing {
@@ -46,15 +41,15 @@ machine payment {
     on enter examples.webhook_payment.actions.start_fulfillment
   }
 
-  final Done     success   { on enter examples.webhook_payment.actions.on_done }
-  final Failed   failed    { on enter examples.webhook_payment.actions.on_failed }
-  final Expired  abandoned { on enter examples.webhook_payment.actions.on_expired }
-  final SvcError failed    { on enter examples.webhook_payment.actions.on_svc_error }
+  final Done      success   { on enter examples.webhook_payment.actions.on_done }
+  final Failed    failed    { on enter examples.webhook_payment.actions.on_failed }
+  final Abandoned abandoned { on enter examples.webhook_payment.actions.on_abandoned }
+  final SvcError  failed    { on enter examples.webhook_payment.actions.on_svc_error }
 
   from Initializing    to AwaitingPayment
   from AwaitingPayment to Fulfilling on PaymentSucceeded
   from AwaitingPayment to Failed     on PaymentFailed
-  from AwaitingPayment to Expired    on Timeout
+  from AwaitingPayment to Abandoned  on Timeout
   from Fulfilling      to Done
   # on error: start_fulfillment raised (service down, network error, …)
   from Fulfilling      to SvcError   on error

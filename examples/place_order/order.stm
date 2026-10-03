@@ -2,22 +2,33 @@
 #
 #   Cart --PlaceOrder--> AwaitingPayment
 #   AwaitingPayment --PaymentAuthorized--> Paid
-#                   --PaymentDeclined--> (retry?) Retrying --> AwaitingPayment | Cancelled
+#                   --PaymentDeclined--> choose: Retrying --> AwaitingPayment | Cancelled
 #                   --CancelOrder--> Cancelled
-#   Paid --(auto)--> Fulfilling [ Picking -> Packing -> ReadyToShip ]
-#   ReadyToShip --Dispatched--> Shipped --Delivered--> Delivered
+#   Paid --(auto)--> Fulfilling [ Picking -> Packing -> select carrier: Express | Standard ]
+#   Express | Standard --Dispatched--> Shipped --Delivered--> Delivered
 #
-# Delivered and Cancelled are sinks (the order is Done). Actions are literal
+# Delivered and Cancelled are terminals (the order is DONE). Actions are literal
 # dotted paths resolved by the engine at run time.
 event PlaceOrder {}
 event PaymentAuthorized {}
-event PaymentDeclined {}
+event PaymentDeclined { reason: string? }
 event Picked {}
 event Packed {}
 event Dispatched {}
 event Delivered {}
 event CancelOrder {}
+
 machine order {
+  # the order's own data, typed: `harel validate` checks every `context.x` the model
+  # reads or writes against it, and `create()` checks the context it starts with
+  context {
+    declines: int           # payment declines so far
+    max_retries: int        # how many declines get another attempt
+    last_decline: string?
+    destination: string?    # read by the carrier selector
+    weight_kg: float?
+  }
+
   initial Cart
 
   state Cart { on enter examples.place_order.actions.on_cart }
@@ -33,37 +44,48 @@ machine order {
     initial Picking
     state Picking { on enter examples.place_order.actions.pick }
     state Packing { on enter examples.place_order.actions.pack }
-    state ReadyToShip { on enter examples.place_order.actions.ready }
+    state Express { on enter examples.place_order.actions.book_express }
+    state Standard { on enter examples.place_order.actions.book_standard }
 
     from Picking to Packing on Picked
-    from Packing to ReadyToShip on Packed
-    from ReadyToShip to Shipped on Dispatched
+    # Which carrier is a business decision made in Python (rates, destination,
+    # weight — in a real app, a call to a shipping-rates API): a selector. The
+    # `returns` set lets `harel validate` check every branch is handled.
+    from Packing select examples.place_order.actions.choose_carrier returns {"express", "standard"} on Packed {
+      "express" to Express
+      "standard" to Standard
+    }
+    from Express to Shipped on Dispatched
+    from Standard to Shipped on Dispatched
   }
 
   state Shipped { on enter examples.place_order.actions.ship }
-  final Delivered     success   { on enter examples.place_order.actions.deliver }
-  final Cancelled     cancelled { on enter examples.place_order.actions.cancel_order }
+  final Delivered       success   { on enter examples.place_order.actions.deliver }
+  final Cancelled       cancelled { on enter examples.place_order.actions.cancel_order }
   # Unexpected exception from capture_payment (network error, gateway down, …).
-  # Distinguished from a modelled decline (PaymentDeclined → selector → Cancelled).
-  final PaymentError  failed    { on enter examples.place_order.actions.on_payment_error }
+  # Distinguished from a modelled decline (PaymentDeclined → choose → Cancelled).
+  final PaymentError    failed    { on enter examples.place_order.actions.on_payment_error }
   # Unexpected exception from any action inside Fulfilling (warehouse API down, …).
-  final FulfilmentError failed  { on enter examples.place_order.actions.on_fulfilment_error }
+  final FulfilmentError failed    { on enter examples.place_order.actions.on_fulfilment_error }
 
   from Cart to AwaitingPayment on PlaceOrder
   from AwaitingPayment to Paid on PaymentAuthorized
-  # the selector counts the attempt and routes retry/giveup
-  from AwaitingPayment select examples.place_order.actions.payment_retry on PaymentDeclined {
-    "retry" to Retrying
-    "giveup" to Cancelled
+  # The retry decision is the order's own data, so it lives in the model: count the
+  # decline, and retry while there are retries left. The guards see the context
+  # before this transition's `set`, so the first decline compares 0 declines.
+  from AwaitingPayment choose on PaymentDeclined set context.declines = context.declines + 1, context.last_decline = event.reason {
+    when context.declines < context.max_retries to Retrying
+    else to Cancelled
   }
-  # NOTE: the domain event is `CancelOrder`, not `Cancel` — `Cancel` is a
-  # reserved engine control event and would not reach this modelled transition.
+  # The domain event is `CancelOrder`, not the reserved `Cancel`: `Cancel` is the
+  # control plane's teardown signal (`runner.cancel()`), which must end the order in
+  # one step. Cancelling an order is business, with its own event.
   from AwaitingPayment to Cancelled on CancelOrder
   from Retrying to AwaitingPayment
   from Paid to Fulfilling
   from Shipped to Delivered on Delivered
-  # on error transitions: unexpected exceptions route to a failed terminal instead of
-  # crashing the execution. Contrast with PaymentDeclined (expected, modelled via selector).
+  # on error: unexpected exceptions route to a failed terminal instead of
+  # dead-lettering the execution. Contrast with PaymentDeclined (expected, modelled).
   from Paid to PaymentError on error
   from Fulfilling to FulfilmentError on error
 }

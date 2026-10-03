@@ -28,7 +28,7 @@ def on_failed(stm, event, **kw):
     _log(stm, f"payment failed: {reason}")
 
 
-def on_expired(stm, event, **kw):
+def on_abandoned(stm, event, **kw):
     _log(stm, "timed out — no payment received within the window")
 
 

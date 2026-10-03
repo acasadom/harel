@@ -60,11 +60,10 @@ def _advance(exe_id: str, kind: str, **data) -> None:
     wizard_ui.refresh()
 
 
-def _verify(exe_id: str, typed: str, expected: str | None) -> None:
-    """Field validation lives in the UI; the *step sequence* lives in the machine."""
-    if typed and typed == expected:
-        runner.process(exe_id, Event(kind="Verified"))
-    else:
+def _verify(exe_id: str, typed: str) -> None:
+    """Send the typed code; the machine itself only completes when it matches."""
+    exe = runner.process(exe_id, Event(kind="Verified", data={"code": typed or ""}))
+    if exe.active_path == "Verify":
         ui.notify("That code does not match.", type="warning")
     wizard_ui.refresh()
 
@@ -99,7 +98,7 @@ def wizard_ui() -> None:
             code = ui.input("Verification code").classes("w-full")
             with ui.row():
                 ui.button("Back", on_click=lambda: _advance(exe.id, "Back")).props("flat")
-                ui.button("Verify", on_click=lambda: _verify(exe.id, code.value, ctx.get("code")))
+                ui.button("Verify", on_click=lambda: _verify(exe.id, code.value))
 
         elif step == "Done":
             ui.label("🎉 All set — your account is ready.").classes("text-green-600 text-lg")

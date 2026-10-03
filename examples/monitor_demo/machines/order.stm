@@ -1,23 +1,35 @@
 # Demo machine for the monitor TUI: a hierarchical order lifecycle (a composite
-# Checkout with its own sub-states), so the statechart tree shows real depth.
+# Checkout with its own sub-states), so the statechart tree shows real depth. Its
+# actions live in examples/monitor_demo/actions.py; seed.py runs it to fill a store.
 
 event Checkout {}
-event Paid {}
-event Ship {}
+event Paid { charge_id: string }
+event Ship { tracking: string }
 event Deliver {}
+
 machine Order {
+  context {
+    user: string
+    total: float
+    charge_id: string?
+    tracking: string?
+    decline: bool?       # demo switch: makes the charge raise (a dead letter)
+  }
+
   initial Cart
   state Cart {}
   state Checkout {
+    on enter examples.monitor_demo.actions.reserve_inventory
     initial Payment
-    state Payment {}
-    state Confirm {}
-    from Payment to Confirm on Paid
+    state Payment { timeout 300 }    # a durable timer: abandon the checkout after 5 min
+    state Confirm { on enter examples.monitor_demo.actions.charge_card }
+    from Payment to Confirm on Paid set context.charge_id = event.charge_id
+    from Payment to Cart on Timeout
   }
   state Shipped {}
-  final Delivered success
+  final Delivered success { on enter examples.monitor_demo.actions.notify_customer }
 
   from Cart to Checkout on Checkout
-  from Checkout to Shipped on Ship
+  from Checkout to Shipped on Ship set context.tracking = event.tracking
   from Shipped to Delivered on Deliver
 }
