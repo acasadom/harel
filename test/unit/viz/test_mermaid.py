@@ -162,3 +162,21 @@ def test_choose_and_set_are_rendered() -> None:
     assert "Working__choose --> GaveUp : [context.attempts >= 3]" in lines
     assert "Working__choose --> Cooling : else" in lines
     assert "Working --> Done : Recovered<br/>[context.attempts == 0]" in lines
+
+
+def test_a_guard_comparing_two_references_is_rendered() -> None:
+    source = """
+event Fail { code: int  limit: int }
+machine M {
+  context { retries: int  max_retries: int }
+  initial A
+  state A {}
+  final B failed {}
+  final C failed {}
+  from A to B on Fail where context.retries >= context.max_retries
+  from A to C on Fail where code > event.limit
+}
+"""
+    lines = _lines(source, "M")
+    assert "A --> B : Fail<br/>[context.retries >= context.max_retries]" in lines
+    assert "A --> C : Fail<br/>[code > event.limit]" in lines

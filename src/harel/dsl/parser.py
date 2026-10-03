@@ -195,6 +195,18 @@ def _pred_to_dict(node: tuple) -> dict:
         # `field__op` dict (which is event-only), so it always lands in the composable tree
         _, source, fld, op, value = node
         return {"__ref__": {"source": source, "field": fld, "op": _OPS[op], "value": value}}
+    if tag == "refleaf":
+        # a leaf whose right side is a reference: not a flat `field__op -> literal` either
+        _, source, fld, op, (rsource, rfield) = node
+        return {
+            "__ref__": {
+                "source": source,
+                "field": fld,
+                "op": _OPS[op],
+                "value": None,
+                "value_ref": {"source": rsource, "field": rfield},
+            }
+        }
     if tag == "guardref":
         return {"__guard__": node[1]}  # a named-guard marker the loader resolves
     return {"not": _pred_to_dict(node[1])}  # neg
@@ -261,11 +273,14 @@ class _ToProgram(Transformer):
     # --- predicates ---
     @v_args(inline=True, meta=True)
     def comparison(self, meta, fld, op, value):
+        source = "event"
         if isinstance(fld, Token) and fld.type == "DOTTED":
             source, field = _namespaced(str(fld), meta)
-            if source == "context":
-                return ("nsleaf", source, field, str(op), _coerce(value))
             fld = field  # `event.x` is a synonym of the bare `x`
+        if isinstance(value, Token) and value.type == "DOTTED":  # a reference on the right
+            return ("refleaf", source, str(fld), str(op), _namespaced(str(value), meta))
+        if source == "context":
+            return ("nsleaf", source, str(fld), str(op), _coerce(value))
         return ("leaf", str(fld), str(op), _coerce(value))
 
     def all_expr(self, *children):

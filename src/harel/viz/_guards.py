@@ -32,9 +32,10 @@ def _predicate(pred: Predicate, parent: Optional[str] = None) -> str:
     an `or` is parenthesized anyway — `a and b or c` is correct yet easy to misread."""
     if pred.node == "leaf":
         field = pred.field or ""
-        return _comparison(
-            field if pred.source == "event" else f"{pred.source}.{field}", pred.op or "eq", pred.value
-        )
+        left = field if pred.source == "event" else f"{pred.source}.{field}"
+        if pred.value_ref is not None:  # a reference on the right, written namespaced
+            return f"{left} {_OPS.get(pred.op or 'eq', pred.op)} {_expr(pred.value_ref)}"
+        return _comparison(left, pred.op or "eq", pred.value)
     if pred.node == "not":
         return "not " + _predicate(pred.children[0], "not")
     joiner = " and " if pred.node == "all" else " or "

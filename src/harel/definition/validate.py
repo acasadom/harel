@@ -81,6 +81,15 @@ def _tree_leaves(pred: Optional[Predicate]) -> list[Predicate]:
     return [leaf for child in pred.children for leaf in _tree_leaves(child)]
 
 
+def _operands(leaf: Predicate) -> list[tuple[str, str]]:
+    """The (namespace, field) pairs a leaf reads: its left side and, when it compares with
+    a reference instead of a literal, its right side."""
+    out = [(leaf.source, leaf.field)] if leaf.field else []
+    if leaf.value_ref is not None and leaf.value_ref.field:
+        out.append((leaf.value_ref.source or "event", leaf.value_ref.field))
+    return out
+
+
 # --- the checks ---------------------------------------------------------------
 
 
@@ -234,9 +243,14 @@ def _check_event(
     # event is an error, so a typo can't slip through. (Reserved engine events and
     # automatic — eventless — transitions are exempt; the latter have no EventFilter.)
     # the event's own fields only; `context.x` leaves are checked against the context schema
-    event_leaves = [leaf for leaf in _tree_leaves(ef.predicate) if leaf.source == "event"]
-    fields = _flat_fields(ef.predicates) | {leaf.field for leaf in event_leaves if leaf.field}
-    leaves = _flat_leaves(ef.predicates) + [(leaf.field, leaf.op) for leaf in event_leaves if leaf.field]
+    event_reads = [
+        (f, leaf.op or "eq")
+        for leaf in _tree_leaves(ef.predicate)
+        for src, f in _operands(leaf)
+        if src == "event"
+    ]
+    fields = _flat_fields(ef.predicates) | {f for f, _ in event_reads}
+    leaves = _flat_leaves(ef.predicates) + event_reads
     for field, op in extra:  # `choose` branch guards and `set` reads of this event
         fields.add(field)
         leaves.append((field, op))
@@ -418,24 +432,68 @@ def _check_context_ref(node: Node, field: str, op: str, defn: Definition, issues
         )
 
 
+def _operand_type(source: str, field: str, t: Transition, defn: Definition) -> Optional[str]:
+    """The declared type of what a guard reads, where it is knowable (None = not knowable):
+    a context field from the schema, an event field from its event's declaration (the same
+    type in every kind the transition accepts)."""
+    if source == "context":
+        specs = [defn.context_schema.get(field)]
+    else:
+        kinds = [k.strip() for k in t.event_filter.kind.split("|")] if t.event_filter is not None else []
+        specs = [defn.events[k].fields.get(field) if k in defn.events else None for k in kinds]
+    if not specs or any(spec is None for spec in specs):
+        return None
+    types = {spec.type for spec in specs if spec is not None}
+    return types.pop() if len(types) == 1 and "any" not in types else None
+
+
+def _comparable(a: str, b: str) -> bool:
+    return a == b or {a, b} <= {"int", "float"}
+
+
+def _check_compared_types(
+    node: Node, t: Transition, leaf: Predicate, defn: Definition, issues: list[Issue]
+) -> None:
+    """A guard comparing two references whose declared types differ (an `int` with a
+    `string`, ...) can't do what it says — they are never equal, never ordered: warn. A
+    comparison with a literal isn't checked here."""
+    ref = leaf.value_ref
+    if ref is None or leaf.op == "in" or not leaf.field or not ref.field:
+        return
+    left = _operand_type(leaf.source, leaf.field, t, defn)
+    right = _operand_type(ref.source or "event", ref.field, t, defn)
+    if left is not None and right is not None and not _comparable(left, right):
+        issues.append(
+            Issue(
+                "compare_type_mismatch",
+                "warning",
+                node.full_path,
+                f"a guard compares {leaf.source}.{leaf.field} ({left}) with {ref.source}.{ref.field} "
+                f"({right}): values of different types are never equal or ordered",
+            )
+        )
+
+
 def _check_context_refs(defn: Definition, issues: list[Issue]) -> None:
     for node in defn.index.values():
         for parent_key in node.invoke_with.values():  # what a `with` reads from this context
             _check_context_ref(node, parent_key, "eq", defn, issues)
         for t in node.transitions:
             for leaf in _guard_leaves(t):
-                if leaf.source == "context" and leaf.field:
-                    _check_context_ref(node, leaf.field, leaf.op or "eq", defn, issues)
-                elif t.event_filter is None:  # a `when` over the event on an eventless `choose`
-                    issues.append(
-                        Issue(
-                            "event_ref_without_event",
-                            "error",
-                            node.full_path,
-                            f"a guard reads the event's {leaf.field!r} on an automatic transition, "
-                            "which has no event — it can never hold",
+                for src, f in _operands(leaf):
+                    if src == "context":
+                        _check_context_ref(node, f, leaf.op or "eq", defn, issues)
+                    elif t.event_filter is None:  # a `when` over the event on an eventless `choose`
+                        issues.append(
+                            Issue(
+                                "event_ref_without_event",
+                                "error",
+                                node.full_path,
+                                f"a guard reads the event's {f!r} on an automatic transition, "
+                                "which has no event — it can never hold",
+                            )
                         )
-                    )
+                _check_compared_types(node, t, leaf, defn, issues)
             _check_assignments(node, t, defn, issues)
 
 
@@ -444,9 +502,10 @@ def _check_events(defn: Definition, issues: list[Issue]) -> None:
         for t in node.transitions:
             if t.event_filter is not None:
                 extra = [
-                    (leaf.field, leaf.op)
+                    (f, leaf.op or "eq")
                     for leaf in _choice_leaves(t)
-                    if leaf.source == "event" and leaf.field
+                    for src, f in _operands(leaf)
+                    if src == "event"
                 ]
                 extra += [
                     (r.field, "eq")

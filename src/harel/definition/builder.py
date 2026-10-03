@@ -80,8 +80,9 @@ def _build_action(data: Any, global_context: Optional[dict]) -> Optional[ActionR
 
 
 # keys of a predicate dict that build the composable tree; any other key is a flat
-# `field__op` leaf over the event's data. `__ref__` is a leaf over another namespace
-# (the execution context), which the flat dict can't express.
+# `field__op` leaf over the event's data. `__ref__` is a leaf the flat dict can't express:
+# over another namespace (the execution context), or compared with a reference
+# (`value_ref`) rather than a literal.
 _COMBINATORS = {"all", "any", "not", "__ref__"}
 
 
@@ -98,9 +99,15 @@ def _parse_predicate(data: dict) -> Optional[Predicate]:
             child = _parse_predicate(val)
             nodes.append(Predicate(node="not", children=[child] if child is not None else []))
         elif key == "__ref__":
+            ref = val.get("value_ref")
             nodes.append(
                 Predicate(
-                    node="leaf", field=val["field"], op=val["op"], value=val["value"], source=val["source"]
+                    node="leaf",
+                    field=val["field"],
+                    op=val["op"],
+                    value=val["value"],
+                    source=val["source"],
+                    value_ref=Expr(kind="ref", source=ref["source"], field=ref["field"]) if ref else None,
                 )
             )
         else:

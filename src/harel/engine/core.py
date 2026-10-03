@@ -167,12 +167,20 @@ def _compare(op: str, actual: Any, expected: Any) -> bool:
 
 def _eval(pred, scopes: dict) -> bool:
     """Evaluate a composable predicate tree. Each leaf reads its field from the namespace
-    it names in `scopes` (`event` -> the event's data, `context` -> the execution context).
-    A leaf on a field absent there, or whose value can't be compared, fails (it cannot be
-    evaluated) — see `_compare`."""
+    it names in `scopes` (`event` -> the event's data, `context` -> the execution context),
+    and compares it with its literal or with the field its `value_ref` names. A leaf on a
+    field absent there — on either side — or whose values can't be compared, fails (it
+    cannot be evaluated) — see `_compare`."""
     if pred.node == "leaf":
         data = scopes[pred.source]
-        return pred.field in data and _compare(pred.op, data[pred.field], pred.value)
+        if pred.field not in data:
+            return False
+        if pred.value_ref is None:
+            return _compare(pred.op, data[pred.field], pred.value)
+        other = scopes[pred.value_ref.source]
+        return pred.value_ref.field in other and _compare(
+            pred.op, data[pred.field], other[pred.value_ref.field]
+        )
     if pred.node == "all":
         return all(_eval(c, scopes) for c in pred.children)
     if pred.node == "any":

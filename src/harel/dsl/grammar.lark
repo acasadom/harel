@@ -123,8 +123,9 @@ kinds:          ref ("|" ref)*
 // guard (composable with the rest: `where ok and status == "x"`)
 ?atom:      comparison | guard_atom | "(" predicate ")"
 guard_atom: NAME
-// the left side is a bare field (the event's), or a namespaced `event.x` / `context.x`
-comparison: (ref | DOTTED) OP value
+// the left side is a bare field (the event's), or a namespaced `event.x` / `context.x`;
+// the right side is a literal, or a namespaced reference (`context.max`, `event.limit`)
+comparison: (ref | DOTTED) OP (value | DOTTED)
 OP: "==" | "!=" | "<=" | ">=" | "<" | ">" | "in"
 
 // --- actions & values ------------------------------------------------------
