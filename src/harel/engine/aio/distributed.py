@@ -25,7 +25,9 @@ from harel.definition.model import Definition
 from harel.engine.aio import control
 from harel.engine.aio.driver import _AsyncRuntimeDriver
 from harel.engine.distributed import _defn_for, _register_submachines, _resolve_machine
+from harel.engine.driving import store, transport
 from harel.engine.execution import Execution, Status, stamp
+from harel.engine.flow import Flow, parallel
 from harel.engine.resolve import MachineResolver
 from harel.engine.runtime import _CONTROL
 from harel.engine.store import StoreConflict, TimerOp
@@ -55,23 +57,26 @@ class AsyncTransportDriver(_AsyncRuntimeDriver):
         )
         self.transport = transport
 
-    async def _deliver_timeout(self, execution_id: str, event: Event) -> None:
-        exe = await self.store.load(execution_id)
-        priority = exe.priority if exe is not None else 0
-        await self.transport.publish(execution_id, event, priority=priority)
+    def _ports(self) -> dict[str, Any]:
+        return {"store": self.store, "transport": self.transport}
 
-    async def _flush(self, primary_priority: Optional[dict[str, int]] = None) -> None:
+    def _deliver_timeout_flow(self, execution_id: str, event: Event) -> Flow:
+        exe = yield from store("load", execution_id)
+        priority = exe.priority if exe is not None else 0
+        yield from transport("publish", execution_id, event, priority=priority)
+
+    def _flush_flow(self, primary_priority: Optional[dict[str, int]] = None) -> Flow:
         while True:
-            spawns = await self.store.pending_spawns()
-            outbox = await self.store.pending_outbox()
+            spawns = yield from store("pending_spawns")
+            outbox = yield from store("pending_outbox")
             if not spawns and not outbox:
                 return
             if spawns:
-                # Each spawn targets a different child_id → independent store rows → safe to
-                # run concurrently. For the transport driver, _create_spawn only writes the
-                # child record; the initial event is published via the outbox in the next pass.
-                await asyncio.gather(*[self._create_spawn(s) for s in spawns])
-                await asyncio.gather(*[self.store.ack_spawn(s.seq) for s in spawns])
+                # each spawn targets a different child_id → independent store rows → safe in
+                # parallel. Here creating a child only writes its record; its initial event is
+                # published through the outbox in the next pass.
+                yield from parallel([self._create_spawn_flow(s) for s in spawns])
+                yield from parallel([store("ack_spawn", s.seq) for s in spawns])
             for entry in outbox:
                 if entry.target_id is not None:
                     # self-targeted re-publish uses this exe's priority (primary_priority);
@@ -79,30 +84,33 @@ class AsyncTransportDriver(_AsyncRuntimeDriver):
                     # TARGET's own priority, not 0, so it doesn't pin the target's group.
                     prio = (primary_priority or {}).get(entry.target_id)
                     if prio is None:
-                        target = await self.store.load(entry.target_id)
+                        target = yield from store("load", entry.target_id)
                         prio = target.priority if target is not None else 0
-                    await self.transport.publish(entry.target_id, entry.event, priority=prio)
-                await self.store.ack_outbox(entry.seq)
+                    yield from transport("publish", entry.target_id, entry.event, priority=prio)
+                yield from store("ack_outbox", entry.seq)
 
-    async def route(self, exe: Execution, event: Event) -> None:
-        live = [
-            child
-            for cid, cs in exe.children.items()
-            if not cs.finished and not cs.submachine and (child := await self.store.load(cid)) is not None
-        ]
+    def route_flow(self, exe: Execution, event: Event) -> Flow:
+        """Route `event` to `exe`: a domain event with live regions is published to each
+        region's group; anything else runs the engine on `exe` here."""
+        live = []
+        for cid, cs in exe.children.items():
+            if not cs.finished and not cs.submachine:
+                child = yield from store("load", cid)
+                if child is not None:
+                    live.append(child)
         if event.kind not in _CONTROL and live:
             for child in live:
-                await self.transport.publish(child.id, event, priority=child.priority)
+                yield from transport("publish", child.id, event, priority=child.priority)
             timers: tuple[TimerOp, ...] = ()
             delay = engine.ttl_delay(self.defn, exe)  # the broadcast is activity for exe's `ttl`
             if delay is not None:
                 exe.expires_at = self._clock() + delay
                 timers = (TimerOp("schedule", engine.TTL_PATH, exe.expires_at),)
             stamp(exe, self._clock())
-            await self.store.commit(exe, [], processed_event_id=event.id, timers=timers)
+            yield from store("commit", exe, [], processed_event_id=event.id, timers=timers)
             enqueued = False  # broadcast went straight to the transport; nothing in the outbox
         else:
-            enqueued = await self._run(
+            enqueued = yield from self._run_flow(
                 exe, engine.process(self.defn, exe, event), event_id=event.id, event=event
             )
         # only run the relay (its HGETALL round-trips) when this event actually enqueued
@@ -110,7 +118,13 @@ class AsyncTransportDriver(_AsyncRuntimeDriver):
         # by the next emitting event's relay and by `recover()` on startup (the idle loop never
         # flushed either, so this does not change the at-least-once guarantee).
         if enqueued:
-            await self._flush(primary_priority={exe.id: exe.priority})
+            yield from self._flush_flow(primary_priority={exe.id: exe.priority})
+
+    async def _flush(self, primary_priority: Optional[dict[str, int]] = None) -> None:
+        await self._serve(self._flush_flow(primary_priority))
+
+    async def route(self, exe: Execution, event: Event) -> None:
+        await self._serve(self.route_flow(exe, event))
 
 
 class AsyncWorker:
