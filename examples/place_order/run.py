@@ -17,8 +17,6 @@ from harel import DictStore, DurableRunner, Event, definition_from_dsl_file, ren
 
 ORDER_STM = Path(__file__).parent / "order.stm"
 
-# what every order starts with: no declines yet, one retry after a decline
-NEW_ORDER = {"declines": 0, "max_retries": 1}
 DECLINED = ("PaymentDeclined", {"reason": "insufficient funds"})
 TO_DELIVERY = ["Picked", "Packed", "Dispatched", "Delivered"]
 
@@ -51,7 +49,7 @@ def run_scenario(defn, name: str, events: list, context: dict):
     """Drive one scenario on a fresh in-memory store; print each step; return the
     final Execution. An event is a kind, or a (kind, data) pair."""
     runner = DurableRunner(DictStore(), {defn.id: defn})
-    exe = runner.create(defn.id, context={**NEW_ORDER, **context})
+    exe = runner.create(defn.id, context=context)  # the context's defaults fill the rest
     print(f"\n=== {name} ===")
     print(f"  (start)              -> {exe.active_path}")
     for item in events:

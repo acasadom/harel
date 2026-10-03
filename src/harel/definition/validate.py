@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from harel.definition.events import RESERVED_EVENTS
+from harel.definition.events import RESERVED_EVENTS, value_fits
 from harel.definition.model import (
     Definition,
     EventFilter,
@@ -351,9 +351,18 @@ def _expr_type(expr: Expr, defn: Definition) -> Optional[str]:
     return None
 
 
+def _all_assignments(t: Transition) -> tuple:
+    """Every `set` a transition can apply: its own, and each of its `choose` branches'."""
+    if t.choice is None:
+        return t.assignments
+    branches = tuple(a for assigns in t.choice.branch_assignments for a in assigns)
+    return t.assignments + branches + tuple(t.choice.default_assignments)
+
+
 def _check_assignments(node: Node, t: Transition, defn: Definition, issues: list[Issue]) -> None:
-    """A transition's `set`: what it reads must be readable, what it writes must fit."""
-    for assign in t.assignments:
+    """A transition's `set` (and its `choose` branches'): what it reads must be readable,
+    what it writes must fit."""
+    for assign in _all_assignments(t):
         for ref in _expr_refs(assign.expr):
             if ref.source == "context" and ref.field:
                 _check_context_ref(node, ref.field, "eq", defn, issues)
@@ -474,10 +483,29 @@ def _check_compared_types(
         )
 
 
+def _check_context_defaults(defn: Definition, issues: list[Issue]) -> None:
+    """A context field's `default` must be of its declared type."""
+    for name, spec in defn.context_schema.items():
+        if spec.default is not None and not value_fits(spec.type, spec.default):
+            issues.append(
+                Issue(
+                    "default_type_mismatch",
+                    "error",
+                    "",
+                    f"the default of context field {name!r} ({spec.type}) is "
+                    f"{type(spec.default).__name__} {spec.default!r}",
+                )
+            )
+
+
 def _check_context_refs(defn: Definition, issues: list[Issue]) -> None:
     for node in defn.index.values():
+        loop_var = node.invoke_each[0] if node.invoke_each is not None else None
         for parent_key in node.invoke_with.values():  # what a `with` reads from this context
-            _check_context_ref(node, parent_key, "eq", defn, issues)
+            if parent_key != loop_var:  # a fan-out's `for` variable is the entry, not a field
+                _check_context_ref(node, parent_key, "eq", defn, issues)
+        if node.invoke_each is not None:  # the collection a fan-out iterates is read from it
+            _check_context_ref(node, node.invoke_each[1], "eq", defn, issues)
         for t in node.transitions:
             for leaf in _guard_leaves(t):
                 for src, f in _operands(leaf):
@@ -509,7 +537,7 @@ def _check_events(defn: Definition, issues: list[Issue]) -> None:
                 ]
                 extra += [
                     (r.field, "eq")
-                    for a in t.assignments
+                    for a in _all_assignments(t)
                     for r in _expr_refs(a.expr)
                     if r.source == "event" and r.field
                 ]
@@ -897,6 +925,7 @@ def validate(defn: Definition) -> list[Issue]:
     _check_reachability(defn, issues)
     _check_events(defn, issues)
     _check_context_refs(defn, issues)
+    _check_context_defaults(defn, issues)
     _check_cancel_targets(defn, issues)
     _check_choose_can_hang(defn, issues)
     _check_ttl(defn, issues)

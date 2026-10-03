@@ -222,7 +222,8 @@ class _ToProgram(Transformer):
         return _unquote(str(t))
 
     def list(self, *items):
-        return [_coerce(i) for i in items]
+        # `[]` holds no value: the optional `[value, ...]` arrives as a lone None placeholder
+        return [_coerce(i) for i in items if i is not None]
 
     def action(self, ref, *inputs):
         # action_ref is a NAME (-> str, a handler) or a DOTTED token (a literal path)
@@ -265,6 +266,23 @@ class _ToProgram(Transformer):
     # --- events ---
     def field_decl(self, name, type_, optional=None):
         return (str(name), {"type": str(type_), "required": optional is None})
+
+    @v_args(meta=True)
+    def context_field(self, meta, children):
+        name, type_, *rest = children
+        optional = any(isinstance(c, Token) and c.type == "OPTIONAL" for c in rest)
+        defaults = [c for c in rest if not (isinstance(c, Token) and c.type == "OPTIONAL")]
+        spec: dict = {"type": str(type_), "required": not optional}
+        if defaults:
+            if optional:
+                raise DslError(
+                    f"context field {str(name)!r} has a default, so it can't also be optional (`?`): "
+                    "an execution always starts with it",
+                    line=meta.line,
+                    column=meta.column,
+                )
+            spec["default"] = _coerce(defaults[0])
+        return (str(name), spec)
 
     @v_args(inline=True, meta=True)
     def event_decl(self, meta, name, *fields):
@@ -311,16 +329,24 @@ class _ToProgram(Transformer):
 
     @v_args(inline=True, meta=True)
     def choice_trans(self, meta, src, *rest):
-        branches = [{"when": pred, "to": tgt} for tag, pred, tgt in (r for r in rest if _tagged(r, "when"))]
+        branches = [
+            {"when": pred, "to": tgt, **({"set": assigns} if assigns else {})}
+            for _, pred, tgt, assigns in (r for r in rest if _tagged(r, "when"))
+        ]
         choice: dict = {"branches": branches}
-        default = next((r[1] for r in rest if _tagged(r, "else")), None)
+        default = next((r for r in rest if _tagged(r, "choice_else")), None)
         if default is not None:
-            choice["default"] = default
+            choice["default"] = default[1]
+            if default[2]:
+                choice["default_set"] = default[2]
         t: dict = {"from": str(src), "choice": choice, "__pos__": (meta.line, meta.column)}
         return ("transition", _with_trigger_and_set(t, rest))
 
-    def when_branch(self, pred, tgt):
-        return ("when", _pred_to_dict(pred), str(tgt))
+    def when_branch(self, pred, tgt, assigns=None):
+        return ("when", _pred_to_dict(pred), str(tgt), assigns[1] if assigns else None)
+
+    def choice_else(self, tgt, assigns=None):
+        return ("choice_else", str(tgt), assigns[1] if assigns else None)
 
     # --- assignments (`set`) ---
     @v_args(inline=True, meta=True)

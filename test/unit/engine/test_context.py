@@ -590,3 +590,266 @@ def test_with_reads_declared_context_fields():
     source = REGIONS.replace("machine M {", "machine M {\n  " + schema)
     assert "unknown_context_field" not in _codes(source)
     assert "unknown_context_field" in _codes(source.replace("with { limit: max }", "with { limit: maximum }"))
+
+
+FAN_OUT = """
+event Finish {}
+machine sub_researcher {
+  context { topic: string?  depth: int? }
+  initial Work
+  state Work {}
+  final Done success {}
+  from Work to Done on Finish
+}
+machine research {
+  context { sub_topics: any  depth: int }
+  initial Researching
+  state Researching {
+    invoke sub_researcher for topic in sub_topics
+      with { topic: topic  depth: depth }
+  }
+  final Done success {}
+  final Partial failed {}
+  from Researching join all to Done else to Partial
+}
+"""
+
+
+def test_a_fan_outs_with_and_collection_are_checked_against_the_schema():
+    # the `for` variable is the entry, not a context field; the collection is a context read
+    assert _codes(FAN_OUT, "research") == set()
+    assert "unknown_context_field" in _codes(FAN_OUT.replace("in sub_topics", "in sub_topic"), "research")
+    assert "unknown_context_field" in _codes(FAN_OUT.replace("depth: depth }", "depth: deep }"), "research")
+
+
+def test_a_fan_out_with_a_schema_runs():
+    defn = definition_from_dsl(FAN_OUT, "research", validate=True)
+    sub = definition_from_dsl(FAN_OUT, "sub_researcher", validate=True)
+    store = DictStore()
+    runner = DurableRunner(store, {defn.id: defn, sub.id: sub})
+    exe = runner.create(defn.id, context={"sub_topics": ["a", "b"], "depth": 2})
+    children = [store.load(c) for c in store.load(exe.id).children]
+    assert sorted(c.context["topic"] for c in children) == ["a", "b"]
+    assert all(c.context["depth"] == 2 for c in children)
+
+
+# --- context defaults ------------------------------------------------------------------------
+DEFAULTS = """
+event Fail {}
+machine M {
+  context {
+    retries: int = 0
+    max_retries: int = 2
+    tags: any = []
+    note: string?
+  }
+  initial A
+  state A {}
+  final GaveUp failed {}
+  from A choose on Fail set context.retries = context.retries + 1 {
+    when context.retries >= context.max_retries to GaveUp
+    else to A
+  }
+}
+"""
+
+
+def test_a_context_default_is_what_an_execution_starts_with():
+    runner, _, defn = _runner(DEFAULTS)
+    assert runner.create(defn.id).context == {"retries": 0, "max_retries": 2, "tags": []}
+    assert runner.create(defn.id, context={"max_retries": 5}).context["max_retries"] == 5  # passed wins
+    first, second = runner.create(defn.id), runner.create(defn.id)
+    first.context["tags"].append("x")
+    assert second.context["tags"] == []  # a list default is copied, never shared
+    exe = runner.create(defn.id)
+    paths = [runner.process(exe.id, Event(kind="Fail")).active_path for _ in range(3)]
+    assert paths == ["A", "A", "GaveUp"]
+
+
+def test_a_deferred_distributed_start_has_the_defaults_too():
+    defn = definition_from_dsl(DEFAULTS, "M", validate=True)
+    store = DictStore()
+    runner = DistributedRunner(store, InMemoryTransport(), {defn.id: defn})
+    exe = runner.create(defn.id, start_on_create=False)
+    assert store.load(exe.id).context["retries"] == 0
+    runner.start(exe.id, data={"max_retries": 1})
+
+
+def test_context_defaults_are_checked():
+    issues = validate(
+        definition_from_dsl(DEFAULTS.replace("max_retries: int = 2", 'max_retries: int = "two"'), "M")
+    )
+    assert [i.severity for i in issues if i.code == "default_type_mismatch"] == ["error"]
+    with pytest.raises(DslError, match="can't also be optional"):
+        definition_from_dsl(DEFAULTS.replace("retries: int = 0", "retries: int? = 0"), "M")
+    with pytest.raises(DslError):  # only a context field has a default, not an event's
+        definition_from_dsl("event E { x: int = 1 }\nmachine M {\n initial A\n state A {}\n}", "M")
+
+
+INVOKED_DEFAULTS = """
+event Go {}
+machine worker {
+  context { attempts: int = 3  job: string? }
+  initial W
+  state W {}
+  final Done success {}
+  from W to Done on Go
+}
+machine parent {
+  context { job: string  limit: int = 1 }
+  initial Run
+  state Run {
+    invoke worker with { job: job }
+  }
+  orthogonal Split {
+    with { job: job }
+    state R {
+      initial R1
+      state R1 {}
+    }
+  }
+  final Done success {}
+  from Run to Done on Returned
+}
+"""
+
+
+def test_an_invoked_machine_starts_with_its_defaults_and_a_region_with_what_it_is_given():
+    parent = definition_from_dsl(INVOKED_DEFAULTS, "parent")
+    worker = definition_from_dsl(INVOKED_DEFAULTS, "worker")
+    store = DictStore()
+    runner = DurableRunner(store, {parent.id: parent, worker.id: worker})
+    exe = runner.create(parent.id, context={"job": "j1"})
+    (child_id,) = store.load(exe.id).children
+    assert store.load(child_id).context == {"job": "j1", "attempts": 3}  # the worker's own default
+
+    split = definition_from_dsl(INVOKED_DEFAULTS.replace("initial Run", "initial Split"), "parent")
+    store2 = DictStore()
+    exe2 = DurableRunner(store2, {split.id: split}).create(split.id, context={"job": "j2"})
+    (region_id,) = store2.load(exe2.id).children
+    assert store2.load(region_id).context == {"job": "j2"}  # not the machine's `limit` default
+
+
+# --- a `set` on a `choose` branch ------------------------------------------------------------
+BRANCH_SET = """
+event Fail { reason: string? }
+machine M {
+  context {
+    retries: int = 0
+    max_retries: int = 2
+    last: string?
+    gave_up: bool?
+  }
+  initial Working
+  state Working {}
+  state Refining {}
+  final GaveUp failed {}
+  from Working choose on Fail set context.last = event.reason {
+    when context.retries < context.max_retries to Refining set context.retries = context.retries + 1
+    else to GaveUp set context.gave_up = true, context.retries = context.retries * 10
+  }
+  from Refining to Working
+}
+"""
+
+
+def test_only_the_taken_branch_applies_its_set():
+    runner, _, defn = _runner(BRANCH_SET)
+    exe = runner.create(defn.id)
+    seen = []
+    for i in range(3):
+        e = runner.process(exe.id, Event(kind="Fail", data={"reason": f"r{i}"}))
+        seen.append((e.active_path, dict(e.context)))  # a snapshot: the in-memory store hands back one object
+    assert [(path, ctx["retries"]) for path, ctx in seen] == [("Working", 1), ("Working", 2), ("GaveUp", 20)]
+    assert (
+        seen[-1][1]["last"] == "r2" and seen[-1][1]["gave_up"] is True
+    )  # the transition's own set: every branch
+    assert "gave_up" not in seen[0][1]  # the else's set only when the else is taken
+
+
+def test_a_branch_set_reads_the_context_from_before_the_transition():
+    source = BRANCH_SET.replace(
+        "to Refining set context.retries = context.retries + 1",
+        "to Refining set context.retries = context.retries + 1, context.last = context.last",
+    )
+    runner, _, defn = _runner(source)
+    exe = runner.create(defn.id, context={"last": "before"})
+    exe = runner.process(exe.id, Event(kind="Fail", data={"reason": "now"}))
+    assert exe.context["last"] == "before"  # evaluated with the transition's own, up front
+
+
+def test_a_branch_set_is_validated_like_a_transitions():
+    assert _codes(BRANCH_SET) == set()
+    assert "unknown_context_field" in _codes(
+        BRANCH_SET.replace("set context.gave_up = true", "set context.gaveup = true")
+    )
+    automatic = """
+machine M {
+  context { n: int = 0 }
+  initial A
+  state A {}
+  final B success {}
+  from A choose {
+    when context.n > 0 to B set context.n = event.n
+    else to B
+  }
+}
+"""
+    assert "event_ref_without_event" in _codes(automatic)
+
+
+def test_a_branch_set_is_drawn_on_its_branch():
+    from harel.viz.mermaid import render as mermaid
+    from harel.viz.plantuml import render as plantuml
+
+    defn = definition_from_dsl(BRANCH_SET, "M")
+    lines = mermaid(defn).splitlines()
+    assert (
+        "Working__choose --> Refining : [context.retries < context.max_retries]<br/>"
+        "/ context.retries = context.retries + 1"
+    ) in lines
+    assert (
+        "Working__choose --> GaveUp : else<br/>/ context.gave_up = true, context.retries = context.retries * 10"
+        in lines
+    )
+    assert (
+        "Working_choose --> Refining: [context.retries < context.max_retries]\\n/ context.retries = context.retries + 1"
+        in plantuml(defn)
+    )
+
+
+def test_a_reset_starts_over_with_the_context_defaults():
+    source = """
+event Fail {}
+machine M {
+  context { retries: int = 0 }
+  initial A
+  state A {}
+  from A to A on Fail set context.retries = context.retries + 1
+}
+"""
+    runner, _, defn = _runner(source)
+    exe = runner.create(defn.id)
+    runner.process(exe.id, Event(kind="Fail"))
+    exe = runner.process(exe.id, Event(kind="Reset"))
+    assert exe.context == {"retries": 0}
+    exe = runner.process(exe.id, Event(kind="Fail"))
+    assert exe.status is Status.RUNNING and exe.context == {"retries": 1}
+
+
+def test_a_branch_set_writing_the_transitions_field_wins():
+    source = """
+event Go {}
+machine M {
+  context { n: int = 1 }
+  initial A
+  state A {}
+  final B success {}
+  from A choose on Go set context.n = 10 {
+    when context.n == 1 to B set context.n = context.n + 1
+  }
+}
+"""
+    runner, _, defn = _runner(source)
+    exe = runner.process(runner.create(defn.id).id, Event(kind="Go"))
+    assert exe.context["n"] == 2  # applied after the transition's own; both read n == 1

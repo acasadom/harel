@@ -33,7 +33,7 @@ on activity <action>        # hook: event arrived with no transition
 timeout 900                 # arm a durable timer (seconds)
 timeout context key         # …with the delay read from context[key]
 ttl 3600                    # machine only: expire after this long without a domain event
-context { n: int  who: string? }   # machine only: the context's typed fields
+context { n: int = 0  who: string? }   # machine only: the context's typed fields (`= default`)
 outcome <label>             # this terminal's verdict (final is sugar over this)
 carry k1, k2                # context keys a region propagates on Finished
 defer EventA, EventB        # hold these events while unhandled here; re-deliver on a state that handles them
@@ -92,6 +92,7 @@ from Fork join any to X else to Y          # …at least one
 
 from A choose on Event {          # guarded choice: the first `when` that holds wins
   when context.n > 3 to B
+  when context.n > 0 to D set context.n = context.n - 1   # a branch's own `set`, if it's taken
   else to C                       # optional; without it, no match = the transition doesn't fire
 }
 

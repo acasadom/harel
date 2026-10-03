@@ -13,7 +13,9 @@ is skipped (back-compat).
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
+from typing import Any
 
 # Field types an event datum may declare. `any` opts out of type checking.
 FIELD_TYPES = ("string", "int", "float", "bool", "any")
@@ -27,10 +29,13 @@ RESERVED_EVENTS = frozenset(
 
 @dataclass(frozen=True)
 class FieldSpec:
-    """One field on an event's `data`."""
+    """One declared field: of an event's `data`, or of a machine's context — which may give
+    a `default`, the value an execution starts with when it isn't passed (None: no default;
+    the DSL has no null literal)."""
 
     type: str = "any"
     required: bool = True
+    default: Any = None
 
 
 @dataclass
@@ -74,6 +79,16 @@ def schema_problems(schema: dict[str, FieldSpec], values: dict, *, check_require
         if not value_fits(spec.type, value):
             problems.append(f"field {name!r} must be {spec.type}, got {type(value).__name__} {value!r}")
     return problems
+
+
+def with_defaults(schema: dict[str, FieldSpec], context: dict) -> dict:
+    """`context` with every field of `schema` it lacks that declares a `default` added
+    (a copy of the default, so a list default is never shared between executions)."""
+    filled = dict(context)
+    for name, spec in schema.items():
+        if spec.default is not None and name not in filled:
+            filled[name] = copy.deepcopy(spec.default)
+    return filled
 
 
 class ContextError(ValueError):

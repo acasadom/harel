@@ -35,22 +35,32 @@ equal or ordered.
 
 ## A typed context
 
-A machine may declare its context's fields, with the same field syntax as an event:
+A machine may declare its context's fields, with the same field syntax as an event — and,
+unlike an event's, a field may give a **default**, the value an execution starts with when the
+caller doesn't pass one:
 
 ```text
 machine job {
   context {
-    attempts: int
-    last_code: int?        # optional
+    attempts: int = 0      # starts at 0 unless create() passes it
+    max_attempts: int = 3
+    last_code: int?        # optional: may be absent
   }
   ...
 }
 ```
 
+A default is a literal of the field's type (`harel validate` checks it:
+`default_type_mismatch`); a field with one can't also be `?` — an execution always has it. A list
+default is copied for each execution. Defaults fill an execution created with `create()`, and the
+child of an `invoke` gets its own machine's defaults; a `Reset`, which starts an execution over
+from scratch, gives them back. An orthogonal region starts with only what its fork passes down
+(`with`), as below.
+
 The declaration is checked at three points:
 
-- **when an execution is created** — a required field missing, or a declared field of the wrong
-  type, raises `ContextError` (with `DistributedRunner.create(..., start_on_create=False)`, the
+- **when an execution is created** (after the defaults are filled in) — a required field
+  missing, or a declared field of the wrong type, raises `ContextError` (with `DistributedRunner.create(..., start_on_create=False)`, the
   required fields may still come with `start(data=...)`, and are checked there);
 - **by `harel validate`** — a guard or a `set` naming an undeclared field, or a `set` whose value
   can't be of the declared type, is an error;
@@ -102,6 +112,18 @@ as long as some event transition there can change the context. An automatic `cho
 forever if no branch holds: `harel validate` reports it (`choose_can_hang`).
 Its guards are evaluated when the transition is picked, so they see the context **before** the
 transition's own `set`, as in UML — above, the fourth failure is the one that gives up.
+
+A branch may carry its own `set`, applied only when that branch is taken — after the transition's
+own `set`, and, like it, evaluated against the context as the transition starts:
+
+```text
+from Working choose on Fail set context.last_code = event.code {
+  when context.retries < context.max_retries to Refining set context.retries = context.retries + 1
+  else to GaveUp set context.gave_up = true
+}
+```
+
+Every failure records its code; only a retry counts one, and only giving up sets `gave_up`.
 
 A full example:
 

@@ -270,7 +270,10 @@ def index(text: str, *, base_path: Optional[Path] = None, uri: Optional[str] = N
 
 
 _CONTEXT_BLOCK = re.compile(r"\bcontext\s*\{([^{}]*)\}")
-_FIELD_DECL = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(string|int|float|bool|any)(\?)?")
+_FIELD_DECL = re.compile(
+    r"([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(string|int|float|bool|any)(\?)?"
+    r"(?:\s*=\s*(\"(?:[^\"\\]|\\.)*\"|\[[^\]]*\]|[^\s]+))?"  # an optional `= default`
+)
 
 
 def _scan_context_fields(text: str, idx: SymbolIndex, uri: Optional[str]) -> None:
@@ -280,8 +283,10 @@ def _scan_context_fields(text: str, idx: SymbolIndex, uri: Optional[str]) -> Non
             offset = block.start(1) + decl.start()
             line = text.count("\n", 0, offset) + 1
             column = offset - (text.rfind("\n", 0, offset) + 1) + 1
-            name, type_, optional = decl.group(1), decl.group(2), decl.group(3)
+            name, type_, optional, default = decl.group(1), decl.group(2), decl.group(3), decl.group(4)
             detail = f"`context.{name}`: {type_}{' (optional)' if optional else ''}"
+            if default is not None:
+                detail += f" = {default}"
             idx.context_fields[name] = Symbol(name, "context", line, column, detail, uri)
 
 

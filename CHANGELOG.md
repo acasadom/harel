@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.5.0 — 2026-10-03
+
+Since 0.4.1.
+
+### Added
+
+- **Defaults for context fields**: `context { retries: int = 0  max_retries: int = 2 }`. An
+  execution created without a defaulted field starts with its default (a list default is
+  copied per execution), an invoked machine's child gets its own machine's defaults, and a
+  `Reset` starts over with them (it used to leave the context empty, so a `set` reading a
+  required field then failed); an orthogonal region still starts with only what its fork
+  passes down. The default must be of
+  the field's type (`harel validate`: `default_type_mismatch`), and a field with one can't also
+  be optional (`?`). Event fields take no default.
+- **A `set` on a `choose` branch**: `when ... to Refining set context.retries = context.retries + 1`
+  (and on the `else`), applied only when that branch is taken, after the transition's own `set`
+  and evaluated with it, against the context as the transition starts. Validated like a
+  transition's `set`, and drawn on its branch.
+
+### Fixed
+
+- With a `context { ... }` schema, `harel validate` reported the `for` variable of a fan-out
+  (`invoke X for item in coll with { k: item }`) as an unknown context field; it is the
+  collection's entry. The collection itself is now checked against the schema.
+- An empty list literal `[]` parsed as `[None]`, so `where x in []` held for a null `x`.
+
 ## 0.4.1 — 2026-10-03
 
 Since 0.4.0.
