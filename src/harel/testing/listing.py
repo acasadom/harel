@@ -1,6 +1,6 @@
-"""Shared `ExecutionStore.list_executions` contract: seed + assertions reused by the
-unit tests (in-process backends, fresh store) and the integration tests (real servers,
-stack-marked, SHARED tables).
+"""The `ExecutionStore.list_executions` contract: `assert_listing_contract(store, ordered=...)`
+(and `assert_async_listing_contract` for an async store) seeds executions and checks a
+store lists them as harel expects. harel runs it on its own backends; run it on yours.
 
 The contract: a page of lightweight `ExecutionSummary` filtered by status (OR) /
 definition_id / roots_only, paginated by an opaque cursor until `next_cursor is None`.
@@ -69,7 +69,7 @@ def _ids(store, *, page=4, **filters) -> set:
     return set(ids)
 
 
-def assert_contract(store, *, ordered: bool, ns: str = "") -> None:
+def assert_listing_contract(store, *, ordered: bool, ns: str = "") -> None:
     """Run the full listing contract against `store`, seeding under `ns`. Every query is
     scoped by definition_id so the assertions survive a shared backend. `ordered` enables
     the stable-id-order checks (skip for Redis/DynamoDB)."""
@@ -138,8 +138,8 @@ async def _ids_async(store, *, page=4, **filters) -> set:
     return set(ids)
 
 
-async def assert_async_contract(store, *, ordered: bool, ns: str = "") -> None:
-    """`assert_contract` for an async store."""
+async def assert_async_listing_contract(store, *, ordered: bool, ns: str = "") -> None:
+    """`assert_listing_contract` for an async store."""
     d1, d2 = await seed_async(store, ns)
     n = lambda *s: {f"{ns}{x}" for x in s}  # noqa: E731
 

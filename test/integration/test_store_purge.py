@@ -2,7 +2,7 @@
 DynamoDB-on-LocalStack), sync and async, in the stack.
 
 The in-process backends are covered in test/unit/engine/test_store_purge.py; this runs
-the same shared contract (`purge_contract`) over a real server, gated by
+the same shared contract (`harel.testing`) over a real server, gated by
 STM_STORE_BACKEND (one backend active per compose run; the rest skip). A unique `ns`
 per run isolates the seed from any other executions sharing the backend's tables.
 """
@@ -11,7 +11,8 @@ import os
 import uuid
 
 import pytest
-from purge_contract import assert_async_purge_contract, assert_purge_contract
+
+from harel.testing import assert_async_purge_contract, assert_purge_contract
 
 pytestmark = pytest.mark.stack
 

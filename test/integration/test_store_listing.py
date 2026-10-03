@@ -2,7 +2,7 @@
 Mongo / DynamoDB-on-LocalStack), sync and async, in the stack.
 
 The in-process fakes are covered in test/unit/engine/test_store_listing.py; this runs
-the same shared contract (`listing_contract.assert_contract`) over a real server, gated
+the same shared contract (`harel.testing.assert_listing_contract`) over a real server, gated
 by STM_STORE_BACKEND (one backend active per compose run; the rest skip). A unique `ns`
 per run isolates the seed from any other executions sharing the backend's tables.
 """
@@ -11,7 +11,8 @@ import os
 import uuid
 
 import pytest
-from listing_contract import assert_async_contract, assert_contract
+
+from harel.testing import assert_async_listing_contract, assert_listing_contract
 
 pytestmark = pytest.mark.stack
 
@@ -30,7 +31,7 @@ def test_postgres_listing():
 
     store = PostgresStore.from_dsn(dsn)
     try:
-        assert_contract(store, ordered=True, ns=_ns())
+        assert_listing_contract(store, ordered=True, ns=_ns())
     finally:
         store.close()
 
@@ -45,7 +46,7 @@ def test_rqlite_listing():
 
     store = RqliteStore.from_url(url)
     try:
-        assert_contract(store, ordered=True, ns=_ns())
+        assert_listing_contract(store, ordered=True, ns=_ns())
     finally:
         store.close()
 
@@ -60,7 +61,7 @@ def test_mongo_listing():
 
     store = MongoStore.from_url(url, os.environ.get("STM_MONGO_DB", "harel"))
     try:
-        assert_contract(store, ordered=True, ns=_ns())
+        assert_listing_contract(store, ordered=True, ns=_ns())
     finally:
         store.close()
 
@@ -75,7 +76,7 @@ def test_dynamodb_listing():
 
     store = DynamoDBStore.create(endpoint, os.environ.get("STM_AWS_REGION", "us-east-1"))
     try:
-        assert_contract(store, ordered=False, ns=_ns())  # Scan is unordered
+        assert_listing_contract(store, ordered=False, ns=_ns())  # Scan is unordered
     finally:
         store.close()
 
@@ -94,7 +95,7 @@ async def test_async_postgres_listing():
 
     store = await AsyncPostgresStore.from_dsn(_env("postgres", "STM_POSTGRES_DSN"))
     try:
-        await assert_async_contract(store, ordered=True, ns=_ns())
+        await assert_async_listing_contract(store, ordered=True, ns=_ns())
     finally:
         await store.close()
 
@@ -104,7 +105,7 @@ async def test_async_rqlite_listing():
 
     store = await AsyncRqliteStore.from_url(_env("rqlite", "STM_RQLITE_URL"))
     try:
-        await assert_async_contract(store, ordered=True, ns=_ns())
+        await assert_async_listing_contract(store, ordered=True, ns=_ns())
     finally:
         await store.close()
 
@@ -116,7 +117,7 @@ async def test_async_mongo_listing():
         _env("mongo", "STM_MONGO_URL"), os.environ.get("STM_MONGO_DB", "harel")
     )
     try:
-        await assert_async_contract(store, ordered=True, ns=_ns())
+        await assert_async_listing_contract(store, ordered=True, ns=_ns())
     finally:
         await store.close()
 
@@ -127,6 +128,6 @@ async def test_async_dynamodb_listing():
     endpoint = _env("dynamodb", "STM_DYNAMODB_ENDPOINT")
     store = await AsyncDynamoDBStore.create(endpoint, os.environ.get("STM_AWS_REGION", "us-east-1"))
     try:
-        await assert_async_contract(store, ordered=False, ns=_ns())  # Scan is unordered
+        await assert_async_listing_contract(store, ordered=False, ns=_ns())  # Scan is unordered
     finally:
         await store.close()

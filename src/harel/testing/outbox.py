@@ -1,6 +1,6 @@
-"""Shared contract for the outbox seqs `ExecutionStore.commit` returns: assertions reused
-by the unit tests (in-process backends) and the integration tests (real servers,
-stack-marked, SHARED tables), for both the sync and the async stores.
+"""The contract of the outbox seqs `ExecutionStore.commit` returns: `assert_outbox_contract(store)`
+(and `assert_async_outbox_contract` for an async store). harel runs it on its own backends;
+run it on yours.
 
 The contract: `commit` returns the `seq` of each outbox entry it enqueued, in `emits`
 order — the same seqs `pending_outbox` reports for them — and acking one removes exactly

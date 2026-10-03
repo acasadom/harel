@@ -39,6 +39,30 @@ durable backends, which each per-backend page then spells out exactly:
 - **Dedupe** — `processed_events` (id + event id) makes at-least-once delivery effect-once.
 - **Timers** — `(execution_id, path) → fire_at`, armed/cancelled in the same commit.
 
+## Writing your own backend
+
+A store outside harel — over a framework's ORM, a database harel doesn't ship — builds on
+`harel.engine.store.base`, the stable API for backend authors: the protocols
+(`ExecutionStore`, `AsyncExecutionStore`), the records (`OutboxEntry`, `SpawnEntry`, `TimerOp`,
+`ExecutionSummary`, `ExecutionPage`), the errors (`StoreConflict`, `ExecutionAlreadyExists`) and
+the helpers the built-in backends share (`encode_offset`/`decode_offset` for the listing cursor,
+`matches`, `listing_page`, `like_prefix`).
+
+`harel.testing` holds the contracts harel runs on its own backends; run them on yours, one call
+each:
+
+```text
+from harel.testing import assert_listing_contract, assert_outbox_contract, assert_purge_contract
+
+def test_my_store():
+    assert_listing_contract(MyStore(), ordered=True)   # ordered=False for an unordered scan
+    assert_purge_contract(MyStore())
+    assert_outbox_contract(MyStore())
+```
+
+Each has an `assert_async_*` twin for an async store, and takes `ns=` to prefix the ids it seeds
+on a backend shared with other data. When the protocol changes, they are what tells you.
+
 ## Execution trace (opt-in)
 
 When tracing is on (`STM_TRACE=1`, or `DurableRunner(..., trace=True)`), `commit` also appends
