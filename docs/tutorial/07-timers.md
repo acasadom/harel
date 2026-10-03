@@ -107,7 +107,7 @@ machine that already moved on.
 
 Because the model decides what a timeout does, retry-with-backoff isn't an engine feature —
 it's a small composite you assemble: a `Waiting` state whose delay is read from context
-(`timeout {context: backoff}`), a selector that branches *succeeded / retry again*, and the
+(`timeout context backoff`), a selector that branches *succeeded / retry again*, and the
 composite's own `timeout` as the overall budget. harel ships composable backoff actions
 (`harel.lib.exponential_backoff`, `linear_backoff`, `reset_backoff`) to compute the next
 delay. The full pattern is laid out in [durability](../guide/durability); for now the takeaway

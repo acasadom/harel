@@ -11,6 +11,12 @@
   automatic transition) and warns when the two declared types differ
   (`compare_type_mismatch`).
 
+### Fixed
+
+- `harel run` reports a context its machine's `context { ... }` refuses (pass it with
+  `--seed`), and malformed JSON in `--seed` or an event's data, as `error: ...` — checked
+  before anything runs — instead of a traceback.
+
 ## 0.4.0 — 2026-10-02
 
 Since 0.3.1. The changes under [Behavior changes](#behavior-changes) can change what an existing

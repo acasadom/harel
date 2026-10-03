@@ -120,17 +120,33 @@ def _cmd_list(args: argparse.Namespace) -> int:
     return 0
 
 
+class _ArgumentError(Exception):
+    """A command-line argument the command can't use; reported as `error: ...`."""
+
+
+def _json_object(raw: str, what: str) -> dict:
+    """`raw` parsed as a JSON object, or an `_ArgumentError` naming `what` it was for."""
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise _ArgumentError(f"{what} is not valid JSON ({exc})") from None
+    if not isinstance(value, dict):
+        raise _ArgumentError(f"{what} must be a JSON object, got {type(value).__name__}")
+    return value
+
+
 def _event(spec: str):
     """Parse a `KIND` or `KIND:JSON` event spec into an Event."""
     from harel.spec.states import Event
 
     kind, sep, raw = spec.partition(":")
-    return Event(kind=kind, data=json.loads(raw)) if sep else Event(kind=kind)
+    return Event(kind=kind, data=_json_object(raw, f"the data of -e {kind}")) if sep else Event(kind=kind)
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
     import os
 
+    from harel.definition.events import ContextError
     from harel.engine.durable import DurableRunner
     from harel.engine.store import DictStore
 
@@ -145,11 +161,17 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
         validate_or_raise(defn)
 
+    # every argument is checked before anything runs
+    seed = _json_object(args.seed, "--seed") if args.seed else None
+    events = [_event(spec) for spec in args.event or []]
+
     runner = DurableRunner(DictStore(), {defn.id: defn})
-    exe = runner.create(defn.id, context=json.loads(args.seed) if args.seed else None)
+    try:
+        exe = runner.create(defn.id, context=seed)
+    except ContextError as exc:
+        raise _ArgumentError(f"{exc} (give the initial context with --seed '{{...}}')") from None
     print(f"(start)              -> {exe.active_path}")
-    for spec in args.event or []:
-        event = _event(spec)
+    for event in events:
         exe = runner.process(exe.id, event)
         print(f"{event.kind:<20} -> {exe.active_path}")
     print(f"status: {exe.status.name}  outcome: {exe.outcome}")
@@ -320,7 +342,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(raw)
     try:
         return args.func(args)
-    except (DslError, ValidationError) as exc:
+    except (DslError, ValidationError, _ArgumentError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except FileNotFoundError as exc:
