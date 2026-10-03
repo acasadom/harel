@@ -48,3 +48,6 @@ jobs:
       # store logic is covered deterministically by the fakeredis tests.
       - name: Run tests
         run: uv run pytest
+      # the same suite with the sync runners running in the caller's thread (execution="inline")
+      - name: Run tests (inline execution)
+        run: uv run pytest --execution=inline

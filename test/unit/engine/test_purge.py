@@ -73,7 +73,7 @@ def _terminated_fork(store=None):
 
 
 def runner_defn_id(runner) -> str:
-    return next(iter(runner._async.definitions))
+    return next(iter(runner.definitions))
 
 
 def test_purge_deletes_the_whole_finished_tree():

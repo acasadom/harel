@@ -15,8 +15,9 @@ help: ## Show this help
 sync: ## Install/refresh the virtualenv from pyproject + lock
 	uv sync
 
-test: ## Run the test suite (unit + in-process fakes; no Docker needed)
+test: ## Run the test suite (unit + in-process fakes; no Docker needed), under both execution models
 	uv run pytest
+	uv run pytest --execution=inline
 
 test-stack: ## Run each backend's tests directly against the real stack (needs Docker)
 	@docker compose -f deploy/docker-compose.yml down -v 2>/dev/null || true

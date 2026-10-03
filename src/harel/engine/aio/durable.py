@@ -28,8 +28,9 @@ class AsyncDurableRunner(DurableLogic):
         clock: Callable[[], float] = time.time,
         resolver: Optional[MachineResolver] = None,
         trace: bool = False,
+        on_action_error: str = "fail",
     ) -> None:
-        super().__init__(definitions, clock, resolver, trace)
+        super().__init__(definitions, clock, resolver, trace, on_action_error)
         self.store = store
 
     async def _serve(self, flow: Flow) -> Any:

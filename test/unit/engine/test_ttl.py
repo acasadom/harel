@@ -99,7 +99,7 @@ def test_validator_rules_for_ttl_and_expired():
 def test_an_idle_execution_is_forcefully_expired():
     clock = [0.0]
     runner, store, _ = _durable(LISTENER, clock)
-    exe = runner.create(next(iter(runner._async.definitions)))
+    exe = runner.create(next(iter(runner.definitions)))
     assert store.load(exe.id).expires_at == 60.0
 
     _at(runner, clock, 59.0)
@@ -115,7 +115,7 @@ def test_an_idle_execution_is_forcefully_expired():
 def test_a_domain_event_restarts_the_budget():
     clock = [0.0]
     runner, store, _ = _durable(LISTENER, clock)
-    exe = runner.create(next(iter(runner._async.definitions)))
+    exe = runner.create(next(iter(runner.definitions)))
 
     clock[0] = 30.0
     runner.process(exe.id, Event(kind="Ping"))
@@ -130,7 +130,7 @@ def test_a_domain_event_restarts_the_budget():
 def test_an_unhandled_domain_event_is_still_activity():
     clock = [0.0]
     runner, store, _ = _durable(LISTENER.replace("event Ping {}", "event Ping {}\nevent Noise {}"), clock)
-    exe = runner.create(next(iter(runner._async.definitions)))
+    exe = runner.create(next(iter(runner.definitions)))
 
     clock[0] = 50.0
     runner.process(exe.id, Event(kind="Noise"))  # no transition for it, but it was received
@@ -154,7 +154,7 @@ def test_a_stale_ttl_timeout_is_ignored():
 def test_the_models_own_timers_are_not_activity():
     clock = [0.0]
     runner, store, _ = _durable(POLLER, clock)
-    exe = runner.create(next(iter(runner._async.definitions)))
+    exe = runner.create(next(iter(runner.definitions)))
 
     for t in range(10, 60, 10):  # the poll timer keeps firing, but nobody talks to it
         _at(runner, clock, float(t))
@@ -167,7 +167,7 @@ def test_the_models_own_timers_are_not_activity():
 def test_a_modelled_expiry_ends_in_the_models_own_terminal():
     clock = [0.0]
     runner, store, _ = _durable(HANDLED, clock)
-    exe = runner.create(next(iter(runner._async.definitions)))
+    exe = runner.create(next(iter(runner.definitions)))
 
     _at(runner, clock, 61.0)
 

@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Execution models for the sync runners**: `DurableRunner`, `DistributedRunner` and `Worker`
+  take `execution="background"` (the default: the shared background event loop, as before) or
+  `execution="inline"` — the caller's own thread, with no event loop, over a sync store and
+  transport. Inline, every store call and action runs on the caller's connection and inside its
+  transaction (Django, SQLAlchemy sessions); a coroutine action is refused.
+- **`on_action_error`** on `DurableRunner` and `AsyncDurableRunner`: `"fail"` (default:
+  dead-letter the execution) or `"raise"` (the exception reaches the caller and the step isn't
+  committed, so it rolls back with the caller's transaction).
+
+### Changed
+
+- The driver and the runners are written once, as flows that yield IO requests
+  (`harel.engine.flow`, `driving`, `hosting`), run by an interpreter per execution model. The
+  async runners keep their API and behaviour.
+
 ## 0.5.0 — 2026-10-03
 
 Since 0.4.1.

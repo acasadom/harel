@@ -14,6 +14,7 @@ functions, bound to the store — `ControlPort`).
 from __future__ import annotations
 
 import functools
+import inspect
 import logging
 import random
 import time
@@ -43,6 +44,23 @@ class ControlPort:
 
     def __getattr__(self, name: str) -> Callable[..., Any]:
         return functools.partial(getattr(self._module, name), self._store)
+
+
+EXECUTION_MODELS = ("background", "inline")
+
+
+def check_execution(execution: str, *ports: tuple[str, Any]) -> None:
+    """Check an `execution=` choice; `"inline"` runs in the caller's thread without an
+    event loop, so every port it is given must be sync (a `(name, object)` pair each)."""
+    if execution not in EXECUTION_MODELS:
+        raise ValueError(f"execution must be one of {EXECUTION_MODELS}, got {execution!r}")
+    if execution == "inline":
+        for name, port in ports:
+            if any(inspect.iscoroutinefunction(getattr(port, m, None)) for m in ("load", "claim", "publish")):
+                raise TypeError(
+                    f"execution='inline' runs in the caller's thread, without an event loop: "
+                    f"it needs a sync {name}, got the async {type(port).__name__}"
+                )
 
 
 def control(method: str, *args: Any, **kwargs: Any) -> Flow:
@@ -90,9 +108,19 @@ def _defn_for(definitions: dict, resolver: Optional[MachineResolver], exe: Execu
     return defn
 
 
+ACTION_ERROR_POLICIES = ("fail", "raise")
+
+
 class DurableLogic:
     """The durable host: drives an Execution's events inline, checkpointing at every event
-    boundary. An action error nothing in the model handles dead-letters the execution."""
+    boundary. An action error nothing in the model handles is, by `on_action_error`:
+
+    - `"fail"` (the default) — the execution fails terminally (`FAILED`, the dead letter),
+      and that step is committed;
+    - `"raise"` — the exception reaches the caller and that step is not committed. Inside a
+      caller's transaction (a web request's), the caller's own writes and the machine's
+      advance then roll back together. (Steps the same call committed before — an earlier
+      region of a broadcast — stay, unless that transaction rolls them back.)"""
 
     def __init__(
         self,
@@ -100,18 +128,24 @@ class DurableLogic:
         clock: Callable[[], float] = time.time,
         resolver: Optional[MachineResolver] = None,
         trace: bool = False,
+        on_action_error: str = "fail",
     ) -> None:
+        if on_action_error not in ACTION_ERROR_POLICIES:
+            raise ValueError(
+                f"on_action_error must be one of {ACTION_ERROR_POLICIES}, got {on_action_error!r}"
+            )
         self.definitions = definitions
         _register_submachines(self.definitions)
         self._clock = clock
         self.resolver = resolver
         self._trace = trace
+        self._driver_class = _HostedDriverLogic if on_action_error == "fail" else DriverLogic
 
     def _resolve_machine(self, fqn: str) -> Definition:
         return _resolve_machine(self.definitions, self.resolver, fqn)
 
     def _driver_logic(self, definition_id: str) -> DriverLogic:
-        return _HostedDriverLogic(
+        return self._driver_class(
             self.definitions[definition_id],
             clock=self._clock,
             definitions=self.definitions,
