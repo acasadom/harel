@@ -476,8 +476,12 @@ def _check_compared_types(
 
 def _check_context_refs(defn: Definition, issues: list[Issue]) -> None:
     for node in defn.index.values():
+        loop_var = node.invoke_each[0] if node.invoke_each is not None else None
         for parent_key in node.invoke_with.values():  # what a `with` reads from this context
-            _check_context_ref(node, parent_key, "eq", defn, issues)
+            if parent_key != loop_var:  # a fan-out's `for` variable is the entry, not a field
+                _check_context_ref(node, parent_key, "eq", defn, issues)
+        if node.invoke_each is not None:  # the collection a fan-out iterates is read from it
+            _check_context_ref(node, node.invoke_each[1], "eq", defn, issues)
         for t in node.transitions:
             for leaf in _guard_leaves(t):
                 for src, f in _operands(leaf):

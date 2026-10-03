@@ -590,3 +590,44 @@ def test_with_reads_declared_context_fields():
     source = REGIONS.replace("machine M {", "machine M {\n  " + schema)
     assert "unknown_context_field" not in _codes(source)
     assert "unknown_context_field" in _codes(source.replace("with { limit: max }", "with { limit: maximum }"))
+
+
+FAN_OUT = """
+event Finish {}
+machine sub_researcher {
+  context { topic: string?  depth: int? }
+  initial Work
+  state Work {}
+  final Done success {}
+  from Work to Done on Finish
+}
+machine research {
+  context { sub_topics: any  depth: int }
+  initial Researching
+  state Researching {
+    invoke sub_researcher for topic in sub_topics
+      with { topic: topic  depth: depth }
+  }
+  final Done success {}
+  final Partial failed {}
+  from Researching join all to Done else to Partial
+}
+"""
+
+
+def test_a_fan_outs_with_and_collection_are_checked_against_the_schema():
+    # the `for` variable is the entry, not a context field; the collection is a context read
+    assert _codes(FAN_OUT, "research") == set()
+    assert "unknown_context_field" in _codes(FAN_OUT.replace("in sub_topics", "in sub_topic"), "research")
+    assert "unknown_context_field" in _codes(FAN_OUT.replace("depth: depth }", "depth: deep }"), "research")
+
+
+def test_a_fan_out_with_a_schema_runs():
+    defn = definition_from_dsl(FAN_OUT, "research", validate=True)
+    sub = definition_from_dsl(FAN_OUT, "sub_researcher", validate=True)
+    store = DictStore()
+    runner = DurableRunner(store, {defn.id: defn, sub.id: sub})
+    exe = runner.create(defn.id, context={"sub_topics": ["a", "b"], "depth": 2})
+    children = [store.load(c) for c in store.load(exe.id).children]
+    assert sorted(c.context["topic"] for c in children) == ["a", "b"]
+    assert all(c.context["depth"] == 2 for c in children)
