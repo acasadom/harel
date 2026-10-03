@@ -222,7 +222,8 @@ class _ToProgram(Transformer):
         return _unquote(str(t))
 
     def list(self, *items):
-        return [_coerce(i) for i in items]
+        # `[]` holds no value: the optional `[value, ...]` arrives as a lone None placeholder
+        return [_coerce(i) for i in items if i is not None]
 
     def action(self, ref, *inputs):
         # action_ref is a NAME (-> str, a handler) or a DOTTED token (a literal path)

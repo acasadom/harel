@@ -569,3 +569,12 @@ def test_undeclared_event_fails_validation():
     # declaring it makes the machine valid
     ok = definition_from_dsl("event Go {}  " + text, "M", validate=True)
     assert ok.id == "M"
+
+
+def test_an_empty_list_literal_is_empty():
+    defn = definition_from_dsl(
+        "event E { x: int? }\nmachine M {\n initial A\n state A {}\n final B success {}\n"
+        " from A to B on E where x in []\n}",
+        "M",
+    )
+    assert defn.root.transitions[0].event_filter.predicates == {"x__in": []}
