@@ -1,19 +1,25 @@
 """Distributed execution (sync API): stateless workers drive Executions off a `Transport`.
 
-`DistributedRunner` and `Worker` are now thin **synchronous facades** over the async core
-(`harel.engine.aio.distributed`), bridged by the shared anyio portal (one background loop —
-see `harel.engine.aio.facade`). The pure engine is unchanged; this only changes *how events
-move*: a `Worker` loops `claim`→`load`→dedupe→`route`→`ack`; the transport guarantees one
-in-flight message per group, so each Execution is driven by at most one worker at a time.
+The pure engine is unchanged; this only changes *how events move*: a `Worker` loops
+`claim`→`load`→dedupe→`route`→`ack`; the transport guarantees one in-flight message per
+group, so each Execution is driven by at most one worker at a time. `DistributedRunner` is the
+sending side — create/start/send and the control plane — and never runs a machine's actions.
 
-The facade `Worker.run(stop)` is a plain sync loop over `step()` (each `step` bridges to the
-async worker via the portal), so it runs in the caller's thread and honours a `threading.Event`
-without any threading↔asyncio event translation. For native async concurrency (many events in
-flight on one loop) use `harel.engine.aio.distributed.AsyncWorker` directly.
+Their logic is `harel.engine.hosting.SenderLogic` / `WorkerLogic`; `execution=` picks how it
+runs:
 
-A sync store/transport passed here is adapted to the async interface (delegating to the same
-object); pass async backends directly for the native path. Calling the sync facade from inside
-a running event loop is refused (use the async API).
+- `"background"` (the default) — on the shared background event loop (`harel.engine.aio.
+  facade`), as `AsyncDistributedRunner` / `AsyncWorker`: each call blocks until the loop has
+  done it. A sync store/transport is adapted to the async interface (delegating to the same
+  object); async backends may be passed directly.
+- `"inline"` — in the caller's own thread, with no event loop: every store and transport call
+  (and, in a worker, every action) runs right there, inside the caller's transaction. It takes
+  a sync store and transport, and refuses a coroutine action.
+
+`Worker.run(stop)` is a plain sync loop over `step()` in either mode, so it runs in the
+caller's thread and honours a `threading.Event`. For native async concurrency (many events in
+flight on one loop) use `harel.engine.aio.distributed.AsyncWorker` directly. Calling the sync
+facade from inside a running event loop is refused (use the async API).
 """
 
 from __future__ import annotations
@@ -40,11 +46,10 @@ from harel.spec.states import Event
 
 
 class Worker:
-    """Sync facade over `aio.distributed.AsyncWorker` (same constructor as the old sync
-    Worker, so direct construction keeps working): `step()` bridges one claim→route→ack to
-    the async worker; `run(stop)` is a plain sync loop over `step()`/`fire_due_timers()`
-    honouring a `threading.Event` (so it runs in a thread without event translation). A sync
-    store/transport is adapted to the async interface (delegating to the same object)."""
+    """A sync worker: `step()` handles one claim→route→ack — by `WorkerLogic`, inline or on
+    the background loop as `AsyncWorker` (see the module docstring); `run(stop)` is a plain
+    sync loop over `step()`/`fire_due_timers()` honouring a `threading.Event`, one message
+    at a time (`concurrency` is `AsyncWorker.run`'s; this loop doesn't use it)."""
 
     def __init__(
         self,
@@ -167,7 +172,8 @@ class Worker:
 
 
 class DistributedRunner:
-    """Sync facade over `aio.distributed.AsyncDistributedRunner`."""
+    """The sync sending side: `SenderLogic`, inline or on the background loop as
+    `AsyncDistributedRunner` (see the module docstring)."""
 
     def __init__(
         self,
@@ -286,41 +292,20 @@ class DistributedRunner:
     def cancel(self, execution_id: str, *, reason: Optional[dict] = None) -> None:
         self._do("cancel", execution_id, reason=reason)
 
-    def _control(self, name: str, *args: Any, **kwargs: Any) -> Any:
-        """A control-plane function that needs nothing but the store: the sync one inline,
-        the async runner's on the background loop."""
-        if self._inline is not None:
-            from harel.engine.aio import facade
-
-            facade._guard_no_running_loop()
-            return getattr(control, name)(self.store, *args, **kwargs)
-        from harel.engine.aio import facade
-
-        return facade.run(getattr(self._async, name), *args, **kwargs)
-
     def terminate(self, execution_id: str) -> None:
-        if self._inline is not None:
-            self._control("terminate", execution_id, clock=self._clock)
-        else:
-            self._control("terminate", execution_id)
+        self._do("terminate", execution_id)
 
     def suspend(self, execution_id: str) -> None:
-        if self._inline is not None:
-            self._control("suspend", execution_id, clock=self._clock)
-        else:
-            self._control("suspend", execution_id)
+        self._do("suspend", execution_id)
 
     def resume(self, execution_id: str) -> None:
-        if self._inline is not None:
-            self._control("resume", execution_id, clock=self._clock)
-        else:
-            self._control("resume", execution_id)
+        self._do("resume", execution_id)
 
     def purge(self, execution_id: str, *, archive: Optional[Callable[[dict], Any]] = None) -> bool:
         """Permanently delete a finished execution tree (root, regions, invokes and all
         their store rows), passing it to `archive` first if given. Refuses a child or a
         tree with a member not DONE/CANCELLED. False if it no longer exists."""
-        return self._control("purge", execution_id, archive=archive)
+        return self._do("purge", execution_id, archive=archive)
 
     def redrive(self, execution_id: str, target_path: str) -> None:
         """Force a dead-lettered (FAILED) `execution_id` back to RUNNING at

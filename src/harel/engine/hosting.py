@@ -370,6 +370,18 @@ class SenderLogic:
         yield from control("cancel", logic.defn, execution_id, reason=reason, clock=self._clock)
         yield from logic._flush_flow(primary_priority={execution_id: exe.priority})
 
+    def terminate_flow(self, execution_id: str) -> Flow:
+        yield from control("terminate", execution_id, clock=self._clock)
+
+    def suspend_flow(self, execution_id: str) -> Flow:
+        yield from control("suspend", execution_id, clock=self._clock)
+
+    def resume_flow(self, execution_id: str) -> Flow:
+        yield from control("resume", execution_id, clock=self._clock)
+
+    def purge_flow(self, execution_id: str, archive: Optional[Callable[[dict], Any]] = None) -> Flow:
+        return (yield from control("purge", execution_id, archive=archive))
+
     def redrive_flow(self, execution_id: str, target_path: str) -> Flow:
         logic, _exe = yield from self._logic_for_flow(execution_id)
         yield from control("redrive", logic.defn, execution_id, target_path, clock=self._clock)

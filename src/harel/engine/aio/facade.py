@@ -1,7 +1,7 @@
 """The sync→async bridge for the public sync API.
 
-The sync runners (`Driver`/`DurableRunner`/`DistributedRunner`) are thin facades over the
-async core. They dispatch each sync call to a single **process-wide** anyio BlockingPortal
+The sync runners (`Driver`/`DurableRunner`/`DistributedRunner`/`Worker`), in their default
+`execution="background"` model, run on the async core. They dispatch each sync call to a single **process-wide** anyio BlockingPortal
 (one background event loop on a dedicated thread, lazily started, closed at interpreter
 exit) via `run(coro_fn, *args)`. One shared loop — not one thread per runner — so a test
 suite that builds many runners doesn't leak threads, and async connection pools (later

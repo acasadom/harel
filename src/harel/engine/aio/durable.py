@@ -3,7 +3,7 @@ with coroutines, over an `AsyncExecutionStore`.
 
 Drives bare Executions through the async engine, checkpointing at every event boundary.
 Same contract as the sync `DurableRunner`, every public method `async def`. The sync
-`DurableRunner` is a thin anyio facade over this.
+`DurableRunner` runs on this with `execution="background"` (the default).
 """
 
 from __future__ import annotations

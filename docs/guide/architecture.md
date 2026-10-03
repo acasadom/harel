@@ -186,7 +186,8 @@ it idempotently.
 ## Walkthrough — creating and running a machine (in-memory)
 
 `DurableRunner` ([durable.py](https://github.com/acasadom/harel/blob/main/src/harel/engine/durable.py)) is the headless host over a
-store (a synchronous façade over the async core — see *Async core, sync façade* below).
+store (its logic written once and run by the model `execution=` picks — see
+[semantics and execution models](#semantics-and-execution-models) below).
 **Create** starts the engine and checkpoints; **process** loads, runs the
 engine, checkpoints, and flushes.
 

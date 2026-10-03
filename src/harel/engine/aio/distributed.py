@@ -301,18 +301,18 @@ class AsyncDistributedRunner(SenderLogic):
         await self._serve(self.cancel_flow(execution_id, reason))
 
     async def terminate(self, execution_id: str) -> None:
-        await control.terminate(self.store, execution_id, clock=self._clock)
+        await self._serve(self.terminate_flow(execution_id))
 
     async def suspend(self, execution_id: str) -> None:
-        await control.suspend(self.store, execution_id, clock=self._clock)
+        await self._serve(self.suspend_flow(execution_id))
 
     async def resume(self, execution_id: str) -> None:
-        await control.resume(self.store, execution_id, clock=self._clock)
+        await self._serve(self.resume_flow(execution_id))
 
     async def purge(self, execution_id: str, *, archive: Optional[Callable[[dict], Any]] = None) -> bool:
         """Permanently delete a finished execution tree, archiving it first if `archive`
         is given — see `control.purge`. False if it no longer exists."""
-        return await control.purge(self.store, execution_id, archive=archive)
+        return await self._serve(self.purge_flow(execution_id, archive))
 
     async def redrive(self, execution_id: str, target_path: str) -> None:
         """Force a FAILED `execution_id` back to RUNNING at `target_path` (a leaf
