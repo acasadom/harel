@@ -1,8 +1,9 @@
-"""Async durable host — the async mirror of `harel.engine.durable.DurableRunner`.
+"""Async durable host: the durable runner's logic (`harel.engine.hosting.DurableLogic`) run
+with coroutines, over an `AsyncExecutionStore`.
 
-Drives bare Executions through the async engine over an `AsyncExecutionStore`,
-checkpointing at every event boundary. Same contract as the sync `DurableRunner`, every
-public method `async def`. The sync `DurableRunner` is a thin anyio facade over this.
+Drives bare Executions through the async engine, checkpointing at every event boundary.
+Same contract as the sync `DurableRunner`, every public method `async def`. The sync
+`DurableRunner` is a thin anyio facade over this.
 """
 
 from __future__ import annotations
@@ -10,17 +11,16 @@ from __future__ import annotations
 import time
 from typing import Any, Callable, Optional
 
-from harel import engine
-from harel.definition.events import check_context, with_defaults
 from harel.definition.model import Definition
 from harel.engine.aio import control
-from harel.engine.aio.driver import _AsyncRuntimeDriver
-from harel.engine.execution import Execution, Status
-from harel.engine.resolve import MachineResolver, ResolveError
+from harel.engine.execution import Execution
+from harel.engine.flow import Flow, run_async
+from harel.engine.hosting import ControlPort, DurableLogic
+from harel.engine.resolve import MachineResolver
 from harel.spec.states import Event
 
 
-class AsyncDurableRunner:
+class AsyncDurableRunner(DurableLogic):
     def __init__(
         self,
         store: Any,
@@ -29,32 +29,11 @@ class AsyncDurableRunner:
         resolver: Optional[MachineResolver] = None,
         trace: bool = False,
     ) -> None:
+        super().__init__(definitions, clock, resolver, trace)
         self.store = store
-        self.definitions = definitions
-        for defn in list(definitions.values()):
-            self.definitions.update({s.id: s for s in defn.submachines.values()})
-        self._clock = clock
-        self.resolver = resolver
-        self._trace = trace
 
-    def _resolve_machine(self, fqn: str) -> Definition:
-        if fqn in self.definitions:
-            return self.definitions[fqn]
-        if self.resolver is None:
-            raise ResolveError(f"invoke {fqn!r} but AsyncDurableRunner has no resolver")
-        defn = self.resolver.resolve(fqn)
-        self.definitions[defn.id] = defn
-        return defn
-
-    def _driver(self, definition_id: str) -> _AsyncRuntimeDriver:
-        return _AsyncRuntimeDriver(
-            self.definitions[definition_id],
-            store=self.store,
-            clock=self._clock,
-            definitions=self.definitions,
-            resolve_machine=self._resolve_machine,
-            trace=self._trace,
-        )
+    async def _serve(self, flow: Flow) -> Any:
+        return await run_async(flow, {"store": self.store, "control": ControlPort(control, self.store)})
 
     async def create(
         self,
@@ -63,96 +42,37 @@ class AsyncDurableRunner:
         execution_id: Optional[str] = None,
         priority: int = 0,
     ) -> Execution:
-        if execution_id is not None and await self.store.load(execution_id) is not None:
-            from harel.engine.store import ExecutionAlreadyExists
-
-            raise ExecutionAlreadyExists(execution_id)
-        schema = self._driver(definition_id).defn.context_schema
-        context = with_defaults(schema, dict(context or {}))
-        check_context(schema, context)
-        exe = Execution(
-            definition_id=definition_id,
-            context=context,
-            priority=priority,
-            **({"id": execution_id} if execution_id is not None else {}),
-        )
-        await self._driver(definition_id).start(exe)
-        loaded = await self.store.load(exe.id)
-        assert loaded is not None
-        return loaded
+        return await self._serve(self.create_flow(definition_id, context, execution_id, priority))
 
     async def process(self, execution_id: str, event: Event) -> Execution:
-        exe = await self.store.load(execution_id)
-        if exe is None:
-            raise KeyError(execution_id)
-        await self._driver(exe.definition_id).inject(exe, event)
-        loaded = await self.store.load(execution_id)
-        assert loaded is not None
-        return loaded
+        return await self._serve(self.process_flow(execution_id, event))
 
     async def recover(self, definition_id: str) -> None:
-        await self._driver(definition_id).recover()
+        await self._serve(self.recover_flow(definition_id))
 
     async def fire_due_timers(self) -> int:
-        # Sequential: _deliver_timeout → _run → commit (CAS on execution version).
-        # Two timers for the same execution must not race (nested composites with independent
-        # timeouts). See AsyncDriver.fire_due_timers for the full explanation.
-        fired = 0
-        for execution_id, path, fire_at in await self.store.due_timers(self._clock()):
-            exe = await self.store.load(execution_id)
-            if exe is not None and exe.status is Status.SUSPENDED:
-                continue  # left armed: it fires once resumed (the worker path parks it the same way)
-            if exe is not None and exe.definition_id in self.definitions:
-                event = engine.timeout_event(execution_id, path, fire_at)
-                await self._driver(exe.definition_id)._deliver_timeout(execution_id, event)
-            await self.store.delete_timer(execution_id, path, fire_at)
-            fired += 1
-        return fired
+        return await self._serve(self.fire_due_timers_flow())
 
     # --- control plane ------------------------------------------------------
     async def cancel(self, execution_id: str, *, reason: Optional[dict] = None) -> Execution:
-        exe = await self.store.load(execution_id)
-        if exe is None:
-            raise KeyError(execution_id)
-        driver = self._driver(exe.definition_id)
-        await control.cancel(self.store, driver.defn, execution_id, reason=reason, clock=self._clock)
-        await driver.recover()  # deliver the injected Cancel inline (runs the cleanup)
-        loaded = await self.store.load(execution_id)
-        assert loaded is not None
-        return loaded
+        return await self._serve(self.cancel_flow(execution_id, reason))
 
     async def terminate(self, execution_id: str) -> Execution:
-        await control.terminate(self.store, execution_id, clock=self._clock)
-        loaded = await self.store.load(execution_id)
-        assert loaded is not None
-        return loaded
+        return await self._serve(self.terminate_flow(execution_id))
 
     async def suspend(self, execution_id: str) -> Execution:
-        await control.suspend(self.store, execution_id, clock=self._clock)
-        loaded = await self.store.load(execution_id)
-        assert loaded is not None
-        return loaded
+        return await self._serve(self.suspend_flow(execution_id))
 
     async def resume(self, execution_id: str) -> Execution:
-        await control.resume(self.store, execution_id, clock=self._clock)
-        loaded = await self.store.load(execution_id)
-        assert loaded is not None
-        return loaded
+        return await self._serve(self.resume_flow(execution_id))
 
     async def purge(self, execution_id: str, *, archive: Optional[Callable[[dict], Any]] = None) -> bool:
         """Permanently delete a finished execution tree, archiving it first if `archive`
         is given — see `control.purge`. False if it no longer exists."""
-        return await control.purge(self.store, execution_id, archive=archive)
+        return await self._serve(self.purge_flow(execution_id, archive))
 
     async def redrive(self, execution_id: str, target_path: str) -> Execution:
         """Force a FAILED `execution_id` back to RUNNING at `target_path` (a leaf
         the caller picks — see `control.redrive`). Use once the bug that dead-
         lettered it is fixed; context is untouched."""
-        exe = await self.store.load(execution_id)
-        if exe is None:
-            raise KeyError(execution_id)
-        driver = self._driver(exe.definition_id)
-        await control.redrive(self.store, driver.defn, execution_id, target_path, clock=self._clock)
-        loaded = await self.store.load(execution_id)
-        assert loaded is not None
-        return loaded
+        return await self._serve(self.redrive_flow(execution_id, target_path))

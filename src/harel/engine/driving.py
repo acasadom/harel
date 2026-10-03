@@ -10,6 +10,7 @@ happens, the flows themselves (the transport driver publishes where this one run
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any, Callable, Optional
 
@@ -22,6 +23,8 @@ from harel.engine.resolve import ResolveError
 from harel.engine.runtime import _CONTROL, _action_name, _Proxy, _resolve, _trace_step
 from harel.engine.store import TimerOp
 from harel.spec.states import Event
+
+logger = logging.getLogger(__name__)
 
 
 def store(method: str, *args: Any, **kwargs: Any) -> Flow:
@@ -345,3 +348,93 @@ class DriverLogic:
             processed_event_id=event.id,
             timers=(TimerOp("schedule", engine.TTL_PATH, exe.expires_at),),
         )
+
+
+def _error_message(exc: Exception) -> str:
+    """`type: message` for `exc`; if it's chained (`__cause__`, set when an `on error`
+    handler's own action raised in turn — see `DriverLogic._drive_flow`), append the original
+    failure that triggered the (unsuccessful) recovery attempt, so the dead-letter
+    doesn't bury the root cause behind the recovery's own failure."""
+    msg = f"{type(exc).__name__}: {exc}"
+    if exc.__cause__ is not None:
+        cause = exc.__cause__
+        msg = f"{msg} (while recovering from {type(cause).__name__}: {cause})"
+    return msg
+
+
+class FailOnActionError:
+    """The production policy for an action error nothing in the model handles. It is a bug,
+    not a modelled failure: neither propagated (it would crash the worker) nor retried (a
+    deterministic bug loops) — the execution fails terminally (`status=FAILED` + `error`),
+    and the persisted FAILED record is the dead letter."""
+
+    def _on_action_error(self, exe: Execution, exc: Exception) -> None:
+        logger.exception("unhandled action error; failing execution %s", exe.id)
+        exe.status = Status.FAILED
+        exe.error = _error_message(exc)
+
+
+class TransportDriverLogic(DriverLogic):
+    """The driver's logic when deferred effects flow through a transport (the `transport`
+    port): a fired timer and the outbox are published instead of run here, and `route`
+    fans a domain event out to the live regions' groups."""
+
+    def _deliver_timeout_flow(self, execution_id: str, event: Event) -> Flow:
+        exe = yield from store("load", execution_id)
+        priority = exe.priority if exe is not None else 0
+        yield from transport("publish", execution_id, event, priority=priority)
+
+    def _flush_flow(self, primary_priority: Optional[dict[str, int]] = None) -> Flow:
+        while True:
+            spawns = yield from store("pending_spawns")
+            outbox = yield from store("pending_outbox")
+            if not spawns and not outbox:
+                return
+            if spawns:
+                # each spawn targets a different child_id → independent store rows → safe in
+                # parallel. Here creating a child only writes its record; its initial event is
+                # published through the outbox in the next pass.
+                yield from parallel([self._create_spawn_flow(s) for s in spawns])
+                yield from parallel([store("ack_spawn", s.seq) for s in spawns])
+            for entry in outbox:
+                if entry.target_id is not None:
+                    # self-targeted re-publish uses this exe's priority (primary_priority);
+                    # a cross-execution emit (e.g. a region's Finished -> parent) uses the
+                    # TARGET's own priority, not 0, so it doesn't pin the target's group.
+                    prio = (primary_priority or {}).get(entry.target_id)
+                    if prio is None:
+                        target = yield from store("load", entry.target_id)
+                        prio = target.priority if target is not None else 0
+                    yield from transport("publish", entry.target_id, entry.event, priority=prio)
+                yield from store("ack_outbox", entry.seq)
+
+    def route_flow(self, exe: Execution, event: Event) -> Flow:
+        """Route `event` to `exe`: a domain event with live regions is published to each
+        region's group; anything else runs the engine on `exe` here."""
+        live = []
+        for cid, cs in exe.children.items():
+            if not cs.finished and not cs.submachine:
+                child = yield from store("load", cid)
+                if child is not None:
+                    live.append(child)
+        if event.kind not in _CONTROL and live:
+            for child in live:
+                yield from transport("publish", child.id, event, priority=child.priority)
+            timers: tuple[TimerOp, ...] = ()
+            delay = engine.ttl_delay(self.defn, exe)  # the broadcast is activity for exe's `ttl`
+            if delay is not None:
+                exe.expires_at = self._clock() + delay
+                timers = (TimerOp("schedule", engine.TTL_PATH, exe.expires_at),)
+            stamp(exe, self._clock())
+            yield from store("commit", exe, [], processed_event_id=event.id, timers=timers)
+            enqueued = False  # broadcast went straight to the transport; nothing in the outbox
+        else:
+            enqueued = yield from self._run_flow(
+                exe, engine.process(self.defn, exe, event), event_id=event.id, event=event
+            )
+        # only run the relay (its HGETALL round-trips) when this event actually enqueued
+        # outbox/spawn work — most events emit nothing. Orphans from a crash are still drained
+        # by the next emitting event's relay and by `recover()` on startup (the idle loop never
+        # flushed either, so this does not change the at-least-once guarantee).
+        if enqueued:
+            yield from self._flush_flow(primary_priority={exe.id: exe.priority})

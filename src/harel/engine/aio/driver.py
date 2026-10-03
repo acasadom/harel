@@ -15,8 +15,8 @@ import time
 from typing import Any, Callable, Optional
 
 from harel.definition.model import Definition
-from harel.engine.driving import DriverLogic
-from harel.engine.execution import Execution, Status
+from harel.engine.driving import DriverLogic, FailOnActionError
+from harel.engine.execution import Execution
 from harel.engine.flow import Flow, run_async
 from harel.spec.states import Event
 
@@ -83,25 +83,6 @@ class AsyncDriver(DriverLogic):
         await self._serve(self.inject_flow(exe, event))
 
 
-def _error_message(exc: Exception) -> str:
-    """`type: message` for `exc`; if it's chained (`__cause__`, set when an `on error`
-    handler's own action raised in turn — see `DriverLogic._drive_flow`), append the original
-    failure that triggered the (unsuccessful) recovery attempt, so the dead-letter
-    doesn't bury the root cause behind the recovery's own failure."""
-    msg = f"{type(exc).__name__}: {exc}"
-    if exc.__cause__ is not None:
-        cause = exc.__cause__
-        msg = f"{msg} (while recovering from {type(cause).__name__}: {cause})"
-    return msg
-
-
-class _AsyncRuntimeDriver(AsyncDriver):
-    """The production driver. An unhandled action error is a bug, not a modelled failure:
-    we neither propagate it (would crash the worker) nor retry (a deterministic bug loops)
-    — we fail the execution terminally (`status=FAILED` + `error`) and ack; the persisted
-    FAILED record is the dead-letter. Used by AsyncDurableRunner and AsyncWorker."""
-
-    def _on_action_error(self, exe: Execution, exc: Exception) -> None:
-        logger.exception("unhandled action error; failing execution %s", exe.id)
-        exe.status = Status.FAILED
-        exe.error = _error_message(exc)
+class _AsyncRuntimeDriver(FailOnActionError, AsyncDriver):
+    """The production driver: `AsyncDriver` with the dead-letter policy (`FailOnActionError`).
+    Used by AsyncDurableRunner and AsyncWorker."""

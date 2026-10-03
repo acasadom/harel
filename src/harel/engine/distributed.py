@@ -24,40 +24,13 @@ from typing import Any, Callable, Optional
 
 from harel.definition.model import Definition
 from harel.engine.execution import Execution
-from harel.engine.resolve import MachineResolver, ResolveError
+from harel.engine.hosting import (  # noqa: F401 (re-exported)
+    _defn_for,
+    _register_submachines,
+    _resolve_machine,
+)
+from harel.engine.resolve import MachineResolver
 from harel.spec.states import Event
-
-
-def _register_submachines(definitions: dict) -> None:
-    """Fold every registered Definition's inline `invoke` targets into `definitions`
-    by id (= their synthetic FQN), so they resolve without an external resolver."""
-    for defn in list(definitions.values()):
-        definitions.update({s.id: s for s in defn.submachines.values()})
-
-
-def _resolve_machine(definitions: dict, resolver: Optional[MachineResolver], fqn: str) -> Definition:
-    """Resolve a submachine FQN and register it in `definitions` (so the child then
-    routes by its own id). Inline targets (id == FQN) are already registered; an
-    external FQN goes through the resolver. Raises if neither has it."""
-    if fqn in definitions:  # an inline submachine (id == synthetic FQN)
-        return definitions[fqn]
-    if resolver is None:
-        raise ResolveError(f"invoke {fqn!r} but this runner has no machine resolver")
-    defn = resolver.resolve(fqn)
-    definitions[defn.id] = defn
-    return defn
-
-
-def _defn_for(definitions: dict, resolver: Optional[MachineResolver], exe: Execution) -> Definition:
-    """The Definition to drive `exe`: from the registry, or — for a submachine child
-    whose Definition this worker has not built yet — lazily resolved by its persisted
-    FQN (the spawning worker may be a different process)."""
-    defn = definitions.get(exe.definition_id)
-    if defn is None and exe.definition_fqn is not None:
-        defn = _resolve_machine(definitions, resolver, exe.definition_fqn)
-    if defn is None:
-        raise KeyError(exe.definition_id)
-    return defn
 
 
 class Worker:
