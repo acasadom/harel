@@ -186,6 +186,13 @@ order with retries", a workflow engine is the better fit — this is not trying 
   (`cancel`/`suspend`/`resume`/`terminate`). Stores: in-memory, SQLite, Redis, Postgres,
   rqlite, MongoDB, DynamoDB (+ libSQL/Turso, experimental). Transports: in-memory, SQLite,
   Redis, Postgres, rqlite, MongoDB, SQS (+ libSQL/Turso, experimental) — mix freely.
+- **Sync or async, your choice of execution model**: async runners and worker for asyncio code,
+  and sync runners that run either on a shared background event loop or inline in the caller's
+  own thread (`execution="inline"`) — on the caller's database connection and inside its
+  transaction. The same logic and the same commit under each.
+- **Your own backend**: a store or transport written outside harel builds on
+  `harel.engine.store.base` / `harel.engine.transport.base` and checks itself against the
+  same contract tests harel runs on its own (`harel.testing`).
 - **Static validation** (`validate`): unreachable states, non-deterministic transitions,
   unresolved selector targets, missing terminal verdicts, timeout shape — surface-independent,
   run it before you execute.

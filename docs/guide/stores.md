@@ -131,6 +131,7 @@ Every store has an `Async…` twin under `harel/engine/aio_store/` with the **sa
 the async worker (`STM_CONCURRENCY` events in flight on one loop) talks to those. Most are native
 async (aiosqlite, redis.asyncio, psycopg async pool, motor, aioboto3, httpx for rqlite);
 `AsyncLibsqlStore` wraps the sync driver on a thread (the `libsql` package is sync-only). The
-synchronous `Store` classes are what the embedded `DurableRunner`/`DistributedRunner` façades and
-the monitor use, bridged to the async core through the anyio portal. Each per-backend page has an
+synchronous `Store` classes are what the sync `DurableRunner`/`DistributedRunner` and the monitor
+use — bridged to the async core through the anyio portal by default, or called directly in the
+caller's thread with `execution="inline"` (see [execution models](execution)). Each per-backend page has an
 *Async twin* section with the specifics.

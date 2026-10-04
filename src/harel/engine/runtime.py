@@ -86,11 +86,12 @@ class _Proxy:
 
 
 class _SyncDriver:
-    """The genuine sync engine — the in-memory runtime for a Definition. No longer on the
-    production path (the public `Driver` is an async facade; runners/workers are async), but
-    KEPT as the independent **parity oracle** (`scenarios.run_new`) and crash-simulation base
-    in tests. It propagates action errors (the bare-driver policy); the async production policy
-    (fail terminally) lives in `aio.driver._AsyncRuntimeDriver`."""
+    """A hand-written sync driver — the in-memory runtime for a Definition, written directly
+    rather than as flows. Not on the production path (the driver's logic is
+    `driving.DriverLogic`, run by every runner), but KEPT as the independent **parity oracle**
+    (`scenarios.run_new`) and crash-simulation base in tests. It propagates action errors (the
+    bare-driver policy); the production policy (fail terminally) is
+    `driving.FailOnActionError`."""
 
     def __init__(
         self,
@@ -127,8 +128,8 @@ class _SyncDriver:
 
     def _on_action_error(self, exe: Execution, exc: Exception) -> None:
         """Policy when a user action raises. Propagate (so a buggy action surfaces loudly —
-        this sync engine is the test/oracle harness). The async production policy (fail the
-        execution terminally) lives in `aio.driver._AsyncRuntimeDriver`."""
+        this sync engine is the test/oracle harness). The production policy (fail the execution
+        terminally) is `driving.FailOnActionError`."""
         raise exc
 
     # --- core --------------------------------------------------------------
@@ -230,13 +231,13 @@ class _SyncDriver:
                         if original_exc is not None:
                             # already recovering (an `on error` handler's own action just
                             # raised): no second attempt — chain explicitly (`__cause__`),
-                            # mirroring `AsyncDriver._drive` (the async engine actions run in
-                            # a thread pool, where Python's implicit context isn't reliable).
+                            # mirroring `DriverLogic._drive_flow` (with coroutines a sync action
+                            # runs in a thread pool, where Python's implicit context isn't reliable).
                             exc.__cause__ = original_exc
                             self._on_action_error(exe, exc)
                             return [], [], [], [], {}
                         if isinstance(effect, engine.RunAction) and effect.hook is engine.Hook.EXIT:
-                            # `on_exit` must always succeed (mirrors `AsyncDriver._drive`):
+                            # `on_exit` must always succeed (mirrors `DriverLogic._drive_flow`):
                             # leaving a state applies real, un-undoable side effects, and
                             # routing away from it would have to re-run this very hook to
                             # reach anywhere outside the state's own subtree — re-triggering

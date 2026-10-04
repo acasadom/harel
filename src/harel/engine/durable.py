@@ -13,8 +13,8 @@ Its logic is `harel.engine.hosting.DurableLogic`; `execution=` picks how it runs
   Sync actions run in a thread pool.
 - `"inline"` — in the caller's own thread, with no event loop: every store call and every
   action runs right there, on the caller's connection and inside the caller's transaction
-  (what a framework that keeps a connection per thread — Django, SQLAlchemy sessions —
-  needs). It takes a sync store, and refuses a coroutine action.
+  (what a store over a connection bound to the caller's thread needs). It takes a sync
+  store, and refuses a coroutine action.
 
 For async callers, use `AsyncDurableRunner` directly (calling this sync façade from inside
 a running event loop is refused with a clear error, in either mode).

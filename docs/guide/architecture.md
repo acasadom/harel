@@ -32,7 +32,7 @@ flowchart TB
   end
   subgraph stateful["STATEFUL — does the IO"]
     direction LR
-    Runner["Runner (Driver)<br/><i>consumes effects, runs actions</i>"]
+    Runner["Runner (driver flows + interpreter)<br/><i>consumes effects, runs actions</i>"]
     Store["ExecutionStore<br/><i>durable checkpoint</i>"]
     Transport["Transport + Worker<br/><i>distributed delivery</i>"]
   end
@@ -114,7 +114,7 @@ dead-letter.
 
 ```{mermaid}
 sequenceDiagram
-  participant R as Runner (Driver._drive)
+  participant R as Driver (_drive_flow)
   participant E as Engine (process generator)
   R->>E: next(gen)
   E-->>R: RunAction(on_exit)
@@ -132,7 +132,10 @@ sequenceDiagram
   E--xR: StopIteration (quiescent)
 ```
 
-Your action functions run **only here**, inside `Driver._drive` ([runtime.py](https://github.com/acasadom/harel/blob/main/src/harel/engine/runtime.py)) — never inside `core.py`. The proxy passed as `stm`
+Your action functions run **only here**, in the driver ([driving.py](https://github.com/acasadom/harel/blob/main/src/harel/engine/driving.py)) — never inside `core.py`. Its
+`_drive_flow` doesn't call them itself: it yields a request to call the action, and the
+interpreter of the execution model calls it (see
+[semantics and execution models](#semantics-and-execution-models)). The proxy passed as `stm`
 exposes `execution_ctx` (the Execution's `context`) and a stable `idempotency_key`
 (`{id}:{version}:{action_index}`) so a side effect can be made effect-once across an
 at-least-once redelivery (see [durability](durability)).
@@ -151,16 +154,20 @@ transition is a **sink** that bubbles to its composite, and a global sink sets `
 
 ## The runner and the single atomic checkpoint
 
-`Driver._run` is the checkpoint boundary. It drives the generator to quiescence, collecting the
-deferred effects, then writes **everything in one transaction**:
+The driver's `_run_flow` ([driving.py](https://github.com/acasadom/harel/blob/main/src/harel/engine/driving.py)) is the checkpoint boundary. It drives the
+generator to quiescence, collecting the deferred effects, then writes **everything in one
+transaction**:
 
 ```python
 # docs-test: skip
-def _run(self, exe, gen, event_id=None):
-    emits, timer_ops, spawns = self._drive(exe, gen)     # run actions, collect deferred effects
-    self.store.commit(exe, emits, processed_event_id=event_id,
-                      timers=tuple(timer_ops), spawns=tuple(spawns))   # ONE atomic commit
+def _run_flow(self, exe, gen, event_id=None, event=None):
+    emits, timer_ops, spawns, actions, assigned = yield from self._drive_flow(exe, gen)
+    yield from store("commit", exe, emits, processed_event_id=event_id,
+                     timers=tuple(timer_ops), spawns=tuple(spawns))   # ONE atomic commit
 ```
+
+(`yield from store(...)` is a flow's store call: the interpreter performs it, awaited or
+plain.)
 
 `store.commit` ([store/_base.py](https://github.com/acasadom/harel/blob/main/src/harel/engine/store/_base.py)) persists, in a single transaction:
 
@@ -178,7 +185,7 @@ Either all of it commits or none does. This is the property that makes a crash s
 advance, the `Finished` it must emit, the timer it armed, and the children it must spawn are one
 unit.
 
-After the commit, the **relay** (`_flush`) delivers the deferred work from the durable store —
+After the commit, the **relay** (`_flush_flow`) delivers the deferred work from the durable store —
 creating each pending child (idempotently: skip if it already exists) and delivering each outbox
 event — looping until quiescent. Because it reads the durable store, a crash-and-restart re-runs
 it idempotently.
@@ -206,7 +213,7 @@ sequenceDiagram
   E-->>D: RunAction(on_enter) … (effects)
   D->>D: run action fns
   D->>S: commit(exe v1, emits, timers, spawns)
-  D->>D: _flush() — create initial regions, deliver outbox
+  D->>D: _flush_flow() — create initial regions, deliver outbox
   DR->>S: load(exe.id)
   DR-->>C: Execution (committed)
 
@@ -221,14 +228,14 @@ sequenceDiagram
     D->>D: collect
   end
   D->>S: commit(exe v+1, emits, processed=event.id, timers, spawns)
-  D->>D: _flush() — deliver outbox / create children
+  D->>D: _flush_flow() — deliver outbox / create children
   DR->>S: load(exe.id)
   DR-->>C: Execution (committed)
 ```
 
 The key points: **state is rehydrated from the store on every event** (the runner is stateless —
-a fresh `Driver` per call, a pure function of Definition + store), and **persisted exactly once
-per event boundary**, in the atomic `commit`. Your functions run during `_drive`; if an action raises, the driver first checks whether the
+a fresh driver per call, a pure function of Definition + store), and **persisted exactly once
+per event boundary**, in the atomic `commit`. Your functions run during `_drive_flow`; if an action raises, the driver first checks whether the
 current configuration has an `on error` transition — if so it synthesises an `error` event and
 routes to the handler state; if not (or the guard doesn't match), the production driver fails
 the Execution terminally (`status=FAILED`, the dead-letter) rather than crashing the worker.
@@ -237,12 +244,13 @@ the Execution terminally (`status=FAILED`, the dead-letter) rather than crashing
 
 Entering an AND-state doesn't create the regions inline. The engine yields `SpawnChildren`; the
 runner records the intents, and they commit **atomically with the parent's advance and its join
-expectations** (`children`). The relay (`_flush`) then creates all pending children
-**concurrently** via `asyncio.gather` — their `on enter` actions (LLM calls, HTTP requests, …)
-overlap on the event loop rather than running one after another. Each spawn targets a distinct
+expectations** (`children`). The relay (`_flush_flow`) then creates all pending children as
+independent work (a `Parallel` request): with coroutines their `on enter` actions (LLM calls,
+HTTP requests, …) overlap on the event loop rather than running one after another; in the
+caller's thread (`execution="inline"`) they run in order. Each spawn targets a distinct
 `child_id` so their store commits are independent rows; no CAS conflict is possible between
 siblings. The idempotency guard (skip if the child already exists) makes a crash-and-restart
-safe: a re-run of `_flush` skips any region that was already created before the crash.
+safe: a re-run of `_flush_flow` skips any region that was already created before the crash.
 
 ```{mermaid}
 sequenceDiagram
@@ -253,8 +261,8 @@ sequenceDiagram
   E-->>D: SpawnChildren([region A, region B])
   D->>S: commit(parent, spawns=[A,B], children={A,B})   %% atomic: advance + join + spawns
   Note over D,S: parent is parked on the AND-state, waiting for the join
-  D->>D: _flush()
-  par asyncio.gather — all spawns concurrently
+  D->>D: _flush_flow()
+  par in parallel — all spawns (concurrent with coroutines)
     D->>S: load(child_id)  (skip if exists — idempotent)
     D->>E: start(defn, child)   %% region runs the same Definition, different root_path
     D->>S: commit(child v1)     %% independent rows: no CAS conflict between siblings
@@ -267,10 +275,9 @@ sequenceDiagram
 Regions share the parent's event stream (a domain event is broadcast to all live regions — UML
 semantics). Engine events are not: lifecycle events, a region's `Finished`, and a `Timeout` —
 addressed to the Execution whose state armed the timer, so a fork's own `timeout` fires on the
-fork — go to the parent itself. In the headless host (`inject`) the delivery to each live region runs
-**concurrently** via `asyncio.gather`, so a broadcast that triggers async actions in multiple
-regions (LLM calls, HTTP requests…) overlaps them on the event loop rather than serialising
-them. Data-parallel work (N independent workers) is **not** an orthogonal state but a fan-out
+fork — go to the parent itself. In the headless host (`inject`) the delivery to each live region is independent work
+too, so with coroutines a broadcast that triggers async actions in multiple regions (LLM calls,
+HTTP requests…) overlaps them on the event loop rather than serialising them. Data-parallel work (N independent workers) is **not** an orthogonal state but a fan-out
 `invoke`, which reuses the same child-Execution machinery.
 
 ## Durable timers
@@ -289,7 +296,7 @@ The same engine and the same `commit` run in two hosts:
 
 - **In-memory** (`Driver` / `DurableRunner`): the relay delivers emitted events *inline* (it
   calls `process` on the target itself). One process. Used for embedding and tests.
-- **Distributed** (`TransportDriver` + `Worker` + `Transport`, [distributed.py](https://github.com/acasadom/harel/blob/main/src/harel/engine/distributed.py)): the relay **publishes** emitted events to a
+- **Distributed** (the transport driver, `TransportDriverLogic`, + `Worker` + `Transport`, [distributed.py](https://github.com/acasadom/harel/blob/main/src/harel/engine/distributed.py)): the relay **publishes** emitted events to a
   `Transport` (a queue) instead of delivering inline; workers claim and process them. Same code,
   many processes.
 
@@ -297,11 +304,11 @@ The table below shows the key behavioural differences:
 
 | | Headless (`DurableRunner`) | Distributed (`DistributedRunner`) |
 |---|---|---|
-| **Outbox delivery** | `_flush` calls `_run` on the target inline | `_flush` publishes to transport; worker claims |
-| **Broadcast to regions** | `inject` calls `_run` on each region (gather) | `route` publishes to each region's group; workers claim independently |
-| **Timers** | `_deliver_timeout` calls `_run` inline | publishes `Timeout` to transport; worker claims it like any event |
+| **Outbox delivery** | `_flush_flow` calls `_run_flow` on the target inline | `_flush_flow` publishes to transport; worker claims |
+| **Broadcast to regions** | `inject` calls `_run_flow` on each region (in parallel) | `route` publishes to each region's group; workers claim independently |
+| **Timers** | `_deliver_timeout_flow` calls `_run_flow` inline | publishes `Timeout` to transport; worker claims it like any event |
 | **`process()` returns** | after all cascades settle (fully quiescent) | after publishing the event; worker runs asynchronously |
-| **Who calls `_run`** | the driver, inline | always the worker, after claim |
+| **Who calls `_run_flow`** | the driver, inline | always the worker, after claim |
 | **Processes** | one | N workers in parallel |
 
 ## Walkthrough — distributed flow
@@ -319,7 +326,7 @@ sequenceDiagram
   participant T as Transport
   participant S as Store
   participant W as Worker
-  participant TD as TransportDriver
+  participant TD as Transport driver
   participant E as Engine (core)
 
   C->>DR: create(definition_id, context)
@@ -346,7 +353,7 @@ sequenceDiagram
     TD->>E: process(defn, exe, event)
     E-->>TD: effects
     TD->>S: commit(exe v+1, emits, processed, timers, spawns)
-    TD->>TD: _flush() publish outbox, create children
+    TD->>TD: _flush_flow() publish outbox, create children
   end
   W->>T: ack(lease)
 ```
@@ -395,7 +402,8 @@ execution model:
 
 So a synchronous snippet in this guide, a web view running `execution="inline"` inside its
 transaction, and the async production worker run the same logic and the same commit. See
-[execution models](execution) for when to pick each.
+[execution models](execution) for a sequence diagram of each semantics and each model, every
+combination of the two, and when to pick each.
 
 A `Transport` is a queue with **single-active-consumer per group**, where `group_id =
 execution_id` — so at most one message per Execution is in flight, which is what upholds the
@@ -408,7 +416,7 @@ sequenceDiagram
   participant W as Worker.step()
   participant T as Transport
   participant S as Store
-  participant TD as TransportDriver
+  participant TD as Transport driver
   participant E as Engine
 
   W->>T: claim(worker_id, visibility)
@@ -430,7 +438,7 @@ sequenceDiagram
       E-->>TD: effects (run actions, collect)
       TD->>S: commit(exe v+1, emits, processed, timers, spawns)
     end
-    TD->>TD: _flush() → publish outbox to transport, create children
+    TD->>TD: _flush_flow() → publish outbox to transport, create children
     alt StoreConflict (another writer won)
       W->>T: nack   %% redeliver, retry against fresh state
     else
@@ -448,7 +456,7 @@ transport priority/purge.
 
 Timers in the distributed host: `Worker.fire_due_timers` runs on the idle path of the loop and
 *publishes* the `Timeout` to the transport (vs. the synchronous host delivering it inline). All
-due timers are fired **concurrently** via `asyncio.gather` — a batch of expired timers is swept
+due timers are fired as independent work — with coroutines, a batch of expired timers is swept
 in one round instead of sequentially.
 
 ## Where state is persisted (checkpoint points)
@@ -456,8 +464,8 @@ in one round instead of sequentially.
 | When | Call | What is written |
 |---|---|---|
 | create | `start()` → `commit` | Execution v1, initial region spawns, entry-hook timers |
-| each event | `_run` → `commit` | Execution v+1 (CAS), outbox emits, dedupe id, timer ops, spawns, trace step (if `STM_TRACE`) |
-| relay | `_create_spawn` → `commit` | each child Execution v1 (idempotent) |
+| each event | `_run_flow` → `commit` | Execution v+1 (CAS), outbox emits, dedupe id, timer ops, spawns, trace step (if `STM_TRACE`) |
+| relay | `_create_spawn_flow` → `commit` | each child Execution v1 (idempotent) |
 | control plane | `control.*` → `commit` | status change (+ a cooperative `Cancel` emit), via CAS |
 | timer fire | sweep → `process` → `commit` | the `Timeout` processed like any event; timer row deleted |
 

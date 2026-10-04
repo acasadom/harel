@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.1 — 2026-10-04
 
 ### Changed
 
@@ -8,6 +8,10 @@
   there and their async counterparts in `harel.engine.aio.control` run the same flows, and so
   do the runners' `cancel`, `terminate`, `suspend`, `resume`, `purge` and `redrive`. Their
   signatures and behaviour are unchanged.
+- The execution models guide separates a runner's semantics (wait for the result, or hand it to
+  a worker) from its execution model (caller's thread, background loop, coroutines), with a
+  sequence diagram for each and a table of every combination. The architecture and distribution
+  guides describe the driver as flows.
 
 ### Fixed
 
@@ -15,6 +19,9 @@
   coroutine-function `archive` with a `TypeError` before deleting anything. It was called and
   never awaited, so the tree was deleted without being archived. The async control plane, and
   the sync runners in the background model, await it as before.
+- The distribution guide said the headless runner fires the timers due in one sweep
+  concurrently; it delivers them one at a time (two timers of one execution must not race on its
+  version) — only a worker publishes them concurrently.
 
 ## 0.6.0 — 2026-10-03
 
@@ -23,8 +30,8 @@
 - **Execution models for the sync runners**: `DurableRunner`, `DistributedRunner`, `Worker`
   and the bare `Driver` take `execution="background"` (the default: the shared background
   event loop, as before) or `execution="inline"` — the caller's own thread, with no event loop,
-  over a sync store and transport. Inline, every store call and action runs on the caller's connection and inside its
-  transaction (Django, SQLAlchemy sessions); a coroutine action is refused.
+  over a sync store and transport. Inline, every store call and action runs on the caller's
+  connection and inside its transaction; a coroutine action is refused.
 - **`harel.testing`**: the contracts harel runs on its own backends, for a backend written
   outside harel to run on itself — listing, purge and outbox for a store, and a new one for a
   transport (FIFO per group, one in flight per group, ack/nack, parking, lease expiry,
