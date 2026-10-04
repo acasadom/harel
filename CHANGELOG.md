@@ -26,8 +26,8 @@
 - **Execution models for the sync runners**: `DurableRunner`, `DistributedRunner`, `Worker`
   and the bare `Driver` take `execution="background"` (the default: the shared background
   event loop, as before) or `execution="inline"` — the caller's own thread, with no event loop,
-  over a sync store and transport. Inline, every store call and action runs on the caller's connection and inside its
-  transaction (Django, SQLAlchemy sessions); a coroutine action is refused.
+  over a sync store and transport. Inline, every store call and action runs on the caller's
+  connection and inside its transaction; a coroutine action is refused.
 - **`harel.testing`**: the contracts harel runs on its own backends, for a backend written
   outside harel to run on itself — listing, purge and outbox for a store, and a new one for a
   transport (FIFO per group, one in flight per group, ack/nack, parking, lease expiry,

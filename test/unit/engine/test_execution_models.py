@@ -46,7 +46,7 @@ def actions(monkeypatch):
 
 
 class ThreadBoundStore(DictStore):
-    """A store that, like a Django connection, may only be used from the thread that made it."""
+    """A store over a thread-bound connection: usable only from the thread that made it."""
 
     def __init__(self) -> None:
         super().__init__()

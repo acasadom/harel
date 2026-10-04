@@ -136,17 +136,17 @@ It is taken by `DurableRunner`, `DistributedRunner`, its `Worker`, and the bare 
 
 ## Inline: inside the caller's transaction
 
-Frameworks that keep a database connection per thread — Django, SQLAlchemy sessions — need the
-store to run on the caller's thread: on another one it would use another connection, outside the
-caller's transaction (and Django refuses ORM calls from a thread running an event loop).
+A database connection is often bound to the thread that opened it, and a transaction to that
+connection. A store that writes through the caller's connection must then run on the caller's
+thread: on another one it would use another connection, outside the caller's transaction.
 `execution="inline"` does every store call, every transport call and every action right there:
 
 ```text
 runner = DurableRunner(store, definitions, execution="inline", on_action_error="raise")
 
-with transaction.atomic():
-    order = Order.objects.create(...)
-    runner.process(order.execution_id, Event(kind="Paid"))   # same connection, same transaction
+with db.transaction():                       # the caller's own transaction
+    order_id = db.insert_order(...)
+    runner.process(execution_id, Event(kind="Paid"))   # same connection, same transaction
 ```
 
 The distributed side works the same way: with the store and the transport in the caller's
@@ -155,8 +155,8 @@ they commit, or roll back, with the caller's own writes.
 
 ```text
 runner = DistributedRunner(store, transport, definitions, execution="inline")
-with transaction.atomic():
-    exe = runner.create("order", context={"order_id": order.id})   # the Start is queued here
+with db.transaction():
+    exe = runner.create("order", context={"order_id": order_id})   # the Start is queued here
 ```
 
 `runner.worker()` uses the runner's model: an inline worker handles one message per `step()` in
