@@ -27,7 +27,7 @@ from harel.engine.driving import DriverLogic, FailOnActionError, TransportDriver
 from harel.engine.execution import Execution, Status, stamp
 from harel.engine.flow import Flow, parallel
 from harel.engine.resolve import MachineResolver, ResolveError
-from harel.engine.store import StoreConflict
+from harel.engine.store import Step, StoreConflict
 from harel.spec.states import Event
 
 logger = logging.getLogger(__name__)
@@ -284,13 +284,13 @@ class SenderLogic:
             **({"id": execution_id} if execution_id is not None else {}),
         )
         if start_on_create:
-            yield from self._persist_start_flow(exe)
+            yield from self._persist_start_flow(exe, cause="create")
         else:
             stamp(exe, self._clock())
             yield from store("save", exe)
         return exe
 
-    def _persist_start_flow(self, exe: Execution, data: Optional[dict] = None) -> Flow:
+    def _persist_start_flow(self, exe: Execution, data: Optional[dict] = None, *, cause: str) -> Flow:
         """Commit `exe`'s `Start` into the durable outbox, in the same atomic write as `exe`
         itself, then publish just that entry and ack it. Not the generic relay, which would
         drain every pending entry fleet-wide. A failed publish or ack doesn't raise: the
@@ -300,7 +300,14 @@ class SenderLogic:
         transaction can't commit, and it is raised."""
         event = Event(kind="Start", data=dict(data or {}))
         stamp(exe, self._clock())
-        seqs = yield from store("commit", exe, [(exe.id, event)])
+        step = Step(
+            cause=cause,
+            from_status=exe.status,
+            to_status=exe.status,  # still PENDING: a worker runs the Start
+            event_kind=event.kind,
+            event_id=event.id,
+        )
+        seqs = yield from store("commit", exe, [(exe.id, event)], step=step)
         if self._shares_store_transaction:
             yield from transport("publish", exe.id, event, priority=exe.priority)
             for seq in seqs:
@@ -340,7 +347,7 @@ class SenderLogic:
             return
         defn = _defn_for(self.definitions, self.resolver, exe)
         check_context(defn.context_schema, {**exe.context, **(data or {})})
-        yield from self._persist_start_flow(exe, data)
+        yield from self._persist_start_flow(exe, data, cause="start")
 
     def send_flow(self, execution_id: str, event: Event) -> Flow:
         if event.kind == "Start":

@@ -21,7 +21,7 @@ from harel.definition.events import with_defaults
 from harel.definition.model import ActionRef, Definition
 from harel.engine.execution import Execution, Status, stamp
 from harel.engine.resolve import ResolveError
-from harel.engine.store import DictStore, ExecutionStore, TimerOp
+from harel.engine.store import DictStore, ExecutionStore, Step, TimerOp
 from harel.spec.states import Event
 
 # events the parent Execution handles itself (not broadcast to its regions). A `Timeout` is
@@ -182,7 +182,7 @@ class _SyncDriver:
         the Execution that produced them is committed (no dual-write window). When
         tracing is enabled, one timeline step (transition + actions + context_out) is
         recorded in the same `commit` (`event=None` is the initial start)."""
-        from_path = exe.active_path
+        from_path, from_status = exe.active_path, exe.status
         keys = _ActionKeys(exe.id, event_id if event_id is not None else "start")
         emits, timer_ops, spawns, actions, assigned = self._drive(exe, gen, keys=keys)
         step = (
@@ -198,6 +198,16 @@ class _SyncDriver:
             timers=tuple(timer_ops),
             spawns=tuple(spawns),
             trace=step,
+            step=Step(
+                cause="event" if event is not None else "start",
+                from_status=from_status,
+                to_status=exe.status,
+                from_path=from_path,
+                to_path=exe.active_path,
+                event_kind=event.kind if event is not None else None,
+                event_id=event.id if event is not None else None,
+                actions=tuple(actions),
+            ),
         )
 
     def _expression_error(

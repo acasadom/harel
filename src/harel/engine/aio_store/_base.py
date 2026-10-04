@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Iterable, Optional, Protocol, runtime_checkable
 
 from harel.engine.execution import Execution, ExecutionPage, Status
-from harel.engine.store import OutboxEntry, SpawnEntry, TimerOp
+from harel.engine.store import OutboxEntry, SpawnEntry, Step, TimerOp
 from harel.spec.states import Event
 
 
@@ -38,6 +38,7 @@ class AsyncExecutionStore(Protocol):
         timers: "tuple[TimerOp, ...]" = (),
         spawns: "tuple[tuple[str, str, dict], ...]" = (),
         trace: "Optional[dict]" = None,
+        step: "Optional[Step]" = None,
     ) -> list[int]: ...
 
     async def is_processed(self, execution_id: str, event_id: str) -> bool: ...

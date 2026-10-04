@@ -243,7 +243,7 @@ async def test_a_failed_ack_does_not_raise_and_the_republished_start_is_dropped(
 
 
 async def test_start_survives_a_transient_publish_failure(caplog):
-    """start() shares create()'s _persist_start helper, so it gets the same
+    """start() queues its Start the way create() does, so it gets the same
     durability guarantee: a failed immediate delivery leaves the Start durably
     committed to the outbox (not lost), and start() itself must not raise — the
     caller already has the execution_id, so a plain retry is always available."""

@@ -8,6 +8,7 @@ from typing import Any, Iterable, Optional
 from harel.engine.execution import Execution, ExecutionPage, Status
 from harel.engine.schema import DEFAULT_PREFIX
 from harel.engine.store import OutboxEntry, SpawnEntry, TimerOp
+from harel.engine.store._base import Step
 from harel.spec.states import Event
 
 
@@ -98,6 +99,7 @@ class AsyncLibsqlStore:
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,
+        step: Optional[Step] = None,
     ) -> list[int]:
         async with self._lock:
             return await asyncio.to_thread(
@@ -108,6 +110,7 @@ class AsyncLibsqlStore:
                 timers=timers,
                 spawns=spawns,
                 trace=trace,
+                step=step,
             )
 
     async def append_trace(self, execution_id: str, entry: dict) -> None:

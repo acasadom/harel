@@ -7,7 +7,7 @@ from typing import Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
-from harel.engine.store._base import DEFAULT_TRACE_MAX, _decode_offset, _encode_offset, _matches
+from harel.engine.store._base import DEFAULT_TRACE_MAX, Step, _decode_offset, _encode_offset, _matches
 from harel.spec.states import Event
 
 
@@ -88,6 +88,7 @@ class AsyncDictStore:
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,
+        step: Optional[Step] = None,
     ) -> list[int]:
         await self.save(exe)  # CAS first: raises before any emit is enqueued
         seqs = []

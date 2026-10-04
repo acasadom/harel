@@ -22,6 +22,7 @@ from harel.engine.store.base import (
     DEFAULT_TRACE_MAX,
     OutboxEntry,
     SpawnEntry,
+    Step,
     StoreConflict,
     TimerOp,
     decode_offset,
@@ -77,6 +78,7 @@ class ConnectionStore:
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,
+        step: Optional[Step] = None,
     ) -> list[int]:
         """Every write of one step, on the caller's connection — atomic because they share
         the caller's transaction, which this store never ends."""

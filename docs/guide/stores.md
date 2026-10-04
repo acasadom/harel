@@ -46,7 +46,9 @@ A store outside harel — over a framework's ORM, a database harel doesn't ship 
 (`ExecutionStore`, `AsyncExecutionStore`), the records (`OutboxEntry`, `SpawnEntry`, `TimerOp`,
 `ExecutionSummary`, `ExecutionPage`), the errors (`StoreConflict`, `ExecutionAlreadyExists`) and
 the helpers the built-in backends share (`encode_offset`/`decode_offset` for the listing cursor,
-`matches`, `listing_page`, `like_prefix`).
+`matches`, `listing_page`, `like_prefix`), and `Step` — the description of each commit every
+writer passes to `commit(..., step=)`: a store must take it, may ignore it, and can act on it
+(see [observing executions](observing)).
 
 `harel.testing` holds the contracts harel runs on its own backends; run them on yours, one call
 each:

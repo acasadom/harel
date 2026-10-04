@@ -10,6 +10,7 @@ from harel.engine.store._base import (
     DEFAULT_TRACE_MAX,
     OutboxEntry,
     SpawnEntry,
+    Step,
     StoreConflict,
     TimerOp,
     _decode_offset,
@@ -101,6 +102,7 @@ class DictStore:
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,
+        step: Optional[Step] = None,
     ) -> list[int]:
         self.save(exe)  # CAS first: raises before any emit is enqueued
         seqs = []

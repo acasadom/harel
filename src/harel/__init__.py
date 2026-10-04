@@ -16,9 +16,17 @@ from harel.engine.control import PurgeRefused
 from harel.engine.core import ExpressionError
 from harel.engine.durable import DurableRunner
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary
+from harel.engine.observe import AsyncObservedStore, ObservedStore
 from harel.engine.resolve import DictResolver, MachineResolver, ResolveError
 from harel.engine.runtime import Driver
-from harel.engine.store import DictStore, ExecutionAlreadyExists, ExecutionStore, SqliteStore, StoreConflict
+from harel.engine.store import (
+    DictStore,
+    ExecutionAlreadyExists,
+    ExecutionStore,
+    SqliteStore,
+    Step,
+    StoreConflict,
+)
 from harel.faas import handler, http_action, lambda_action, openfaas_action, remote_action
 from harel.idempotency import DictIdempotency, IdempotencyBackend, idempotent
 from harel.spec.states import Action, Event, EventFilter, LogEvent, Selector, Transition
@@ -49,6 +57,9 @@ __all__ = [
     "ExecutionSummary",
     "ExecutionPage",
     "Driver",
+    "ObservedStore",
+    "AsyncObservedStore",
+    "Step",
     "DurableRunner",
     "ExecutionAlreadyExists",
     "ExecutionStore",

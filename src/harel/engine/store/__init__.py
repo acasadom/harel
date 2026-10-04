@@ -16,6 +16,7 @@ from harel.engine.store._base import (
     ExecutionStore,
     OutboxEntry,
     SpawnEntry,
+    Step,
     StoreConflict,
     TimerOp,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "OutboxEntry",
     "SpawnEntry",
     "StoreConflict",
+    "Step",
     "TimerOp",
     "DictStore",
     "SqliteStore",

@@ -6,6 +6,7 @@ of harel's public API (unlike the underscored ones in `harel.engine.store._base`
 change). Check a backend against the protocol with `harel.testing`.
 
 - `ExecutionStore` / `AsyncExecutionStore` — the protocols (sync / async).
+- `Step` — the description of a commit every writer passes to `commit(..., step=)`;
 - `OutboxEntry`, `SpawnEntry`, `TimerOp` — what `pending_outbox`, `pending_spawns` return and
   `commit` receives; `ExecutionSummary`, `ExecutionPage` — what `list_executions` returns.
 - `StoreConflict` — `commit`/`save` lost the version CAS; `ExecutionAlreadyExists`.
@@ -29,6 +30,7 @@ from harel.engine.store._base import (
     ExecutionStore,
     OutboxEntry,
     SpawnEntry,
+    Step,
     StoreConflict,
     TimerOp,
 )
@@ -48,6 +50,7 @@ __all__ = [
     "OutboxEntry",
     "SpawnEntry",
     "StoreConflict",
+    "Step",
     "TimerOp",
     "decode_offset",
     "encode_offset",

@@ -11,6 +11,7 @@ from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
 from harel.engine.store._base import (
     _IDS_WITH_PREFIX_SQL,
     DEFAULT_TRACE_MAX,
+    Step,
     _decode_offset,
     _like_prefix,
     _listing_page,
@@ -133,6 +134,7 @@ class AsyncRqliteStore:
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,
+        step: Optional[Step] = None,
     ) -> list[int]:
         old = exe.version
         exe.version = old + 1

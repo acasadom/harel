@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Breaking
+
+- **A store's `commit` takes a `step`** (`ExecutionStore` and `AsyncExecutionStore`): every
+  writer — the driver, the control plane, `DistributedRunner.create` — now passes a `Step`
+  describing the commit. A store written outside harel must accept it (it may ignore it): one
+  whose `commit` doesn't raises `TypeError`, and the store contracts in `harel.testing` pass a
+  `step`, so its tests say so.
+
+### Added
+
+- **`Step`**, the description of a commit: what caused it (`create`, `start`, `event`,
+  `control`), the event or the control-plane command, the execution's status and state before
+  and after, the actions it ran. It is not persisted — the opt-in trace is the persisted
+  timeline — and costs a small record per commit.
+- **`ObservedStore(store, on_step)`** and `AsyncObservedStore`: wrap a store, and `on_step(step,
+  execution)` hears about every commit once it has returned — for metrics, alerts, audit,
+  notifications, without touching the machines or the runners. The status before tells a step
+  into `FAILED` apart, which `finished_at` doesn't. A store whose commits join the caller's
+  transaction reads `step` in its own `commit` instead, and defers to that transaction's commit.
+  See the new [observing executions](docs/guide/observing.md) guide.
+
 ### Fixed
 
 - **An action's idempotency key is the same on every attempt at an event**, also when another

@@ -14,6 +14,7 @@ from harel.engine.store._base import (
     DEFAULT_TRACE_MAX,
     OutboxEntry,
     SpawnEntry,
+    Step,
     StoreConflict,
     TimerOp,
     _decode_offset,
@@ -166,6 +167,7 @@ class LibsqlStore:
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,
+        step: Optional[Step] = None,
     ) -> list[int]:
         old = exe.version
         try:

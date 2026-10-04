@@ -113,9 +113,15 @@ class _AsyncStoreAdapter:
     async def save(self, exe):
         return self._s.save(exe)
 
-    async def commit(self, exe, emits, processed_event_id=None, timers=(), spawns=(), trace=None):
+    async def commit(self, exe, emits, processed_event_id=None, timers=(), spawns=(), trace=None, step=None):
         return self._s.commit(
-            exe, emits, processed_event_id=processed_event_id, timers=timers, spawns=spawns, trace=trace
+            exe,
+            emits,
+            processed_event_id=processed_event_id,
+            timers=timers,
+            spawns=spawns,
+            trace=trace,
+            step=step,
         )
 
     async def read_trace(self, execution_id):

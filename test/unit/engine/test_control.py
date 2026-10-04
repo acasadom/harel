@@ -678,12 +678,18 @@ class _ConflictOnce:
     def arm(self):
         self._armed = True
 
-    def commit(self, exe, emits, processed_event_id=None, timers=(), spawns=(), trace=None):
+    def commit(self, exe, emits, processed_event_id=None, timers=(), spawns=(), trace=None, step=None):
         if self._armed:
             self._armed = False
             raise StoreConflict(exe.id, expected=exe.version, found=exe.version + 1)
         return self._inner.commit(
-            exe, emits, processed_event_id=processed_event_id, timers=timers, spawns=spawns, trace=trace
+            exe,
+            emits,
+            processed_event_id=processed_event_id,
+            timers=timers,
+            spawns=spawns,
+            trace=trace,
+            step=step,
         )
 
     def __getattr__(self, name):

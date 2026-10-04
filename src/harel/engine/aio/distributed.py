@@ -242,9 +242,6 @@ class AsyncDistributedRunner(SenderLogic):
             self.create_flow(definition_id, context, execution_id, priority, start_on_create)
         )
 
-    async def _persist_start(self, exe: Execution, data: Optional[dict] = None) -> None:
-        await self._serve(self._persist_start_flow(exe, data))
-
     async def start(self, execution_id: str, data: Optional[dict] = None) -> None:
         """Publish a `Start` for `execution_id` — a worker claims it and runs the start
         sequence (its actions run there, not on this caller). A no-op, with a warning, if it

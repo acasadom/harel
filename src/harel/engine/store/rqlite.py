@@ -13,6 +13,7 @@ from harel.engine.store._base import (
     DEFAULT_TRACE_MAX,
     OutboxEntry,
     SpawnEntry,
+    Step,
     StoreConflict,
     TimerOp,
     _decode_offset,
@@ -133,6 +134,7 @@ class RqliteStore:
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,
+        step: Optional[Step] = None,
     ) -> list[int]:
         old = exe.version
         exe.version = old + 1  # bump BEFORE dumping so the stored JSON carries the new version

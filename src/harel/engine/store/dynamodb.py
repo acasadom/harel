@@ -13,6 +13,7 @@ from harel.engine.store._base import (
     DEFAULT_TRACE_MAX,
     OutboxEntry,
     SpawnEntry,
+    Step,
     StoreConflict,
     TimerOp,
     _matches,
@@ -238,6 +239,7 @@ class DynamoDBStore:
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,  # execution-trace deferred for this backend (accepted, ignored)
+        step: Optional[Step] = None,
     ) -> list[int]:
         # allocate monotonic seqs up front (a seq wasted by a cancelled txn is harmless)
         outbox: list[dict] = []

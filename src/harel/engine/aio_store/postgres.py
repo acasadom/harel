@@ -13,6 +13,7 @@ from harel.engine.store._base import (
     _PG_SCHEMA_LOCK,
     _PURGE_COMPANIONS_SQL,
     DEFAULT_TRACE_MAX,
+    Step,
     _decode_offset,
     _like_prefix,
     _listing_page,
@@ -141,6 +142,7 @@ class AsyncPostgresStore:
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,
+        step: Optional[Step] = None,
     ) -> list[int]:
         # fast path: a state-only event (no emits/spawns/timers/trace) commits in ONE atomic
         # round-trip via the version-CAS function — instead of UPDATE + (SELECT/INSERT) + INSERT.
