@@ -111,6 +111,18 @@ Scale out by running more worker **processes** (or machines) against the same st
 transport — the single-active-consumer-per-group property keeps each execution on one worker at
 a time regardless of how many are running.
 
+### A step can run twice without anything crashing
+
+A worker commits a step with a CAS on the execution's version, so its commit loses to any other
+write of the same execution that landed while it ran the step: a control-plane command
+(`suspend`, `cancel`, `terminate`, `redrive`) from the runner, a `process()` from a
+`DurableRunner` on the same store, or another worker after the lease expired under an action
+slower than `visibility`. The losing worker gets a `StoreConflict`, puts the event back
+(`nack`), and the event is processed again on the new version. Nothing committed half, but the
+step's **actions ran on the first attempt and run again** on the next — at-least-once, with no
+failure involved. Each attempt hands an action the same `stm.idempotency_key`, so a side effect
+deduped on it happens once (see [durability](durability.md#at-least-once-actions--idempotency)).
+
 ## Scaling & throughput
 
 Two independent dials:

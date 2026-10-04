@@ -363,9 +363,12 @@ advance**. The event is durable on the transport the moment `send` returns; if e
 dies at that instant, the event is redelivered when one restarts. The worker's `ack` only fires
 *after* `commit` succeeds — so the at-least-once guarantee is upheld end-to-end.
 
-The `StoreConflict` path (not shown above) is the backstop: if two workers somehow claim the
-same group concurrently (lease expired, clock skew), the CAS in `commit` rejects the slower
-one, which `nack`s and lets the transport redeliver to a fresh worker with the correct version.
+The `StoreConflict` path (not shown above) is the backstop for another writer of the same
+execution: a control-plane command or a `process()` landing while a worker runs the step, or a
+second worker after a lease expired under a slow action. The CAS in `commit` rejects the slower
+writer, which `nack`s and lets the transport redeliver to a worker that loads the new version. The
+step's actions then run again — with the same idempotency keys (see
+[durability](durability.md#at-least-once-actions--idempotency)).
 
 Any other failure while handling a message — the store or the transport down, a bug — is logged by
 the worker's `run` loop with its traceback, and the message is `nack`ed to come back after
