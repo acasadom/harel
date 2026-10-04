@@ -19,7 +19,8 @@ MongoStore(client, db_name="harel")              # inject any pymongo-compatible
 MongoStore.from_url("mongodb://host:27017")       # lazily imports pymongo, builds MongoClient, pings + retries
 ```
 
-Collections live under `db_name` (default `"harel"`): `executions` (the documents) and `counters`
+Collections live under `db_name` (default `"harel"`), named by `prefix` (default `"harel"`, see
+[naming and schema ownership](../stores.md#naming-and-schema-ownership)): `harel_executions` (the documents) and `harel_counters`
 (the monotonic outbox/spawn/trace seq allocator).
 
 ## The key design point: one document, one atomic update
@@ -48,7 +49,7 @@ every write re-sent the whole (growing) blob. It does not:
 
 ## Document model
 
-An `executions` document has this exact shape:
+A `harel_executions` document has this exact shape:
 
 ```text
 {
@@ -99,10 +100,10 @@ Every field, and why it is **embedded** rather than living in its own collection
 - **`trace`** — an optional array of trace steps (opt-in execution timeline), ring-trimmed to the last
   `trace_max` entries; each step carries a stamped 0-based `index`.
 
-### The `counters` collection and `_next_seq`
+### The `harel_counters` collection and `_next_seq`
 
 The monotonic seqs (`outbox`, `spawn`, and a per-execution `trace:<id>`) come from a separate
-`counters` collection, allocated atomically with `find_one_and_update` + `$inc` returning the
+`harel_counters` collection, allocated atomically with `find_one_and_update` + `$inc` returning the
 post-increment value:
 
 ```text
@@ -147,7 +148,7 @@ appends the optional trace step — **all or nothing** — with an optimistic-co
 Execution's `version`. On a single-document Mongo this is one `update_one`, no replica set needed.
 
 **Step 1 — allocate the seqs up front.** The outbox/spawn seqs and the trace index come from the
-`counters` collection (one `find_one_and_update` each), allocated before building the update:
+`harel_counters` collection (one `find_one_and_update` each), allocated before building the update:
 
 ```text
 outbox_entries: list[dict] = []

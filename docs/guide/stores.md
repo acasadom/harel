@@ -5,7 +5,7 @@ hub for the per-backend reference: the contract every backend implements, the du
 they share, the opt-in execution trace — and a page per backend with its **exact data model and
 every operation** (what each table/key/document holds, how each update is done, and why). For the
 concepts (the seam, surviving a restart, idempotency) start with [durability](durability); to
-select a store at the worker see [`STM_STORE_BACKEND`](distribution).
+select a store at the worker see [`HAREL_STORE_BACKEND`](distribution).
 
 ## The contract every backend implements
 
@@ -65,13 +65,13 @@ on a backend shared with other data. When the protocol changes, they are what te
 
 ## Execution trace (opt-in)
 
-When tracing is on (`STM_TRACE=1`, or `DurableRunner(..., trace=True)`), `commit` also appends
+When tracing is on (`HAREL_TRACE=1`, or `DurableRunner(..., trace=True)`), `commit` also appends
 one **timeline step** — event in, transition `from → to`, the actions that ran, what a `set`
 wrote (`assigned`, only when there was one), and the resulting `context_out` — in the *same*
 transaction as the advance. It is **off by default**, so
 the hot path pays nothing; when on it costs ~one extra in-transaction write (~+10 µs/commit on a
 local SQLite, no extra round-trip or fsync), and `load` is unaffected (it still reads the
-snapshot — there is no event replay). Each backend keeps a **ring of the last `STM_TRACE_MAX`
+snapshot — there is no event replay). Each backend keeps a **ring of the last `HAREL_TRACE_MAX`
 steps** (default 200) using its natural primitive (a capped table, an `LTRIM`'d list, a
 `$slice`'d array, a Put+Delete window); the monitor renders it as the [timeline](monitor). Only
 `context_out` is stored (the monitor derives each step's `context_in` from the previous step).
@@ -125,10 +125,49 @@ stores/dynamodb
 | [MongoStore](stores/mongo) | document store, single-document atomic | `update_one({_id, version})` |
 | [DynamoDBStore](stores/dynamodb) | AWS serverless, pairs with `SqsTransport` | conditional write + `TransactWriteItems` |
 
+## Naming and schema ownership
+
+Every persistent backend takes a **`prefix`** (default `"harel"`) and names everything it creates
+with it, so several harel deployments — or harel and other applications — share one database
+without colliding:
+
+| backend | what `prefix="harel"` names |
+|---|---|
+| SQLite, libSQL, rqlite, Postgres | tables `harel_executions`, `harel_outbox`, `harel_processed_events`, `harel_spawns`, `harel_timers`, `harel_trace`; the transport's `harel_transport_messages`, `harel_transport_groups`; their indexes; Postgres' functions `harel_commit_cas`, `harel_claim`, `harel_ack` |
+| Redis | every key: `harel:exe:<id>`, `harel:outbox`, …, the transport's `harel:q:<group>`, … |
+| Mongo | collections (under `db_name`): `harel_executions`, `harel_counters`; the transport's `harel_transport_messages`, `harel_transport_locks`, `harel_transport_counters` |
+| DynamoDB | tables `harel_executions`, `harel_outbox`, `harel_spawns`, `harel_timers`, `harel_processed`, `harel_counters`, `harel_trace` |
+
+A prefix is an identifier — a letter or `_`, then letters, digits or `_` — of at most 30
+characters (so every name built from it fits Postgres' 63). `harel.engine.schema.Names(prefix)`
+gives each name.
+
+Every backend that has a schema also takes **`create_schema`** (default `True`): it creates its
+tables, indexes and functions when it is built, idempotently. With `create_schema=False` it
+creates nothing and expects them to be there — when something else owns the schema: a migration
+tool, infrastructure-as-code. For the SQL backends the schema is data:
+
+```python
+from harel.engine.schema import SCHEMA_VERSION, sql_schema
+
+statements = sql_schema("postgres", prefix="harel")  # or "sqlite" (SQLite, libSQL, rqlite)
+assert all(s.startswith("CREATE") for s in statements)
+```
+
+`sql_schema` returns the statements the backends run themselves — the store's and the
+transport's (`store_schema` / `transport_schema` for one of them) — each idempotent (`IF NOT
+EXISTS`, `CREATE OR REPLACE`). Hand them to the migration tool, and build the backends with
+`create_schema=False`. `SCHEMA_VERSION` changes whenever the schema does, and the CHANGELOG says
+how to move from one version to the next. The worker reads both settings from `HAREL_PREFIX` and
+`HAREL_CREATE_SCHEMA` (`"0"`/`"false"` to turn it off).
+
+Upgrading a deployment from before 0.7, whose tables had no prefix: see
+[upgrading to 0.7](upgrading).
+
 ## Async ports
 
 Every store has an `Async…` twin under `harel/engine/aio_store/` with the **same data model** —
-the async worker (`STM_CONCURRENCY` events in flight on one loop) talks to those. Most are native
+the async worker (`HAREL_CONCURRENCY` events in flight on one loop) talks to those. Most are native
 async (aiosqlite, redis.asyncio, psycopg async pool, motor, aioboto3, httpx for rqlite);
 `AsyncLibsqlStore` wraps the sync driver on a thread (the `libsql` package is sync-only). The
 synchronous `Store` classes are what the sync `DurableRunner`/`DistributedRunner` and the monitor

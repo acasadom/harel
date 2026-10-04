@@ -12,7 +12,8 @@ from harel.spec.states import Event
 
 @runtime_checkable
 class AsyncTransport(Protocol):
-    """Async mirror of `Transport`: identical per-group-exclusivity semantics, awaited IO."""
+    """Async mirror of `Transport`: identical per-group-exclusivity semantics, awaited IO —
+    including the optional `shares_store_transaction` attribute."""
 
     async def publish(self, group_id: str, event: Event, priority: int = 0) -> None: ...
 

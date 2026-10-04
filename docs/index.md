@@ -65,6 +65,20 @@ guide/monitor
 guide/architecture
 guide/dsl-reference
 guide/api-reference
+guide/upgrading
+```
+
+## Examples
+
+Six small applications built around one machine each — a script, a webhook-driven payment with
+a worker, a NiceGUI form, a shop whose orders commit in its own transaction — and how each
+runs, and why.
+
+```{toctree}
+:maxdepth: 1
+:caption: Examples
+
+examples/index
 ```
 
 ## Is a statechart the right tool?

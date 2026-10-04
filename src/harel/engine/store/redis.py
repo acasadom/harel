@@ -6,6 +6,7 @@ import json
 from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
+from harel.engine.schema import DEFAULT_PREFIX, Names
 from harel.engine.store._base import (
     _COMMIT_CAS_LUA,
     DEFAULT_TRACE_MAX,
@@ -33,22 +34,23 @@ class RedisStore:
     key. Either way a concurrent change → `StoreConflict` (the Lua needs `lupa` under
     fakeredis)."""
 
-    def __init__(self, client: Any, prefix: str = "stm") -> None:
+    def __init__(self, client: Any, *, prefix: str = DEFAULT_PREFIX) -> None:
+        """`prefix` namespaces its keys (`<prefix>:...`, see `harel.engine.schema`)."""
         from redis.exceptions import ResponseError, WatchError
 
         self._r = client
-        self._prefix = prefix
+        self._prefix = Names(prefix).prefix  # checked: the same rule as every backend's
         self._WatchError = WatchError
         self._ResponseError = ResponseError
         self.trace_max = DEFAULT_TRACE_MAX
         self._commit_cas_script = client.register_script(_COMMIT_CAS_LUA)
 
     @classmethod
-    def from_url(cls, url: str, prefix: str = "stm") -> "RedisStore":
+    def from_url(cls, url: str, *, prefix: str = DEFAULT_PREFIX) -> "RedisStore":
         """Convenience constructor; imports `redis` lazily (the optional dep)."""
         import redis
 
-        return cls(redis.Redis.from_url(url), prefix)
+        return cls(redis.Redis.from_url(url), prefix=prefix)
 
     def _k(self, suffix: str) -> str:
         return f"{self._prefix}:{suffix}"
@@ -162,8 +164,8 @@ class RedisStore:
         except self._ResponseError as exc:
             exe.version = old
             msg = str(exc)
-            if "STM_CONFLICT" in msg:
-                tail = msg.split("STM_CONFLICT:")[-1].strip()
+            if "HAREL_CONFLICT" in msg:
+                tail = msg.split("HAREL_CONFLICT:")[-1].strip()
                 found = int(tail) if tail.lstrip("-").isdigit() else None
                 raise StoreConflict(exe.id, expected=old, found=found) from None
             raise

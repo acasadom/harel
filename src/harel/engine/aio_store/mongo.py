@@ -7,6 +7,7 @@ import re
 from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
+from harel.engine.schema import DEFAULT_PREFIX, Names
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
 from harel.engine.store._base import DEFAULT_TRACE_MAX, _decode_offset, _encode_offset, _matches
 from harel.spec.states import Event
@@ -20,14 +21,16 @@ class AsyncMongoStore:
     replica set). Build with `await AsyncMongoStore.from_url(url)` or inject an
     already-connected `AsyncIOMotorClient`."""
 
-    def __init__(self, client: Any, db_name: str = "harel") -> None:
+    def __init__(self, client: Any, db_name: str = "harel", *, prefix: str = DEFAULT_PREFIX) -> None:
+        """`prefix` names its collections under `db_name` (see `harel.engine.schema`)."""
         from pymongo import ReturnDocument
         from pymongo.errors import DuplicateKeyError
 
         self._client = client
         self._db = client[db_name]
-        self._exes = self._db["executions"]
-        self._counters = self._db["counters"]
+        names = Names(prefix)
+        self._exes = self._db[names.executions]
+        self._counters = self._db[names.counters]
         self._after = ReturnDocument.AFTER
         self._DuplicateKeyError = DuplicateKeyError
         self.trace_max = DEFAULT_TRACE_MAX
@@ -39,6 +42,8 @@ class AsyncMongoStore:
         db_name: str = "harel",
         connect_retries: int = 30,
         retry_delay: float = 1.0,
+        *,
+        prefix: str = DEFAULT_PREFIX,
     ) -> "AsyncMongoStore":
         import anyio
         import motor.motor_asyncio
@@ -49,7 +54,7 @@ class AsyncMongoStore:
             try:
                 client: Any = motor.motor_asyncio.AsyncIOMotorClient(url)
                 await client.admin.command("ping")
-                return cls(client, db_name)
+                return cls(client, db_name, prefix=prefix)
             except PyMongoError as exc:
                 last = exc
                 await anyio.sleep(retry_delay)

@@ -6,6 +6,7 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 
+from harel.engine.schema import DEFAULT_PREFIX, Names, transport_schema
 from harel.engine.transport import _PARKED, Lease
 from harel.spec.states import Event
 
@@ -17,8 +18,15 @@ class AsyncRqliteTransport:
     Build with `await AsyncRqliteTransport.from_url(url)`."""
 
     def __init__(
-        self, client: Any, base_url: str, timeout: float = 10.0, clock: Callable[[], float] = time.time
+        self,
+        client: Any,
+        base_url: str,
+        timeout: float = 10.0,
+        clock: Callable[[], float] = time.time,
+        *,
+        prefix: str = DEFAULT_PREFIX,
     ) -> None:
+        self._n = Names(prefix)
         self._client = client
         self._base = base_url.rstrip("/")
         self._timeout = timeout
@@ -31,7 +39,13 @@ class AsyncRqliteTransport:
         timeout: float = 10.0,
         connect_retries: int = 30,
         retry_delay: float = 1.0,
+        *,
+        prefix: str = DEFAULT_PREFIX,
+        create_schema: bool = True,
     ) -> "AsyncRqliteTransport":
+        """Connect, retrying until rqlite is up and has elected a leader; `prefix` names its
+        tables (see `harel.engine.schema`), and with `create_schema=False` they must already
+        exist."""
         import anyio
         import httpx
 
@@ -39,18 +53,11 @@ class AsyncRqliteTransport:
         for _ in range(connect_retries):
             client = httpx.AsyncClient()
             try:
-                transport = cls(client, url, timeout)
-                await transport._execute(
-                    [
-                        "CREATE TABLE IF NOT EXISTS messages "
-                        "(seq INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT NOT NULL, "
-                        "event TEXT NOT NULL, locked_by TEXT, lock_expiry REAL)",
-                        "CREATE TABLE IF NOT EXISTS groups "
-                        "(group_id TEXT PRIMARY KEY, last_claimed_at REAL NOT NULL DEFAULT 0.0, "
-                        "priority INT NOT NULL DEFAULT 0)",
-                        "INSERT OR IGNORE INTO groups (group_id) SELECT DISTINCT group_id FROM messages",
-                    ]
-                )
+                transport = cls(client, url, timeout, prefix=prefix)
+                if create_schema:
+                    await transport._execute(transport_schema("sqlite", prefix))
+                else:
+                    await transport._query("SELECT 1", ())  # nothing created: still wait for a leader
                 return transport
             except Exception as exc:  # noqa: BLE001
                 await client.aclose()
@@ -84,8 +91,16 @@ class AsyncRqliteTransport:
     async def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
         await self._execute(
             [
-                ["INSERT INTO messages (group_id, event) VALUES (?, ?)", group_id, event.model_dump_json()],
-                ["INSERT OR IGNORE INTO groups (group_id, priority) VALUES (?, ?)", group_id, priority],
+                [
+                    f"INSERT INTO {self._n.messages} (group_id, event) VALUES (?, ?)",
+                    group_id,
+                    event.model_dump_json(),
+                ],
+                [
+                    f"INSERT OR IGNORE INTO {self._n.groups} (group_id, priority) VALUES (?, ?)",
+                    group_id,
+                    priority,
+                ],
             ],
             transaction=True,
         )
@@ -96,12 +111,12 @@ class AsyncRqliteTransport:
         results = await self._execute(
             [
                 [
-                    "UPDATE messages SET locked_by = ?, lock_expiry = ? WHERE seq = ("
-                    "  SELECT m.seq FROM messages m "
-                    "  JOIN groups g ON g.group_id = m.group_id "
+                    f"UPDATE {self._n.messages} SET locked_by = ?, lock_expiry = ? WHERE seq = ("
+                    f"  SELECT m.seq FROM {self._n.messages} m "
+                    f"  JOIN {self._n.groups} g ON g.group_id = m.group_id "
                     "  WHERE (m.locked_by IS NULL OR m.lock_expiry < ?) "
                     "    AND m.group_id NOT IN ("
-                    "      SELECT group_id FROM messages WHERE locked_by IS NOT NULL AND lock_expiry >= ?"
+                    f"      SELECT group_id FROM {self._n.messages} WHERE locked_by IS NOT NULL AND lock_expiry >= ?"
                     "    ) AND g.priority >= ?"
                     "  ORDER BY g.last_claimed_at ASC, m.seq ASC LIMIT 1)",
                     token,
@@ -114,18 +129,22 @@ class AsyncRqliteTransport:
         )
         if results[0].get("rows_affected", 0) == 0:
             return None
-        rows = await self._query("SELECT seq, group_id, event FROM messages WHERE locked_by = ?", (token,))
+        rows = await self._query(
+            f"SELECT seq, group_id, event FROM {self._n.messages} WHERE locked_by = ?", (token,)
+        )
         seq, group_id, event = rows[0]
-        await self._execute([["UPDATE groups SET last_claimed_at = ? WHERE group_id = ?", now, group_id]])
+        await self._execute(
+            [[f"UPDATE {self._n.groups} SET last_claimed_at = ? WHERE group_id = ?", now, group_id]]
+        )
         return Lease(seq, group_id, Event.model_validate_json(event), token=token)
 
     async def ack(self, lease: Lease) -> None:
         await self._execute(
             [
-                ["DELETE FROM messages WHERE seq = ?", lease.seq],
+                [f"DELETE FROM {self._n.messages} WHERE seq = ?", lease.seq],
                 [
-                    "DELETE FROM groups WHERE group_id = ? AND NOT EXISTS "
-                    "(SELECT 1 FROM messages WHERE group_id = ?)",
+                    f"DELETE FROM {self._n.groups} WHERE group_id = ? AND NOT EXISTS "
+                    f"(SELECT 1 FROM {self._n.messages} WHERE group_id = ?)",
                     lease.group_id,
                     lease.group_id,
                 ],
@@ -138,7 +157,7 @@ class AsyncRqliteTransport:
             await self._execute(
                 [
                     [
-                        "UPDATE messages SET locked_by = ?, lock_expiry = ? WHERE seq = ?",
+                        f"UPDATE {self._n.messages} SET locked_by = ?, lock_expiry = ? WHERE seq = ?",
                         _PARKED,
                         self._clock() + delay,
                         lease.seq,
@@ -147,7 +166,12 @@ class AsyncRqliteTransport:
             )
         else:
             await self._execute(
-                [["UPDATE messages SET locked_by = NULL, lock_expiry = 0 WHERE seq = ?", lease.seq]]
+                [
+                    [
+                        f"UPDATE {self._n.messages} SET locked_by = NULL, lock_expiry = 0 WHERE seq = ?",
+                        lease.seq,
+                    ]
+                ]
             )
 
     async def close(self) -> None:

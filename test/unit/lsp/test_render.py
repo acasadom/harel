@@ -29,7 +29,7 @@ def test_renders_first_machine() -> None:
     assert r.error is None
     assert r.machine == "M"
     assert r.mermaid is not None and r.mermaid.startswith("stateDiagram-v2")
-    assert "Done : outcome: success" in r.mermaid
+    assert "Done : outcome#58; success" in r.mermaid
 
 
 def test_selects_named_machine() -> None:
@@ -92,7 +92,7 @@ def test_fragment_placeholders_for_every_param_kind() -> None:
     # state param -> a dummy sibling target; event param -> a synthetic kind;
     # value param -> a literal timeout; guard param -> a predicate
     assert "give_up" in r.mermaid
-    assert "timeout: 1" in r.mermaid
+    assert "timeout#58; 1" in r.mermaid
     assert "TrigEvt" in r.mermaid
 
 

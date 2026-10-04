@@ -99,19 +99,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "--definitions-dir",
         help="directory of .stm files to resolve definitions for the statechart view "
-        "(default: $STM_DEFINITIONS_DIR). Without it the monitor runs data-only.",
+        "(default: $HAREL_DEFINITIONS_DIR). Without it the monitor runs data-only.",
     )
     parser.add_argument(
         "--interval",
         type=float,
         default=cfg.tui_interval_ms / 1000.0,
-        help="auto-refresh interval in seconds (default 1.0; $STM_TUI_INTERVAL_MS).",
+        help="auto-refresh interval in seconds (default 1.0; $HAREL_TUI_INTERVAL_MS).",
     )
     parser.add_argument(
         "--theme",
         default=cfg.tui_theme,
         help="a built-in Textual theme: nord, gruvbox, tokyo-night, dracula, monokai, "
-        "textual-dark, textual-light, … (default nord; $STM_TUI_THEME). Press `ctrl+p` "
+        "textual-dark, textual-light, … (default nord; $HAREL_TUI_THEME). Press `ctrl+p` "
         "in the app to preview them live.",
     )
     args = parser.parse_args(argv)

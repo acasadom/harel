@@ -8,19 +8,19 @@ so its cost is `O(log N)` in the number of active groups — never a `$group` ag
 message. The client is injected (`pymongo` optional; tests use mongomock); pairs with
 [`MongoStore`](../stores/mongo) for an all-Mongo stack.
 
-## Collections (under `db_name`, names prefixed)
+## Collections (under `db_name`, named by `prefix`, default `"harel"`)
 
 ```text
-{prefix}_messages  one doc per message: { _id: seq, group_id, event }
+{prefix}_transport_messages  one doc per message: { _id: seq, group_id, event }
                    (seq = monotonic; oldest = smallest _id)
-{prefix}_locks     one doc per active group:
+{prefix}_transport_locks     one doc per active group:
                    { _id: group_id, available_at: float, token: str|None, priority: int }
-{prefix}_counters  the monotonic seq allocator ({_id:"seq"}, $inc n)
+{prefix}_transport_counters  the monotonic seq allocator ({_id:"seq"}, $inc n)
 ```
 
-- **`_messages`** is the FIFO: `_id` is a monotonic seq from `_next_seq` (a `find_one_and_update`
+- **`_transport_messages`** is the FIFO: `_id` is a monotonic seq from `_next_seq` (a `find_one_and_update`
   `$inc`), so the head of a group is the smallest `_id`.
-- **`_locks`** is the ready-index **and** the lock in one document per group: `available_at` is
+- **`_transport_locks`** is the ready-index **and** the lock in one document per group: `available_at` is
   the epoch at which the group is next claimable (0 = never-yet-claimed; `now` after ack —
   **round-robin**; `now + visibility` while in flight; `now + delay` while parked), `token` is the
   current lease, and `priority` is the execution's priority level (0–4) fixed at first publish.

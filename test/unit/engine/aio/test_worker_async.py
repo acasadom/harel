@@ -59,29 +59,29 @@ async def test_async_worker_run_drains_many_concurrently():
 
 
 async def test_worker_build_store_async_sqlite(monkeypatch):
-    monkeypatch.setenv("STM_STORE_BACKEND", "sqlite")
-    monkeypatch.setenv("STM_STORE_DB", ":memory:")
+    monkeypatch.setenv("HAREL_STORE_BACKEND", "sqlite")
+    monkeypatch.setenv("HAREL_STORE_DB", ":memory:")
     store = await worker.build_store_async()
     assert isinstance(store, AsyncSqliteStore)
     await store.close()
 
 
 async def test_worker_build_store_async_redis(monkeypatch):
-    monkeypatch.setenv("STM_STORE_BACKEND", "redis")
-    monkeypatch.setenv("STM_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("HAREL_STORE_BACKEND", "redis")
+    monkeypatch.setenv("HAREL_REDIS_URL", "redis://localhost:6379/0")
     store = await worker.build_store_async()
     assert isinstance(store, AsyncRedisStore)
 
 
 async def test_worker_build_transport_async(monkeypatch):
-    monkeypatch.setenv("STM_TRANSPORT_BACKEND", "sqlite")
-    monkeypatch.setenv("STM_TRANSPORT_DB", ":memory:")
+    monkeypatch.setenv("HAREL_TRANSPORT_BACKEND", "sqlite")
+    monkeypatch.setenv("HAREL_TRANSPORT_DB", ":memory:")
     transport = await worker.build_transport_async()
     assert isinstance(transport, AsyncSqliteTransport)
     await transport.close()
 
-    monkeypatch.setenv("STM_TRANSPORT_BACKEND", "redis")
-    monkeypatch.setenv("STM_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setenv("HAREL_TRANSPORT_BACKEND", "redis")
+    monkeypatch.setenv("HAREL_REDIS_URL", "redis://localhost:6379/0")
     assert isinstance(await worker.build_transport_async(), AsyncRedisTransport)
 
 
@@ -93,8 +93,8 @@ async def test_worker_build_transport_async(monkeypatch):
 async def test_worker_build_store_async_dynamodb(monkeypatch):
     aiomoto = pytest.importorskip("aiomoto")
 
-    monkeypatch.setenv("STM_STORE_BACKEND", "dynamodb")
-    monkeypatch.setenv("STM_AWS_REGION", "us-east-1")
+    monkeypatch.setenv("HAREL_STORE_BACKEND", "dynamodb")
+    monkeypatch.setenv("HAREL_AWS_REGION", "us-east-1")
     async with aiomoto.mock_aws():
         store = await worker.build_store_async()
         assert isinstance(store, AsyncDynamoDBStore)
@@ -102,8 +102,8 @@ async def test_worker_build_store_async_dynamodb(monkeypatch):
 
 
 async def test_worker_build_store_async_mongo(monkeypatch):
-    monkeypatch.setenv("STM_STORE_BACKEND", "mongo")
-    monkeypatch.setenv("STM_MONGO_URL", "mongodb://localhost:27017")
+    monkeypatch.setenv("HAREL_STORE_BACKEND", "mongo")
+    monkeypatch.setenv("HAREL_MONGO_URL", "mongodb://localhost:27017")
     from harel.engine.aio_store import AsyncMongoStore
 
     sentinel = object()
@@ -113,8 +113,8 @@ async def test_worker_build_store_async_mongo(monkeypatch):
 
 
 async def test_worker_build_store_async_rqlite(monkeypatch):
-    monkeypatch.setenv("STM_STORE_BACKEND", "rqlite")
-    monkeypatch.setenv("STM_RQLITE_URL", "http://localhost:4001")
+    monkeypatch.setenv("HAREL_STORE_BACKEND", "rqlite")
+    monkeypatch.setenv("HAREL_RQLITE_URL", "http://localhost:4001")
     from harel.engine.aio_store import AsyncRqliteStore
 
     sentinel = object()
@@ -124,8 +124,8 @@ async def test_worker_build_store_async_rqlite(monkeypatch):
 
 
 async def test_worker_build_transport_async_mongo(monkeypatch):
-    monkeypatch.setenv("STM_TRANSPORT_BACKEND", "mongo")
-    monkeypatch.setenv("STM_MONGO_URL", "mongodb://localhost:27017")
+    monkeypatch.setenv("HAREL_TRANSPORT_BACKEND", "mongo")
+    monkeypatch.setenv("HAREL_MONGO_URL", "mongodb://localhost:27017")
     from harel.engine.aio_transport import AsyncMongoTransport
 
     sentinel = object()
@@ -135,8 +135,8 @@ async def test_worker_build_transport_async_mongo(monkeypatch):
 
 
 async def test_worker_build_transport_async_rqlite(monkeypatch):
-    monkeypatch.setenv("STM_TRANSPORT_BACKEND", "rqlite")
-    monkeypatch.setenv("STM_RQLITE_URL", "http://localhost:4001")
+    monkeypatch.setenv("HAREL_TRANSPORT_BACKEND", "rqlite")
+    monkeypatch.setenv("HAREL_RQLITE_URL", "http://localhost:4001")
     from harel.engine.aio_transport import AsyncRqliteTransport
 
     sentinel = object()
@@ -148,10 +148,10 @@ async def test_worker_build_transport_async_rqlite(monkeypatch):
 async def test_worker_build_transport_async_sqs(monkeypatch):
     aiomoto = pytest.importorskip("aiomoto")
 
-    monkeypatch.setenv("STM_TRANSPORT_BACKEND", "sqs")
-    monkeypatch.setenv("STM_AWS_REGION", "us-east-1")
-    monkeypatch.setenv("STM_SQS_QUEUE", "stm.fifo")
-    monkeypatch.delenv("STM_SQS_ENDPOINT", raising=False)
+    monkeypatch.setenv("HAREL_TRANSPORT_BACKEND", "sqs")
+    monkeypatch.setenv("HAREL_AWS_REGION", "us-east-1")
+    monkeypatch.setenv("HAREL_SQS_QUEUE", "stm.fifo")
+    monkeypatch.delenv("HAREL_SQS_ENDPOINT", raising=False)
     async with aiomoto.mock_aws():
         # create() makes the FIFO queue itself (idempotent), so no pre-seeding needed
         transport = await worker.build_transport_async()
@@ -164,10 +164,10 @@ async def test_worker_build_libsql_async(monkeypatch, tmp_path):
     from harel.engine.aio_store import AsyncLibsqlStore
     from harel.engine.aio_transport import AsyncLibsqlTransport
 
-    monkeypatch.setenv("STM_STORE_BACKEND", "libsql")
-    monkeypatch.setenv("STM_TRANSPORT_BACKEND", "libsql")
-    monkeypatch.setenv("STM_LIBSQL_DB", str(tmp_path / "wk.db"))
-    monkeypatch.delenv("STM_LIBSQL_SYNC_URL", raising=False)
+    monkeypatch.setenv("HAREL_STORE_BACKEND", "libsql")
+    monkeypatch.setenv("HAREL_TRANSPORT_BACKEND", "libsql")
+    monkeypatch.setenv("HAREL_LIBSQL_DB", str(tmp_path / "wk.db"))
+    monkeypatch.delenv("HAREL_LIBSQL_SYNC_URL", raising=False)
     store = await worker.build_store_async()
     transport = await worker.build_transport_async()
     assert isinstance(store, AsyncLibsqlStore) and isinstance(transport, AsyncLibsqlTransport)

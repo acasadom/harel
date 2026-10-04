@@ -19,14 +19,14 @@ claim's read-back sees its own write.
 ## Schema
 
 ```text
-CREATE TABLE IF NOT EXISTS messages (
+CREATE TABLE IF NOT EXISTS harel_transport_messages (
   seq          INTEGER PRIMARY KEY AUTOINCREMENT,  -- FIFO order + the Lease handle
   group_id     TEXT NOT NULL,                      -- the execution id (the exclusivity group)
   event        TEXT NOT NULL,                      -- the Event JSON
   locked_by    TEXT,                               -- lease token (worker_id:uuid) / "__parked__" / NULL
   lock_expiry  REAL)                               -- lease/park deadline; NULL/0 when free
 
-CREATE TABLE IF NOT EXISTS groups (
+CREATE TABLE IF NOT EXISTS harel_transport_groups (
   group_id        TEXT PRIMARY KEY,   -- one row per group that has messages
   last_claimed_at REAL NOT NULL DEFAULT 0.0,  -- epoch of last claim (0 = never claimed)
   priority        INT  NOT NULL DEFAULT 0)    -- set on first publish; 0–4
@@ -36,17 +36,17 @@ CREATE TABLE IF NOT EXISTS groups (
 
 ```text
 token = "{worker_id}:{uuid}"
-UPDATE messages SET locked_by = token, lock_expiry = now+visibility
+UPDATE harel_transport_messages SET locked_by = token, lock_expiry = now+visibility
   WHERE seq = (
-    SELECT m.seq FROM messages m JOIN groups g ON g.group_id = m.group_id
+    SELECT m.seq FROM harel_transport_messages m JOIN harel_transport_groups g ON g.group_id = m.group_id
     WHERE (m.locked_by IS NULL OR m.lock_expiry < ?)            -- free / lease lapsed (recovery)
       AND m.group_id NOT IN (                                   -- group has nothing in flight
-        SELECT group_id FROM messages WHERE locked_by IS NOT NULL AND lock_expiry >= ?)
+        SELECT group_id FROM harel_transport_messages WHERE locked_by IS NOT NULL AND lock_expiry >= ?)
       AND g.priority >= ?                                       -- priority floor (min_priority)
     ORDER BY g.last_claimed_at ASC, m.seq ASC LIMIT 1)         -- oldest-claimed group first (round-robin)
 -- if rows_affected == 0: nothing claimable -> return None
-SELECT seq, group_id, event FROM messages WHERE locked_by = token   -- read our leased row back
-UPDATE groups SET last_claimed_at = ? WHERE group_id = ?            -- record claim time (round-robin)
+SELECT seq, group_id, event FROM harel_transport_messages WHERE locked_by = token   -- read our leased row back
+UPDATE harel_transport_groups SET last_claimed_at = ? WHERE group_id = ?            -- record claim time (round-robin)
 return Lease(seq, group_id, event, token=token)
 ```
 
@@ -60,11 +60,11 @@ read-back.
 
 ```text
 publish(group_id, event, priority=0)
-    # INSERT INTO messages (group_id, event) VALUES (?, ?)
-    # INSERT OR IGNORE INTO groups (group_id, priority) VALUES (?, ?)  -- first publish sets priority
+    # INSERT INTO harel_transport_messages (group_id, event) VALUES (?, ?)
+    # INSERT OR IGNORE INTO harel_transport_groups (group_id, priority) VALUES (?, ?)  -- first publish sets priority
 claim(worker_id, visibility, min_priority=0)  # the serialized UPDATE + read-back above
-ack(lease)    # DELETE FROM messages WHERE seq = ?
-              # DELETE FROM groups WHERE group_id=? AND NOT EXISTS (SELECT 1 FROM messages WHERE group_id=?)
+ack(lease)    # DELETE FROM harel_transport_messages WHERE seq = ?
+              # DELETE FROM harel_transport_groups WHERE group_id=? AND NOT EXISTS (SELECT 1 FROM harel_transport_messages WHERE group_id=?)
 nack(lease, delay=0)          # delay>0 -> UPDATE locked_by="__parked__", lock_expiry=now+delay (park)
                               # delay==0 -> UPDATE locked_by=NULL, lock_expiry=0               (retry now)
 close()                       # close the HTTP session

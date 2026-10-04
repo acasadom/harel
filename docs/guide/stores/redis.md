@@ -14,18 +14,19 @@ test suite passes a `fakeredis` client instead of a real server. A convenience `
 does the lazy `import redis` for you:
 
 ```text
-RedisStore(client, prefix="stm")          # inject any redis-py-compatible client (incl. fakeredis)
+RedisStore(client, prefix="harel")        # inject any redis-py-compatible client (incl. fakeredis)
 RedisStore.from_url("redis://host:6379/0") # lazily imports redis, builds redis.Redis.from_url(...)
 ```
 
-Every key the store touches is namespaced by `prefix` (default `"stm"`) through the one-line helper:
+Every key the store touches is namespaced by `prefix` (default `"harel"`, see
+[naming and schema ownership](../stores.md#naming-and-schema-ownership)) through the one-line helper:
 
 ```text
 def _k(self, suffix: str) -> str:
     return f"{self._prefix}:{suffix}"
 ```
 
-So `_k("exe:abc")` is the key `stm:exe:abc`. Two `RedisStore`s with different prefixes share one
+So `_k("exe:abc")` is the key `harel:exe:abc`. Two `RedisStore`s with different prefixes share one
 Redis instance without colliding.
 
 ## Key space
@@ -87,7 +88,7 @@ There are two paths, picked by what the commit carries:
   expected one, and does the `SET` plus an optional dedupe `SADD` — **all in ONE atomic Lua
   round-trip**. The script's atomicity *replaces* the optimistic lock: there is no `WATCH` and no
   retry, it either commits or returns a conflict. A version mismatch comes back as an error reply
-  (`STM_CONFLICT:<current_version>`), surfaced by redis-py as a `ResponseError` and mapped to
+  (`HAREL_CONFLICT:<current_version>`), surfaced by redis-py as a `ResponseError` and mapped to
   `StoreConflict` (see [`_commit_cas`](#redis-fast-path-commit-cas) below). The Lua needs `lupa`
   installed for the `fakeredis`-backed tests; a real Redis runs Lua natively.
 - **The complex path — anything to enqueue** (emits / spawns / timers / trace) keeps the
@@ -207,7 +208,7 @@ def _commit_cas(self, exe, processed_event_id):
         self._commit_cas_script(
             keys=[key, self._k(f"processed:{exe.id}")],
             args=[exe.model_dump_json(), old, processed_event_id or ""])
-    except self._ResponseError as exc:          # STM_CONFLICT:<current_version>
+    except self._ResponseError as exc:          # HAREL_CONFLICT:<current_version>
         exe.version = old
         # ... parse the current version out of the message, raise StoreConflict
         raise StoreConflict(exe.id, expected=old, found=found) from None
@@ -216,7 +217,7 @@ def _commit_cas(self, exe, processed_event_id):
 The script itself does the version-CAS and the write atomically: read the stored version, compare
 it to `old` (allowing the fresh-insert case where there is no row and `old == 0`), and on match
 `SET` the Execution (+ a dedupe `SADD` if a processed event id was given). On a mismatch it returns
-`redis.error_reply('STM_CONFLICT:' .. current_version)`, which redis-py raises as a `ResponseError`;
+`redis.error_reply('HAREL_CONFLICT:' .. current_version)`, which redis-py raises as a `ResponseError`;
 `_commit_cas` rolls `exe.version` back to `old`, parses the current version out of the message, and
 re-raises as `StoreConflict`. Atomicity is what lets this drop the `WATCH` and the retry: the script
 is the compare-and-swap. (This is the one path that does need Lua, hence the `lupa` requirement for

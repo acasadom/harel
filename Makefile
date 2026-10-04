@@ -30,7 +30,7 @@ test-stack: ## Run each backend's tests directly against the real stack (needs D
 	$$DC test uv run pytest -m stack \
 	    test/integration/test_compose_stack.py -v || EXIT=1; \
 	echo "=== postgres ===" && \
-	$$DC -e STM_STORE_BACKEND=postgres -e STM_TRANSPORT_BACKEND=postgres \
+	$$DC -e HAREL_STORE_BACKEND=postgres -e HAREL_TRANSPORT_BACKEND=postgres \
 	    test uv run pytest -m stack \
 	    test/integration/test_postgres_store.py \
 	    test/integration/test_async_postgres.py \
@@ -40,9 +40,10 @@ test-stack: ## Run each backend's tests directly against the real stack (needs D
 	    "test/integration/test_store_purge.py::test_async_postgres_purge" \
 	    "test/integration/test_store_outbox.py::test_postgres_outbox" \
 	    "test/integration/test_store_outbox.py::test_async_postgres_outbox" \
-	    "test/integration/test_transport_contract.py::test_postgres_transport_contract" -v || EXIT=1; \
+	    "test/integration/test_transport_contract.py::test_postgres_transport_contract" \
+	    test/integration/test_schema_stack.py -v || EXIT=1; \
 	echo "=== rqlite ===" && \
-	$$DC -e STM_STORE_BACKEND=rqlite -e STM_TRANSPORT_BACKEND=rqlite \
+	$$DC -e HAREL_STORE_BACKEND=rqlite -e HAREL_TRANSPORT_BACKEND=rqlite \
 	    test uv run pytest -m stack \
 	    test/integration/test_rqlite_store.py \
 	    test/integration/test_async_rqlite.py \
@@ -52,9 +53,10 @@ test-stack: ## Run each backend's tests directly against the real stack (needs D
 	    "test/integration/test_store_purge.py::test_async_rqlite_purge" \
 	    "test/integration/test_store_outbox.py::test_rqlite_outbox" \
 	    "test/integration/test_store_outbox.py::test_async_rqlite_outbox" \
-	    "test/integration/test_transport_contract.py::test_rqlite_transport_contract" -v || EXIT=1; \
+	    "test/integration/test_transport_contract.py::test_rqlite_transport_contract" \
+	    test/integration/test_schema_stack.py -v || EXIT=1; \
 	echo "=== mongo ===" && \
-	$$DC -e STM_STORE_BACKEND=mongo -e STM_TRANSPORT_BACKEND=mongo \
+	$$DC -e HAREL_STORE_BACKEND=mongo -e HAREL_TRANSPORT_BACKEND=mongo \
 	    test uv run pytest -m stack \
 	    test/integration/test_mongo_store.py \
 	    test/integration/test_async_mongo.py \
@@ -66,7 +68,7 @@ test-stack: ## Run each backend's tests directly against the real stack (needs D
 	    "test/integration/test_store_outbox.py::test_async_mongo_outbox" \
 	    "test/integration/test_transport_contract.py::test_mongo_transport_contract" -v || EXIT=1; \
 	echo "=== dynamodb+sqs ===" && \
-	$$DC -e STM_STORE_BACKEND=dynamodb -e STM_TRANSPORT_BACKEND=sqs \
+	$$DC -e HAREL_STORE_BACKEND=dynamodb -e HAREL_TRANSPORT_BACKEND=sqs \
 	    test uv run pytest -m stack \
 	    test/integration/test_dynamodb_store.py \
 	    "test/integration/test_store_listing.py::test_dynamodb_listing" \

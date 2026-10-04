@@ -1,5 +1,8 @@
 # Place order — example
 
+> How it works — the machine, how it is built, sequence diagrams, and why it runs the way it
+> does: [the place_order page](https://acasadom.github.io/harel/examples/place_order.html) of the docs.
+
 The canonical e-commerce order lifecycle (the DDD "place order" example) modelled
 as an `harel` statechart. It's a runnable demo; `test/unit/examples/` checks its
 scenarios.

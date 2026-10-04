@@ -15,7 +15,7 @@ Written against dbos 3.x (transactions through a `SQLAlchemyDatasource`).
 Run (needs a Postgres + the `dbos` package, both ad-hoc):
     docker compose -f deploy/docker-compose.yml up -d postgres
     uv pip install dbos
-    STM_DBOS_DSN=postgresql://stm:stm@localhost:5432/dbosbench python bench/bench_dbos.py --n 500
+    HAREL_DBOS_DSN=postgresql://stm:stm@localhost:5432/dbosbench python bench/bench_dbos.py --n 500
 
 `--producers K` sends from K threads at once (default 1, one sequential client) — the
 counterpart of `bench_async.py --e2e --producers K`.
@@ -39,7 +39,7 @@ import psycopg
 from dbos import DBOS, DBOSClient, DBOSConfig, SetWorkflowID, SQLAlchemyDatasource
 from sqlalchemy import text
 
-DSN = os.environ.get("STM_DBOS_DSN", "postgresql://stm:stm@localhost:5432/dbosbench")
+DSN = os.environ.get("HAREL_DBOS_DSN", "postgresql://stm:stm@localhost:5432/dbosbench")
 _NEXT = {"Start": "Working", "Finish": "Done"}
 _PREV = {"Start": "Idle", "Finish": "Working"}
 _QUEUE = "fsm"  # the queue the multi-process mode's workflows run off

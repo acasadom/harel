@@ -1,7 +1,7 @@
 """AsyncPostgresStore / AsyncPostgresTransport contract, against a real Postgres.
 
 `stack`-marked (deselected by default): needs a running Postgres reachable via
-STM_POSTGRES_DSN (the compose `test` service, or an ad-hoc container). Mirrors the sync
+HAREL_POSTGRES_DSN (the compose `test` service, or an ad-hoc container). Mirrors the sync
 `test_postgres_store` but over the async backends: parity vs the sync oracle + a distributed
 pipeline (flat + orthogonal) over AsyncDistributedRunner + AsyncWorker.
 """
@@ -25,19 +25,15 @@ from harel.spec.states import Event  # noqa: E402
 
 
 def _dsn() -> str:
-    dsn = os.environ.get("STM_POSTGRES_DSN")
+    dsn = os.environ.get("HAREL_POSTGRES_DSN")
     if not dsn:
-        pytest.skip("STM_POSTGRES_DSN not set (not the postgres stack)")
+        pytest.skip("HAREL_POSTGRES_DSN not set (not the postgres stack)")
     return dsn
 
 
 async def _fresh_store() -> AsyncPostgresStore:
-    store = await AsyncPostgresStore.from_dsn(_dsn())
-    async with store._pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute("TRUNCATE executions, outbox, processed_events, timers, spawns")
-        await conn.commit()
-    return store
+    """Its own prefix, so its own (empty) tables."""
+    return await AsyncPostgresStore.from_dsn(_dsn(), prefix=f"s{uuid.uuid4().hex[:8]}")
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=[s["name"] for s in SCENARIOS])
@@ -71,12 +67,8 @@ machine M {
 
 @pytest.fixture
 async def pg_transport():
-    """Fresh AsyncPostgresTransport with an isolated prefix; truncates on setup."""
+    """A fresh AsyncPostgresTransport: its own prefix, so its own (empty) tables."""
     t = await AsyncPostgresTransport.from_dsn(_dsn(), prefix=f"t{uuid.uuid4().hex[:8]}")
-    async with t._pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute("TRUNCATE transport_messages, transport_groups")
-        await conn.commit()
     yield t
     await t.close()
 
@@ -85,10 +77,6 @@ async def test_async_postgres_distributed_pipeline():
     defn = definition_from_dsl(FLAT, "M")
     store = await _fresh_store()
     transport = await AsyncPostgresTransport.from_dsn(_dsn(), prefix=f"t{uuid.uuid4().hex[:8]}")
-    async with transport._pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute("TRUNCATE transport_messages, transport_groups")
-        await conn.commit()
     runner = AsyncDistributedRunner(store, transport, {defn.id: defn})
 
     exe = await runner.create(defn.id)  # start_on_create=True (default)
@@ -142,13 +130,13 @@ async def test_async_postgres_transport_min_priority_filters(pg_transport):
 
 
 async def test_async_postgres_transport_group_row_deleted_on_drain(pg_transport):
-    """When a group drains, harel_ack must DELETE the transport_groups row so a
+    """When a group drains, the ack function must DELETE the group row so a
     re-publish can set a fresh (higher) priority.  Without the DELETE, ON CONFLICT
     DO NOTHING leaves the stale priority and claim(min_priority=2) returns None."""
     await pg_transport.publish("G", Event(kind="e1"), priority=0)
     lease = await pg_transport.claim("w", visibility=30)
     assert lease is not None
-    await pg_transport.ack(lease)  # group drained: transport_groups row must be deleted
+    await pg_transport.ack(lease)  # group drained: its group row must be deleted
 
     await pg_transport.publish("G", Event(kind="e2"), priority=2)
 

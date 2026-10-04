@@ -12,7 +12,7 @@ with `isolation_level=None` (autocommit) so the code drives `BEGIN IMMEDIATE`/`C
 Two tables:
 
 ```text
-CREATE TABLE IF NOT EXISTS messages (
+CREATE TABLE IF NOT EXISTS harel_transport_messages (
   seq          INTEGER PRIMARY KEY AUTOINCREMENT,  -- monotonic id: FIFO order + the Lease handle
   group_id     TEXT NOT NULL,                      -- the execution id (the exclusivity group)
   event        TEXT NOT NULL,                      -- the Event JSON (event.model_dump_json())
@@ -20,16 +20,16 @@ CREATE TABLE IF NOT EXISTS messages (
   lock_expiry  REAL                                -- epoch when the lease (or park) ends; NULL when free
 )
 
-CREATE TABLE IF NOT EXISTS groups (
+CREATE TABLE IF NOT EXISTS harel_transport_groups (
   group_id       TEXT PRIMARY KEY,    -- one row per group that has messages
   last_claimed_at REAL NOT NULL DEFAULT 0.0,  -- epoch of last claim (0 = never claimed)
   priority        INT  NOT NULL DEFAULT 0     -- set on first publish; 0–4
 )
-CREATE INDEX IF NOT EXISTS groups_by_last_claimed ON groups (last_claimed_at)  -- the claim's walk
-CREATE INDEX IF NOT EXISTS messages_by_group ON messages (group_id, seq)       -- a group's head / in flight
+CREATE INDEX IF NOT EXISTS harel_transport_groups_by_last_claimed ON harel_transport_groups (last_claimed_at)  -- the claim's walk
+CREATE INDEX IF NOT EXISTS harel_transport_messages_by_group ON harel_transport_messages (group_id, seq)       -- a group's head / in flight
 ```
 
-`(locked_by, lock_expiry)` is the **lease**. The `groups` table drives **round-robin fairness**
+`(locked_by, lock_expiry)` is the **lease**. The `harel_transport_groups` table drives **round-robin fairness**
 and **priority filtering**: `claim` sorts by `last_claimed_at ASC` (oldest-claimed first) and
 filters by `priority >= min_priority`.
 
@@ -38,22 +38,22 @@ filters by `priority >= min_priority`.
 ```text
 BEGIN IMMEDIATE                                   -- take SQLite's write-lock: claims serialize
 SELECT m.seq, m.group_id, m.event
-  FROM groups g
-  JOIN messages m ON m.seq = (SELECT MIN(seq) FROM messages WHERE group_id = g.group_id)  -- its head
+  FROM harel_transport_groups g
+  JOIN harel_transport_messages m ON m.seq = (SELECT MIN(seq) FROM harel_transport_messages WHERE group_id = g.group_id)  -- its head
   WHERE g.priority >= ?                                      -- priority floor (min_priority)
     AND NOT EXISTS (                                         -- group has nothing in flight
-      SELECT 1 FROM messages x WHERE x.group_id = g.group_id
+      SELECT 1 FROM harel_transport_messages x WHERE x.group_id = g.group_id
         AND x.locked_by IS NOT NULL AND x.lock_expiry >= ?)  -- (a lapsed lease or park doesn't count)
   ORDER BY g.last_claimed_at, g.rowid LIMIT 1               -- oldest-claimed group first, ties by arrival
 -- if a row matched:
-UPDATE groups SET last_claimed_at = ? WHERE group_id = ?    -- record claim time (round-robin)
-UPDATE messages SET locked_by = ?, lock_expiry = now+visibility WHERE seq = ?
+UPDATE harel_transport_groups SET last_claimed_at = ? WHERE group_id = ?    -- record claim time (round-robin)
+UPDATE harel_transport_messages SET locked_by = ?, lock_expiry = now+visibility WHERE seq = ?
 COMMIT                                              -- (ROLLBACK on any error)
 ```
 
 Sorting by `g.last_claimed_at` makes groups that have never been claimed (`0`) always go
 first, in the order they arrived; `last_claimed_at` is set to `now` **on claim** so a
-just-serviced group yields to others. The query walks `groups` in that order on its index and
+just-serviced group yields to others. The query walks `harel_transport_groups` in that order on its index and
 stops at the first group with nothing in flight, taking its head (oldest message) — so a claim
 costs the same however long the backlog is. `AND g.priority >= ?` skips groups below the priority floor (pass `min_priority=0` for
 normal operation). Returns `Lease(seq, group_id, event)` or `None` when nothing is deliverable.
@@ -62,12 +62,12 @@ normal operation). Returns `Lease(seq, group_id, event)` or `None` when nothing 
 
 ```text
 publish(group_id, event, priority=0)
-    # INSERT INTO messages (group_id, event) VALUES (?, ?)
-    # INSERT OR IGNORE INTO groups (group_id, priority) VALUES (?, ?)  -- first publish sets priority
+    # INSERT INTO harel_transport_messages (group_id, event) VALUES (?, ?)
+    # INSERT OR IGNORE INTO harel_transport_groups (group_id, priority) VALUES (?, ?)  -- first publish sets priority
 claim(worker_id, visibility, min_priority=0)  # the BEGIN IMMEDIATE select-then-lease above
 ack(lease)
-    # DELETE FROM messages WHERE seq = ?
-    # DELETE FROM groups WHERE group_id = ? AND NOT EXISTS (SELECT 1 FROM messages WHERE group_id = ?)
+    # DELETE FROM harel_transport_messages WHERE seq = ?
+    # DELETE FROM harel_transport_groups WHERE group_id = ? AND NOT EXISTS (SELECT 1 FROM harel_transport_messages WHERE group_id = ?)
 nack(lease, delay=0)          # delay>0  -> UPDATE locked_by="__parked__", lock_expiry=now+delay  (park)
                               # delay==0 -> UPDATE locked_by=NULL, lock_expiry=NULL              (retry now)
 close()                       # close the connection

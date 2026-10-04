@@ -1,5 +1,8 @@
 # Webhook-driven payment flow — example (harel + FastAPI)
 
+> How it works — the machine, how it is built, sequence diagrams, and why it runs the way it
+> does: [the webhook_payment page](https://acasadom.github.io/harel/examples/webhook_payment.html) of the docs.
+
 A payment lifecycle driven entirely by **Stripe webhook events**, modelled as a
 statechart. The API creates one `Execution` per payment intent; each incoming
 webhook is mapped to a harel `Event` and advances the machine.
@@ -52,8 +55,9 @@ processed. The worker picks it up asynchronously.
 `GET /orders/{id}` is **eventually consistent** after a webhook: the state may
 lag a few milliseconds while the worker processes. This is acceptable here
 because Stripe doesn't poll the order state after delivering a webhook — the
-204 is all it needs. If your protocol requires immediate consistency after a
-POST, call `runner.process()` inline instead and return the updated state.
+204 is all it needs. If your protocol requires the new state in the response,
+process the event synchronously with a `DurableRunner` (`process()` returns it)
+instead of queueing it.
 
 ### Thin webhook handler
 

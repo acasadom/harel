@@ -6,6 +6,7 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 
+from harel.engine.schema import DEFAULT_PREFIX, Names
 from harel.engine.transport._base import Lease
 from harel.spec.states import Event
 
@@ -15,9 +16,9 @@ class MongoTransport:
     sibling of the SQL queues), no Redis. MongoDB has no native message groups,
     so — like `RedisTransport` — the per-group exclusivity is built by hand:
 
-    - ``{prefix}_messages`` — the FIFO, one document per message keyed by a
+    - ``<prefix>_transport_messages`` — the FIFO, one document per message keyed by a
       monotonic `_id` seq (oldest = smallest seq).
-    - ``{prefix}_locks`` — one document per group that has messages, the
+    - ``<prefix>_transport_locks`` — one document per group that has messages, the
       **ready-index + lock in one**: `available_at` is the epoch at which the
       group is next claimable (0 = now), and `token` is the current lease (for
       fencing). `claim` leases the lowest-`available_at <= now` group in ONE atomic
@@ -38,21 +39,39 @@ class MongoTransport:
     touch one group; the store's version/CAS is the backstop."""
 
     def __init__(
-        self, client: Any, db_name: str = "harel", prefix: str = "stm", clock: Callable[[], float] = time.time
+        self,
+        client: Any,
+        db_name: str = "harel",
+        clock: Callable[[], float] = time.time,
+        *,
+        prefix: str = DEFAULT_PREFIX,
+        create_schema: bool = True,
     ) -> None:
+        """`prefix` names its collections under `db_name` (see `harel.engine.schema`); with
+        `create_schema=False` the claim index is expected to exist."""
         from pymongo import ReturnDocument
 
+        names = Names(prefix)
         self._client = client
         self._db = client[db_name]
-        self._msgs = self._db[f"{prefix}_messages"]
-        self._locks = self._db[f"{prefix}_locks"]
-        self._counters = self._db[f"{prefix}_counters"]
+        self._msgs = self._db[names.messages]
+        self._locks = self._db[names.transport_locks]
+        self._counters = self._db[names.transport_counters]
         self._after = ReturnDocument.AFTER
         self._clock = clock
+        if create_schema:
+            self._locks.create_index("available_at")  # the claim index (O(log N + K))
 
     @classmethod
     def from_url(
-        cls, url: str, db_name: str = "harel", connect_retries: int = 30, retry_delay: float = 1.0
+        cls,
+        url: str,
+        db_name: str = "harel",
+        connect_retries: int = 30,
+        retry_delay: float = 1.0,
+        *,
+        prefix: str = DEFAULT_PREFIX,
+        create_schema: bool = True,
     ) -> "MongoTransport":
         import time as _time
 
@@ -64,9 +83,7 @@ class MongoTransport:
             try:
                 client: Any = pymongo.MongoClient(url)
                 client.admin.command("ping")
-                inst = cls(client, db_name)
-                inst._locks.create_index("available_at")  # the claim index (O(log N + K))
-                return inst
+                return cls(client, db_name, prefix=prefix, create_schema=create_schema)
             except PyMongoError as exc:
                 last = exc
                 _time.sleep(retry_delay)

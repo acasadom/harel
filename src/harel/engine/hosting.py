@@ -233,12 +233,16 @@ class SenderLogic:
         clock: Callable[[], float] = time.time,
         resolver: Optional[MachineResolver] = None,
         trace: bool = False,
+        shares_store_transaction: bool = False,
     ) -> None:
+        """`shares_store_transaction`: the transport writes in the store's transaction (see
+        `Transport`), so a failed `Start` publish reaches the caller."""
         self.definitions = definitions
         _register_submachines(self.definitions)
         self.resolver = resolver
         self._clock = clock
         self._trace = trace
+        self._shares_store_transaction = shares_store_transaction
 
     def _transport_logic(self, defn: Definition) -> TransportDriverLogic:
         return _HostedTransportDriverLogic(
@@ -289,10 +293,17 @@ class SenderLogic:
         itself, then publish just that entry and ack it. Not the generic relay, which would
         drain every pending entry fleet-wide. A failed publish or ack doesn't raise: the
         entry stays queued, so a later flush delivers it (a copy is dropped by the dedupe on
-        the Start's id) — and the caller keeps the id it needs to retry with `start()`."""
+        the Start's id) — and the caller keeps the id it needs to retry with `start()`. Unless
+        the transport shares the store's transaction: then the failure is the caller's, whose
+        transaction can't commit, and it is raised."""
         event = Event(kind="Start", data=dict(data or {}))
         stamp(exe, self._clock())
         seqs = yield from store("commit", exe, [(exe.id, event)])
+        if self._shares_store_transaction:
+            yield from transport("publish", exe.id, event, priority=exe.priority)
+            for seq in seqs:
+                yield from store("ack_outbox", seq)
+            return
         try:
             yield from transport("publish", exe.id, event, priority=exe.priority)
         except Exception:

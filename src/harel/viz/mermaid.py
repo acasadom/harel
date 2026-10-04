@@ -56,6 +56,13 @@ def _fmt_timeout(timeout: Union[int, dict]) -> str:
     return str(timeout)
 
 
+def _text(label: str) -> str:
+    """`label` safe after a ` : ` separator: a `:` in a state description or an edge label
+    is a syntax error in Mermaid 11's `stateDiagram-v2`, so it goes as the entity `#58;`
+    (drawn as a colon)."""
+    return label.replace(":", "#58;")
+
+
 def _desc_parts(node: Node) -> list[str]:
     """The descriptive lines for a node: hooks, timeout, outcome, invoke."""
     parts: list[str] = []
@@ -88,7 +95,7 @@ def _filter_text(ef: Optional[EventFilter]) -> Optional[str]:
 
 def _edge_suffix(ef: Optional[EventFilter], assignments: tuple = ()) -> str:
     """` : Event<br/>[guard]<br/>/ effect` — the UML `event [guard] / effect` label."""
-    parts = [p for p in (_filter_text(ef), effect_text(assignments)) if p]
+    parts = [_text(p) for p in (_filter_text(ef), effect_text(assignments)) if p]
     if len(parts) == 2:
         return f" : {parts[0]}<br/>/ {parts[1]}"
     if parts and ef is None:
@@ -105,7 +112,9 @@ def _emit_choice(source: Node, t: Transition, pad: str, out: list[str]) -> None:
     out.append(f"{pad}{src} --> {node}{_edge_suffix(t.event_filter, t.assignments)}")
     for i, (guard, target) in enumerate(choice.branches):
         assigns = choice.branch_assignments[i] if i < len(choice.branch_assignments) else ()
-        out.append(f"{pad}{node} --> {_nid(target)} : [{branch_text(guard)}]" + _branch_effect(assigns))
+        out.append(
+            f"{pad}{node} --> {_nid(target)} : [{_text(branch_text(guard))}]" + _branch_effect(assigns)
+        )
     if choice.default is not None:
         out.append(
             f"{pad}{node} --> {_nid(choice.default)} : else" + _branch_effect(choice.default_assignments)
@@ -115,7 +124,7 @@ def _emit_choice(source: Node, t: Transition, pad: str, out: list[str]) -> None:
 def _branch_effect(assignments: tuple) -> str:
     """A `choose` branch's own `set`, appended to its edge label (empty if it has none)."""
     effect = effect_text(assignments)
-    return "<br/>/ " + effect if effect else ""
+    return "<br/>/ " + _text(effect) if effect else ""
 
 
 def _emit_selector(comp: Node, source: Node, t: Transition, pad: str, out: list[str]) -> None:
@@ -129,7 +138,7 @@ def _emit_selector(comp: Node, source: Node, t: Transition, pad: str, out: list[
     for value, target_name in selector.mapper.items():
         target = resolve_relative(comp, target_name)
         assert target is not None, f"selector target {target_name!r} unresolved in {comp.full_path!r}"
-        out.append(f"{pad}{choice} --> {_nid(target)} : {fn}={value}")
+        out.append(f"{pad}{choice} --> {_nid(target)} : {fn}={_text(str(value))}")
     if selector.default is not None:
         target = resolve_relative(comp, selector.default)
         assert target is not None, f"selector else {selector.default!r} unresolved in {comp.full_path!r}"
@@ -154,7 +163,7 @@ def _emit_leaf(node: Node, pad: str, out: list[str]) -> None:
     if node.name != nid:
         out.append(f'{pad}state "{node.name}" as {nid}')
     for part in _desc_parts(node):
-        out.append(f"{pad}{nid} : {part}")
+        out.append(f"{pad}{nid} : {_text(part)}")
 
 
 def _composite_title(node: Node) -> str:

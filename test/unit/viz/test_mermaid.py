@@ -75,7 +75,7 @@ def test_header_first_line() -> None:
 def test_initial_and_leaf_description() -> None:
     lines = _lines(FLAT_NESTED, "M")
     assert "[*] --> Start" in lines
-    assert "Start : on enter: enter" in lines
+    assert "Start : on enter#58; enter" in lines
 
 
 def test_nested_composite_block() -> None:
@@ -115,8 +115,8 @@ def test_selector_choice() -> None:
 
 def test_timeout_and_outcome_on_leaf() -> None:
     lines = _lines(TIMED, "M")
-    assert "Wait : timeout: 30" in lines
-    assert "Done : outcome: success" in lines
+    assert "Wait : timeout#58; 30" in lines
+    assert "Done : outcome#58; success" in lines
 
 
 def test_corpus_renders_with_header() -> None:
@@ -180,3 +180,23 @@ machine M {
     lines = _lines(source, "M")
     assert "A --> B : Fail<br/>[context.retries >= context.max_retries]" in lines
     assert "A --> C : Fail<br/>[code > event.limit]" in lines
+
+
+def test_no_bare_colon_after_a_label_separator():
+    """Mermaid 11 rejects a `:` inside a state description or an edge label: it is drawn
+    from the entity `#58;` instead, wherever it comes from (a hook, a guard's string)."""
+    defn = definition_from_dsl(
+        """
+event Go { tag: string }
+machine M {
+  initial A
+  state A { on enter pkg.mod.act  timeout 5 }
+  final B success
+  from A to B on Go where tag == "a:b"
+}
+""",
+        "M",
+    )
+    for line in render(defn).splitlines():
+        if " : " in line:
+            assert ":" not in line.split(" : ", 1)[1], line

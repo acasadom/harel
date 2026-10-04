@@ -6,6 +6,7 @@ import asyncio
 from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, Status
+from harel.engine.schema import DEFAULT_PREFIX
 from harel.engine.store import OutboxEntry, SpawnEntry, TimerOp
 from harel.spec.states import Event
 
@@ -40,11 +41,19 @@ class AsyncLibsqlStore:
         auth_token: str = "",
         sync_url: Optional[str] = None,
         sync_interval: Optional[float] = None,
+        prefix: str = DEFAULT_PREFIX,
+        create_schema: bool = True,
     ) -> "AsyncLibsqlStore":
         from harel.engine.store import LibsqlStore
 
         sync = await asyncio.to_thread(
-            LibsqlStore, database, auth_token=auth_token, sync_url=sync_url, sync_interval=sync_interval
+            LibsqlStore,
+            database,
+            auth_token=auth_token,
+            sync_url=sync_url,
+            sync_interval=sync_interval,
+            prefix=prefix,
+            create_schema=create_schema,
         )
         return cls(sync)
 

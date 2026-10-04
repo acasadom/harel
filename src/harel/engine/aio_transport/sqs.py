@@ -34,7 +34,7 @@ class AsyncSqsTransport:
     async def create(
         cls,
         endpoint_url: Optional[str] = None,
-        queue_name: str = "stm.fifo",
+        queue_name: str = "harel.fifo",
         region: str = "us-east-1",
         connect_retries: int = 30,
         retry_delay: float = 1.0,

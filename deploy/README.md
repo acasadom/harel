@@ -48,41 +48,41 @@ Scale workers with `--scale worker=N`. Tail logs with
 
 ### Store backend: sqlite, redis, postgres, rqlite, mongo, libsql, or dynamodb
 
-`STM_STORE_BACKEND` selects the durable store (default `sqlite`, the shared
+`HAREL_STORE_BACKEND` selects the durable store (default `sqlite`, the shared
 volume above). The others are **all-network** (no shared filesystem); bring up
 the matching service:
 
 ```bash
 # pure-redis: state + queue both in Redis, no volume needed
-STM_STORE_BACKEND=redis docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 redis worker
-STM_STORE_BACKEND=redis docker compose -f deploy/docker-compose.yml run --rm test
+HAREL_STORE_BACKEND=redis docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 redis worker
+HAREL_STORE_BACKEND=redis docker compose -f deploy/docker-compose.yml run --rm test
 
 # postgres (distributed SQL):
-STM_STORE_BACKEND=postgres docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 redis postgres worker
-STM_STORE_BACKEND=postgres docker compose -f deploy/docker-compose.yml run --rm test
+HAREL_STORE_BACKEND=postgres docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 redis postgres worker
+HAREL_STORE_BACKEND=postgres docker compose -f deploy/docker-compose.yml run --rm test
 
 # rqlite (distributed SQLite, Raft):
-STM_STORE_BACKEND=rqlite docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 redis rqlite worker
-STM_STORE_BACKEND=rqlite docker compose -f deploy/docker-compose.yml run --rm test
+HAREL_STORE_BACKEND=rqlite docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 redis rqlite worker
+HAREL_STORE_BACKEND=rqlite docker compose -f deploy/docker-compose.yml run --rm test
 
 # mongo (document store): everything for one Execution in a single document,
 # so a commit is one atomic update_one (no replica set needed).
-STM_STORE_BACKEND=mongo docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 redis mongo worker
-STM_STORE_BACKEND=mongo docker compose -f deploy/docker-compose.yml run --rm test
+HAREL_STORE_BACKEND=mongo docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 redis mongo worker
+HAREL_STORE_BACKEND=mongo docker compose -f deploy/docker-compose.yml run --rm test
 
 # dynamodb (AWS serverless, on localstack): conditional writes are the CAS and
 # TransactWriteItems makes the commit atomic. Pairs with the sqs transport for an
 # all-AWS stack. No AWS account needed.
-STM_STORE_BACKEND=dynamodb docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 redis localstack worker
-STM_STORE_BACKEND=dynamodb docker compose -f deploy/docker-compose.yml run --rm test
+HAREL_STORE_BACKEND=dynamodb docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 redis localstack worker
+HAREL_STORE_BACKEND=dynamodb docker compose -f deploy/docker-compose.yml run --rm test
 
 # libsql (Turso's SQLite fork) — EXPERIMENTAL (local-file path tested in-process; the
-# Turso/sqld path below needs a Turso account / sqld server to validate). STM_LIBSQL_DB is a
+# Turso/sqld path below needs a Turso account / sqld server to validate). HAREL_LIBSQL_DB is a
 # local file on the shared /state volume (single machine, like sqlite). For distributed, set
-# STM_LIBSQL_SYNC_URL (+ STM_LIBSQL_AUTH_TOKEN) to a Turso/sqld primary — each worker keeps a
+# HAREL_LIBSQL_SYNC_URL (+ HAREL_LIBSQL_AUTH_TOKEN) to a Turso/sqld primary — each worker keeps a
 # synced embedded replica.
-STM_STORE_BACKEND=libsql docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 redis worker
-STM_STORE_BACKEND=libsql docker compose -f deploy/docker-compose.yml run --rm test
+HAREL_STORE_BACKEND=libsql docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 redis worker
+HAREL_STORE_BACKEND=libsql docker compose -f deploy/docker-compose.yml run --rm test
 ```
 
 sqlite / libsql-file = single machine (or one host's containers); redis / postgres / rqlite /
@@ -93,42 +93,42 @@ run against the real service.
 
 ### Transport backend (the queue)
 
-`STM_TRANSPORT_BACKEND` selects the event transport independently of the store
+`HAREL_TRANSPORT_BACKEND` selects the event transport independently of the store
 (`redis` default, or `postgres` / `rqlite` / `sqlite` / `mongo` / `libsql` / `sqs`). So you
 can run **no Redis at all** — one backend for both state and queue:
 
 ```bash
 # all-postgres: state + queue both on Postgres, no Redis
-STM_STORE_BACKEND=postgres STM_TRANSPORT_BACKEND=postgres \
+HAREL_STORE_BACKEND=postgres HAREL_TRANSPORT_BACKEND=postgres \
   docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 postgres worker
-STM_STORE_BACKEND=postgres STM_TRANSPORT_BACKEND=postgres \
+HAREL_STORE_BACKEND=postgres HAREL_TRANSPORT_BACKEND=postgres \
   docker compose -f deploy/docker-compose.yml run --rm test
 
-# all-rqlite likewise (STM_STORE_BACKEND=rqlite STM_TRANSPORT_BACKEND=rqlite, bring up `rqlite`)
+# all-rqlite likewise (HAREL_STORE_BACKEND=rqlite HAREL_TRANSPORT_BACKEND=rqlite, bring up `rqlite`)
 
-# all-libsql likewise (STM_STORE_BACKEND=libsql STM_TRANSPORT_BACKEND=libsql) — file mode on the
-# shared volume, or point STM_LIBSQL_SYNC_URL at Turso/sqld for distributed
+# all-libsql likewise (HAREL_STORE_BACKEND=libsql HAREL_TRANSPORT_BACKEND=libsql) — file mode on the
+# shared volume, or point HAREL_LIBSQL_SYNC_URL at Turso/sqld for distributed
 
 # all-mongo: state + queue both on MongoDB, no Redis. Bring up the `mongo` service.
-STM_STORE_BACKEND=mongo STM_TRANSPORT_BACKEND=mongo \
+HAREL_STORE_BACKEND=mongo HAREL_TRANSPORT_BACKEND=mongo \
   docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 mongo worker
-STM_STORE_BACKEND=mongo STM_TRANSPORT_BACKEND=mongo \
+HAREL_STORE_BACKEND=mongo HAREL_TRANSPORT_BACKEND=mongo \
   docker compose -f deploy/docker-compose.yml run --rm test
 
 # SQS FIFO via LocalStack (no AWS account): the queue's MessageGroupId is the
 # per-group exclusivity natively. Bring up the `localstack` service.
-STM_TRANSPORT_BACKEND=sqs \
+HAREL_TRANSPORT_BACKEND=sqs \
   docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 localstack worker
-STM_TRANSPORT_BACKEND=sqs docker compose -f deploy/docker-compose.yml run --rm test
+HAREL_TRANSPORT_BACKEND=sqs docker compose -f deploy/docker-compose.yml run --rm test
 
 # all-AWS serverless: DynamoDB store + SQS transport, both on localstack, no Redis.
-STM_STORE_BACKEND=dynamodb STM_TRANSPORT_BACKEND=sqs \
+HAREL_STORE_BACKEND=dynamodb HAREL_TRANSPORT_BACKEND=sqs \
   docker compose -f deploy/docker-compose.yml up -d --build --scale worker=3 localstack worker
-STM_STORE_BACKEND=dynamodb STM_TRANSPORT_BACKEND=sqs \
+HAREL_STORE_BACKEND=dynamodb HAREL_TRANSPORT_BACKEND=sqs \
   docker compose -f deploy/docker-compose.yml run --rm test
 ```
 
-Store and transport are independent: mix them (e.g. `STM_STORE_BACKEND=postgres`
+Store and transport are independent: mix them (e.g. `HAREL_STORE_BACKEND=postgres`
 with the default Redis transport) or unify on one backend.
 
 ### FaaS remote actions (Lambda on LocalStack)
@@ -151,6 +151,6 @@ docker compose -f deploy/docker-compose.yml up -d localstack
 docker compose -f deploy/docker-compose.yml run --rm test
 ```
 
-Skips automatically if the zip isn't built / `STM_LAMBDA_*` aren't set. The HTTP
+Skips automatically if the zip isn't built / `HAREL_LAMBDA_*` aren't set. The HTTP
 transport (OpenFaaS / Spin / Cloudflare / Knative) is covered deterministically by a
 real in-thread HTTP server in `test/unit/faas/` — no Docker needed.

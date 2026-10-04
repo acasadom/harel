@@ -41,7 +41,10 @@ locking, no WATCH/MULTI loop:
 ## Tables
 
 `_ensure_tables` creates seven tables (idempotent — a pre-existing table is fine), each prefixed by
-`prefix` via `_t(name)` → `"{prefix}_{name}"`, all `PAY_PER_REQUEST`:
+`prefix` (default `"harel"`) via `_t(name)` → `"{prefix}_{name}"`, all `PAY_PER_REQUEST`. With
+`create_schema=False` it creates none and checks the executions table is there instead — for tables
+made by infrastructure-as-code (see [naming and schema
+ownership](../stores.md#naming-and-schema-ownership)):
 
 ```text
 table         key schema                          contents
@@ -466,7 +469,7 @@ periodic retention job; worth knowing on a very large table.
 
 [`aio_store/dynamodb.py`](https://github.com/acasadom/harel/blob/main/src/harel/engine/aio_store/dynamodb.py) is `AsyncDynamoDBStore` —
 a **native-async** mirror over **aioboto3 / aiobotocore**, not a thread-pool wrapper. Every call is
-awaited on **one long-lived aiohttp-backed client**, so concurrent workers (`STM_CONCURRENCY`) issue
+awaited on **one long-lived aiohttp-backed client**, so concurrent workers (`HAREL_CONCURRENCY`) issue
 **real parallel DynamoDB requests** through the aiohttp connection pool rather than being bounded by a
 thread pool. The semantics are identical to the sync store — the same CAS conditions
 (`attribute_not_exists(id)` to insert, `version = :ov` to update), the same `TransactWriteItems`
@@ -479,7 +482,7 @@ Build it with `await AsyncDynamoDBStore.create(...)`, which owns the client thro
 ```text
 stack = AsyncExitStack()
 client = await stack.enter_async_context(aioboto3.Session().client("dynamodb", **kwargs))
-inst = cls(client, prefix)
+inst = cls(client, prefix=prefix)
 inst._stack = stack
 ...
 await inst._ensure_tables()

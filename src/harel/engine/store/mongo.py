@@ -7,6 +7,7 @@ import re
 from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
+from harel.engine.schema import DEFAULT_PREFIX, Names
 from harel.engine.store._base import (
     DEFAULT_TRACE_MAX,
     OutboxEntry,
@@ -41,24 +42,32 @@ class MongoStore:
     growing `data` blob is not dragged through every queue/timer scan.
 
     The client is injected (duck-typed), so `pymongo` stays an optional dependency
-    and tests use mongomock. Collections live under `db_name`: ``executions`` (the
-    documents) + ``counters`` (the monotonic outbox/spawn seq allocator)."""
+    and tests use mongomock. Collections live under `db_name`, named by `prefix`: ``<prefix>_executions``
+    (the documents) + ``<prefix>_counters`` (the monotonic outbox/spawn seq allocator)."""
 
-    def __init__(self, client: Any, db_name: str = "harel") -> None:
+    def __init__(self, client: Any, db_name: str = "harel", *, prefix: str = DEFAULT_PREFIX) -> None:
+        """`prefix` names its collections under `db_name` (see `harel.engine.schema`)."""
         from pymongo import ReturnDocument
         from pymongo.errors import DuplicateKeyError
 
         self._client = client
         self._db = client[db_name]
-        self._exes = self._db["executions"]
-        self._counters = self._db["counters"]
+        names = Names(prefix)
+        self._exes = self._db[names.executions]
+        self._counters = self._db[names.counters]
         self._after = ReturnDocument.AFTER
         self._DuplicateKeyError = DuplicateKeyError
         self.trace_max = DEFAULT_TRACE_MAX
 
     @classmethod
     def from_url(
-        cls, url: str, db_name: str = "harel", connect_retries: int = 30, retry_delay: float = 1.0
+        cls,
+        url: str,
+        db_name: str = "harel",
+        connect_retries: int = 30,
+        retry_delay: float = 1.0,
+        *,
+        prefix: str = DEFAULT_PREFIX,
     ) -> "MongoStore":
         """Convenience constructor; imports `pymongo` lazily (the optional dep).
         Pings the server, retrying so a worker starting alongside Mongo (compose)
@@ -73,7 +82,7 @@ class MongoStore:
             try:
                 client: Any = pymongo.MongoClient(url)
                 client.admin.command("ping")
-                return cls(client, db_name)
+                return cls(client, db_name, prefix=prefix)
             except PyMongoError as exc:
                 last = exc
                 time.sleep(retry_delay)

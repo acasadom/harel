@@ -206,7 +206,7 @@ def _cmd_purge(args: argparse.Namespace) -> int:
 
     try:
         store = build_store()
-    except ValueError as exc:  # a backend setting missing from the STM_STORE_* environment
+    except ValueError as exc:  # a backend setting missing from the HAREL_STORE_* environment
         print(f"error: {exc}", file=sys.stderr)
         return 1
     try:
@@ -280,7 +280,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser(
         "purge",
-        help="permanently delete finished executions older than an age (store from STM_STORE_* env)",
+        help="permanently delete finished executions older than an age (store from HAREL_STORE_* env)",
     )
     p.add_argument(
         "--older-than",

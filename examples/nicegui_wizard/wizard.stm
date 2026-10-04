@@ -4,7 +4,7 @@
 #   Profile --Back--> Account               Verify --Back--> Profile
 #
 # The point of the example: this Execution is checkpointed to a DURABLE store
-# (SqliteStore), so the wizard survives a browser reload AND a server restart —
+# (an AsyncSqliteStore), so the wizard survives a browser reload AND a server restart —
 # it resumes on the exact step the user had reached, with the data they typed.
 # A statechart on the server is something an in-browser XState cannot do.
 #

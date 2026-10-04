@@ -76,7 +76,7 @@ check the machine before running.
 
 `harel purge` permanently deletes the finished execution trees (root, regions, invokes and all
 their store rows) whose root finished at least `AGE` ago — `30d`, `12h`, `90m`, `45s`, `2w`. It
-works on the **real store**, configured from the same `STM_STORE_*` environment as the worker and
+works on the **real store**, configured from the same `HAREL_STORE_*` environment as the worker and
 the monitor, so run it as a scheduled job alongside the workers rather than inside them:
 
 ```text

@@ -178,7 +178,7 @@ plain.)
 3. **the dedupe record** — `processed_event_id`, so an at-least-once redelivery is a no-op.
 4. **the timers** — schedule/cancel, so a scheduled timer can never be lost (no dual-write).
 5. **the spawns** — the orthogonal child-creation intents.
-6. **the trace step** *(opt-in)* — one timeline entry when tracing is on (`STM_TRACE`), so the
+6. **the trace step** *(opt-in)* — one timeline entry when tracing is on (`HAREL_TRACE`), so the
    monitor timeline is recorded in the same atomic write; off by default (see [stores](stores)).
 
 Either all of it commits or none does. This is the property that makes a crash safe: the state
@@ -464,7 +464,7 @@ in one round instead of sequentially.
 | When | Call | What is written |
 |---|---|---|
 | create | `start()` → `commit` | Execution v1, initial region spawns, entry-hook timers |
-| each event | `_run_flow` → `commit` | Execution v+1 (CAS), outbox emits, dedupe id, timer ops, spawns, trace step (if `STM_TRACE`) |
+| each event | `_run_flow` → `commit` | Execution v+1 (CAS), outbox emits, dedupe id, timer ops, spawns, trace step (if `HAREL_TRACE`) |
 | relay | `_create_spawn_flow` → `commit` | each child Execution v1 (idempotent) |
 | control plane | `control.*` → `commit` | status change (+ a cooperative `Cancel` emit), via CAS |
 | timer fire | sweep → `process` → `commit` | the `Timeout` processed like any event; timer row deleted |

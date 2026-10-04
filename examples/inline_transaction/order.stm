@@ -1,0 +1,22 @@
+# An order whose state commits with the shop's own writes, in one transaction.
+#
+#   Reserving --(auto)--> AwaitingPayment --Pay--> Paid
+#
+# Entering Reserving takes the stock (in the shop's own table): if there isn't enough, the
+# action raises, and the whole order — the shop's row, the stock, the machine — rolls back.
+event Pay {}
+
+machine order {
+  context {
+    item: string
+    qty: int
+  }
+
+  initial Reserving
+  state Reserving { on enter examples.inline_transaction.actions.reserve_stock }
+  state AwaitingPayment {}
+  final Paid success
+
+  from Reserving to AwaitingPayment
+  from AwaitingPayment to Paid on Pay
+}

@@ -23,7 +23,7 @@ DEFAULT_TRACE_MAX = 200  # ring size: the store keeps only the last N trace step
 # instead of the WATCH + GET + MULTI/EXEC dance (~3 round-trips). Atomicity replaces optimistic
 # locking — the script either commits or returns a conflict, with no retry. Complex commits
 # (anything to enqueue) still take the battle-tested WATCH/MULTI path. On conflict it returns an
-# error reply `STM_CONFLICT:<current_version>` (raised as a ResponseError, mapped to StoreConflict).
+# error reply `HAREL_CONFLICT:<current_version>` (raised as a ResponseError, mapped to StoreConflict).
 # KEYS[1]=exe key, KEYS[2]=processed set; ARGV = exe_json (version pre-bumped), old_version,
 # processed_event_id ('' if none).
 _COMMIT_CAS_LUA = """
@@ -32,7 +32,7 @@ local curv = false
 if cur then curv = cjson.decode(cur)['version'] end
 local old = tonumber(ARGV[2])
 if not (cur == false and old == 0) and curv ~= old then
-  return redis.error_reply('STM_CONFLICT:' .. tostring(curv))
+  return redis.error_reply('HAREL_CONFLICT:' .. tostring(curv))
 end
 redis.call('SET', KEYS[1], ARGV[1])
 if ARGV[3] ~= '' then
@@ -41,50 +41,22 @@ end
 return 1
 """
 
-# Postgres fast-path commit as a PL/pgSQL function (shared by the sync + async backends), the
-# analog of `_COMMIT_CAS_LUA`. For a state-only event (no emits/spawns/timers/trace) it does the
-# version-CAS + write (+ dedupe) in ONE server-side round-trip instead of UPDATE + (SELECT/INSERT)
-# + INSERT. Returns true on commit, false on a version conflict (no RAISE, so the txn isn't aborted
-# — the caller rolls back cleanly and raises StoreConflict). Created idempotently in the store's
-# schema setup under a pg_advisory_xact_lock (concurrent worker startup must not collide on the
-# CREATE OR REPLACE). Complex commits still take the multi-statement WATCH-free path.
-_PG_COMMIT_FN = """
-CREATE OR REPLACE FUNCTION harel_commit_cas(p_id text, p_defn text, p_data text, p_old bigint, p_event text)
-RETURNS boolean AS $$
-DECLARE n int; row_exists boolean;
-BEGIN
-  UPDATE executions SET data = p_data, version = p_old + 1 WHERE id = p_id AND version = p_old;
-  GET DIAGNOSTICS n = ROW_COUNT;
-  IF n = 0 THEN
-    SELECT EXISTS (SELECT 1 FROM executions WHERE id = p_id) INTO row_exists;
-    IF p_old = 0 AND NOT row_exists THEN
-      INSERT INTO executions (id, definition_id, data, version) VALUES (p_id, p_defn, p_data, 1);
-    ELSE
-      RETURN false;
-    END IF;
-  END IF;
-  IF p_event <> '' THEN
-    INSERT INTO processed_events (execution_id, event_id) VALUES (p_id, p_event) ON CONFLICT DO NOTHING;
-  END IF;
-  RETURN true;
-END; $$ LANGUAGE plpgsql;
-"""
-
 # The rows keyed by one Execution in the SQL-family schema (shared by the sqlite/libsql/rqlite/
 # postgres backends, sync + async): `purge` deletes them in the same transaction as the
-# Execution row. `?` placeholders; the Postgres backends swap in `%s`.
+# Execution row. Templates (`schema.Names.sql`) with `?` placeholders; the Postgres backends swap
+# in `%s`.
 _PURGE_COMPANIONS_SQL = (
-    "DELETE FROM processed_events WHERE execution_id = ?",
-    "DELETE FROM trace WHERE execution_id = ?",
-    "DELETE FROM timers WHERE execution_id = ?",
-    "DELETE FROM outbox WHERE target_id = ?",
-    "DELETE FROM spawns WHERE parent_id = ?",
+    "DELETE FROM {processed_events} WHERE execution_id = ?",
+    "DELETE FROM {trace} WHERE execution_id = ?",
+    "DELETE FROM {timers} WHERE execution_id = ?",
+    "DELETE FROM {outbox} WHERE target_id = ?",
+    "DELETE FROM {spawns} WHERE parent_id = ?",
 )
 
 # `ids_with_prefix` for the SQL family: LIKE with the pattern metacharacters escaped (`?`
 # placeholder; the Postgres backends swap in `%s`). SQLite's LIKE is case-insensitive, so it
 # may over-match — `ids_with_prefix` allows that.
-_IDS_WITH_PREFIX_SQL = "SELECT id FROM executions WHERE id LIKE ? ESCAPE '\\'"
+_IDS_WITH_PREFIX_SQL = "SELECT id FROM {executions} WHERE id LIKE ? ESCAPE '\\'"
 
 
 def _like_prefix(prefix: str) -> str:
@@ -92,7 +64,7 @@ def _like_prefix(prefix: str) -> str:
     return prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
 
-# one advisory-lock key for all harel schema setup (tables + functions), so concurrent
+# one advisory-lock key for all harel schema setup (tables + functions, any prefix), so concurrent
 # connections opening at once serialize their CREATE OR REPLACE FUNCTION (avoids pg_proc clashes).
 _PG_SCHEMA_LOCK = 7723019
 
@@ -138,9 +110,15 @@ _SUMMARY_COLUMNS_PG = (
 
 
 def _listing_sql_sqlite(
-    status: Optional[Iterable[Status]], definition_id: Optional[str], roots_only: bool, limit: int, off: int
+    table: str,
+    status: Optional[Iterable[Status]],
+    definition_id: Optional[str],
+    roots_only: bool,
+    limit: int,
+    off: int,
 ) -> tuple[str, tuple]:
-    """The listing query for the SQLite dialect (SQLite, libSQL, rqlite) and its params."""
+    """The listing query over the executions `table` for the SQLite dialect (SQLite, libSQL,
+    rqlite) and its params."""
     where, params = ["1=1"], []
     if definition_id is not None:
         where.append("definition_id = ?")
@@ -152,16 +130,22 @@ def _listing_sql_sqlite(
     if roots_only:
         where.append("json_extract(data,'$.parent_id') IS NULL")
     sql = (
-        f"SELECT {_SUMMARY_COLUMNS_SQLITE} FROM executions "
+        f"SELECT {_SUMMARY_COLUMNS_SQLITE} FROM {table} "
         f"WHERE {' AND '.join(where)} ORDER BY id LIMIT ? OFFSET ?"
     )
     return sql, (*params, limit + 1, off)
 
 
 def _listing_sql_pg(
-    status: Optional[Iterable[Status]], definition_id: Optional[str], roots_only: bool, limit: int, off: int
+    table: str,
+    status: Optional[Iterable[Status]],
+    definition_id: Optional[str],
+    roots_only: bool,
+    limit: int,
+    off: int,
 ) -> tuple[str, tuple]:
-    """The listing query for Postgres (`data` is TEXT, cast to jsonb) and its params."""
+    """The listing query over the executions `table` for Postgres (`data` is TEXT, cast to
+    jsonb) and its params."""
     where: list[str] = ["TRUE"]
     params: list = []
     if definition_id is not None:
@@ -173,7 +157,7 @@ def _listing_sql_pg(
     if roots_only:
         where.append("(data::jsonb->>'parent_id') IS NULL")
     sql = (
-        f"SELECT {_SUMMARY_COLUMNS_PG} FROM executions "
+        f"SELECT {_SUMMARY_COLUMNS_PG} FROM {table} "
         f"WHERE {' AND '.join(where)} ORDER BY id LIMIT %s OFFSET %s"
     )
     return sql, (*params, limit + 1, off)
