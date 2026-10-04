@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.1 — 2026-10-04
 
 ### Changed
 
@@ -8,6 +8,10 @@
   there and their async counterparts in `harel.engine.aio.control` run the same flows, and so
   do the runners' `cancel`, `terminate`, `suspend`, `resume`, `purge` and `redrive`. Their
   signatures and behaviour are unchanged.
+- The execution models guide separates a runner's semantics (wait for the result, or hand it to
+  a worker) from its execution model (caller's thread, background loop, coroutines), with a
+  sequence diagram for each and a table of every combination. The architecture and distribution
+  guides describe the driver as flows.
 
 ### Fixed
 
