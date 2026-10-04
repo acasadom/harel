@@ -41,6 +41,12 @@
   `store_schema` / `transport_schema`) returns the statements the SQL backends run, for a
   migration tool to apply; `SCHEMA_VERSION` changes whenever the schema does.
 - The worker reads `HAREL_PREFIX` and `HAREL_CREATE_SCHEMA`.
+- **An examples section in the docs**: each example's machine, how it is built, its sequence
+  diagrams, and the semantics and execution model it runs with, and why. The diagrams of the
+  machines are checked against their `.stm` in CI.
+- **The `inline_transaction` example**: a shop whose orders commit in its own transaction —
+  `DurableRunner(execution="inline", on_action_error="raise")` over `ConnectionStore`, a store
+  on the caller's connection written on `harel.engine.store.base`.
 - **`shares_store_transaction`**, an optional attribute of a transport whose writes go into the
   store's transaction (the caller's connection): `create()` then lets a failed publish of the
   new execution's `Start` reach the caller instead of leaving it queued in the outbox.

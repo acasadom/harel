@@ -121,3 +121,41 @@ def test_monitor_demo_seed(tmp_path):
         assert any(step.get("assigned") for step in store.read_trace("order-delivered"))
     finally:
         store.close()
+
+
+# --- inline_transaction: the machine's advance in the shop's own transaction ----------------
+def test_inline_transaction_commits_and_rolls_back_with_the_shop():
+    from examples.inline_transaction import actions
+    from examples.inline_transaction.run import open_shop, pay, place_order
+
+    conn, runner = open_shop()
+
+    def state(order_id):
+        row = conn.execute("SELECT status FROM orders WHERE id = ?", (order_id,)).fetchone()
+        exe = runner.store.load(order_id)
+        (stock,) = conn.execute("SELECT available FROM stock WHERE item = 'widget'").fetchone()
+        return (row[0] if row else None, exe.active_path if exe else None, stock)
+
+    place_order(conn, runner, "o1", "widget", 2)
+    assert state("o1") == ("placed", "AwaitingPayment", 3)
+    with pytest.raises(actions.OutOfStock):
+        place_order(conn, runner, "o2", "widget", 9)
+    assert state("o2") == (None, None, 3)  # the row, the stock and the execution all rolled back
+    pay(conn, runner, "o1")
+    assert state("o1") == ("paid", "Paid", 3)
+
+
+def test_inline_transaction_store_meets_the_contracts():
+    import sqlite3
+
+    from examples.inline_transaction.store import ConnectionStore
+    from harel.engine.schema import store_schema
+    from harel.testing import assert_listing_contract, assert_outbox_contract, assert_purge_contract
+
+    conn = sqlite3.connect(":memory:")
+    for statement in store_schema("sqlite"):
+        conn.execute(statement)
+    store = ConnectionStore(conn)
+    assert_listing_contract(store, ordered=True)
+    assert_purge_contract(store)
+    assert_outbox_contract(store)

@@ -135,19 +135,23 @@ Delivered -> Delivered
 DONE success
 ```
 
-A complete, runnable example (nested states, a selector-driven retry, actions) lives in
-[`examples/place_order/`](examples/place_order/) — run it with
-`uv run python -m examples.place_order.run`.
+Six runnable examples live in [`examples/`](examples/) — an order lifecycle, a
+webhook-driven payment with a worker, a NiceGUI form, a shop whose orders commit in its own
+transaction — each explained, with its sequence diagrams and why it runs the way it does, in
+the [examples section](docs/examples/index.md) of the docs.
 
 ## Documentation
 
 Read the docs online at **[acasadom.github.io/harel](https://acasadom.github.io/harel/)** — a
-step-by-step **tutorial** (14 stages that grow one example from a turnstile to durable,
+step-by-step **tutorial** (17 stages that grow one example from a turnstile to durable,
 distributed submachines) plus operations and reference guides. The source lives under
 [`docs/`](docs/); build the HTML locally with `make docs`. Every code example in the docs is
 executed in CI, so it stays in sync with the engine.
 
 - **[Tutorial](docs/tutorial/01-getting-started.md)** — start here; the model, one step at a time.
+- **[Examples](docs/examples/index.md)** — six applications, each with how it runs and why.
+- **[Execution models](docs/guide/execution.md)** — synchronous or asynchronous semantics, in the
+  caller's thread, on a background loop, or as coroutines.
 - **[Architecture](docs/guide/architecture.md)** — how harel works inside: the pure engine, the
   effect protocol, the single atomic checkpoint, in-memory vs. distributed (with diagrams).
 - Reference: **[DSL](docs/guide/dsl-reference.md)** · **[CLI](docs/guide/cli.md)** · **[Public API](docs/guide/api-reference.md)** · **[Visualization](docs/guide/visualization.md)**.

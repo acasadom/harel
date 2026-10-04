@@ -1,5 +1,8 @@
 # Durable wizard — example (harel + NiceGUI)
 
+> How it works — the machine, how it is built, sequence diagrams, and why it runs the way it
+> does: [the nicegui_wizard page](https://acasadom.github.io/harel/examples/nicegui_wizard.html) of the docs.
+
 A multi-step onboarding wizard whose **state lives on the server, in a durable
 store** — so it survives a browser reload *and* a server restart and resumes on the
 exact step the user had reached. The whole UI flow is one statechart (`wizard.stm`);
