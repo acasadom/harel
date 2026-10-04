@@ -20,6 +20,15 @@
   and constructors); `PostgresTransport`'s `prefix`, accepted and ignored before, now names its
   tables.
 
+### Fixed
+
+- A sync runner (`DurableRunner`, `DistributedRunner`, `Worker`, `Driver`) called from inside
+  a running event loop raises in the background model too, on every call, as documented: once
+  the shared background loop was up, the call ran instead — blocking the caller's loop for its
+  whole duration.
+- The NiceGUI example uses the async API (`AsyncDurableRunner` over an `AsyncSqliteStore`,
+  `async` handlers): NiceGUI calls its handlers on its event loop, which every click blocked.
+
 ### Added
 
 - **`prefix` on every persistent backend** — store and transport, sync and async — so several

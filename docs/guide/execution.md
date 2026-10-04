@@ -132,7 +132,9 @@ For the sync runners, `execution=` picks the model:
 | `"inline"` | in the caller's own thread, with no event loop | sync only | called right there; a coroutine action is refused |
 
 It is taken by `DurableRunner`, `DistributedRunner`, its `Worker`, and the bare in-memory
-`Driver`. For async code, use the async runners directly.
+`Driver`. For async code — an asyncio web framework's handlers, a notebook — use the async
+runners directly: a sync runner called from inside a running event loop raises, in either
+model, rather than block that loop for the whole call.
 
 ## Inline: inside the caller's transaction
 

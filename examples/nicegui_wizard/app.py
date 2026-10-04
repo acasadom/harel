@@ -3,29 +3,53 @@
     pip install -r examples/nicegui_wizard/requirements.txt
     python -m examples.nicegui_wizard.app
 
-The wizard's state lives in a *durable* `SqliteStore` (`wizard.db`), keyed to the
-browser session (`app.storage.user`). So it survives a browser reload *and* a server
-restart: stop the process, start it again, refresh — you are back on the exact step
-you had reached, with the data you had typed. The whole UI flow is one `.stm`
-statechart (see `wizard.stm`); each button click is just `runner.process(...)`.
+The wizard's state lives in a *durable* SQLite store (`wizard.db`), keyed to the browser
+session (`app.storage.user`). So it survives a browser reload *and* a server restart: stop
+the process, start it again, refresh — you are back on the exact step you had reached, with
+the data you had typed. The whole UI flow is one `.stm` statechart (see `wizard.stm`); each
+button click is just `await (await runner()).process(...)`.
 
-The glue is small on purpose: load-or-create the Execution for this session, render
-the step named by `exe.active_path`, and turn each click into an `Event`.
+NiceGUI runs on an asyncio event loop, so this uses harel's async API: `AsyncDurableRunner`
+over an `AsyncSqliteStore`, awaited from `async` handlers. While one click waits on the
+store, the loop keeps serving every other browser.
+
+The glue is small on purpose: load-or-create the Execution for this session, render the step
+named by `exe.active_path`, and turn each click into an `Event`.
 """
 
+import asyncio
 from pathlib import Path
+from typing import Optional
 
 from nicegui import app, ui
 
-from harel import DurableRunner, Event, SqliteStore, definition_from_dsl_file
+from harel import Event, definition_from_dsl_file
+from harel.engine.aio.durable import AsyncDurableRunner
+from harel.engine.aio_store import AsyncSqliteStore
 from harel.viz import mermaid
 
 WIZARD_STM = Path(__file__).parent / "wizard.stm"
 DB_PATH = Path(__file__).parent / "wizard.db"
 
 defn = definition_from_dsl_file(WIZARD_STM, "wizard")
-store = SqliteStore(DB_PATH)  # durable: survives a process restart
-runner = DurableRunner(store, {defn.id: defn})
+_runner: Optional[AsyncDurableRunner] = None
+_opening = asyncio.Lock()
+
+
+async def runner() -> AsyncDurableRunner:
+    """The runner, built on first use: its async store opens on NiceGUI's own loop."""
+    global _runner
+    async with _opening:
+        if _runner is None:
+            store = await AsyncSqliteStore.create(str(DB_PATH))  # durable: survives a restart
+            _runner = AsyncDurableRunner(store, {defn.id: defn})
+    return _runner
+
+
+@app.on_shutdown
+async def _close() -> None:
+    if _runner is not None:
+        await _runner.store.close()
 
 
 def _simple_diagram(definition) -> str:
@@ -44,38 +68,39 @@ def _simple_diagram(definition) -> str:
 DIAGRAM = _simple_diagram(defn)  # the statechart, drawn beside the form
 
 
-def _execution():
+async def _execution():
     """Load this browser session's wizard, or start a fresh one."""
     exe_id = app.storage.user.get("exe_id")
-    exe = store.load(exe_id) if exe_id else None
+    harel = await runner()
+    exe = await harel.store.load(exe_id) if exe_id else None
     if exe is None:
-        exe = runner.create(defn.id)
+        exe = await harel.create(defn.id)
         app.storage.user["exe_id"] = exe.id
     return exe
 
 
-def _advance(exe_id: str, kind: str, **data) -> None:
+async def _advance(exe_id: str, kind: str, **data) -> None:
     """Send a domain event into the Execution, then redraw."""
-    runner.process(exe_id, Event(kind=kind, data=data))
-    wizard_ui.refresh()
+    await (await runner()).process(exe_id, Event(kind=kind, data=data))
+    await wizard_ui.refresh()
 
 
-def _verify(exe_id: str, typed: str) -> None:
+async def _verify(exe_id: str, typed: str) -> None:
     """Send the typed code; the machine itself only completes when it matches."""
-    exe = runner.process(exe_id, Event(kind="Verified", data={"code": typed or ""}))
+    exe = await (await runner()).process(exe_id, Event(kind="Verified", data={"code": typed or ""}))
     if exe.active_path == "Verify":
         ui.notify("That code does not match.", type="warning")
-    wizard_ui.refresh()
+    await wizard_ui.refresh()
 
 
-def _reset() -> None:
+async def _reset() -> None:
     app.storage.user.pop("exe_id", None)
-    wizard_ui.refresh()
+    await wizard_ui.refresh()
 
 
 @ui.refreshable
-def wizard_ui() -> None:
-    exe = _execution()
+async def wizard_ui() -> None:
+    exe = await _execution()
     ctx = exe.context
     step = exe.active_path
 
@@ -107,13 +132,13 @@ def wizard_ui() -> None:
 
 
 @ui.page("/")
-def index() -> None:
+async def index() -> None:
     ui.label("Durable onboarding wizard").classes("text-xl font-bold")
     ui.label("Reload the page — or restart the server — and you resume right here.").classes(
         "text-sm text-gray-500"
     )
     with ui.row().classes("gap-8 items-start mt-4"):
-        wizard_ui()
+        await wizard_ui()
         with ui.card():
             ui.label("The statechart").classes("text-xs text-gray-500")
             ui.mermaid(DIAGRAM)

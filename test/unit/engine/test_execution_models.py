@@ -183,3 +183,30 @@ def test_the_bare_driver_inline_refuses_an_async_store():
         Driver(defn, AsyncDictStore(), execution="inline")
     with pytest.raises(ValueError, match="execution must be one of"):
         Driver(defn, execution="threads")
+
+
+@pytest.mark.parametrize("execution", ["background", "inline"])
+def test_a_call_from_inside_a_running_loop_is_refused_every_time(execution, actions):
+    """Built (and used once) outside any loop, then called from a coroutine: refused, not run
+    — blocking there would freeze that loop for the whole call."""
+    import asyncio
+
+    defn = _defn()
+    durable = DurableRunner(DictStore(), {defn.id: defn}, execution=execution)
+    exe = durable.create(defn.id)
+    distributed = DistributedRunner(
+        DictStore(), SqliteTransport(":memory:"), {defn.id: defn}, execution=execution
+    )
+    driver = Driver(defn, execution=execution)
+
+    async def from_a_coroutine():
+        for call in (
+            lambda: durable.process(exe.id, Event(kind="Go")),
+            lambda: distributed.create(defn.id),
+            lambda: driver.get(exe.id),
+        ):
+            with pytest.raises(RuntimeError, match="running event loop"):
+                call()
+
+    asyncio.run(from_a_coroutine())
+    assert durable.store.load(exe.id).active_path == "A"  # nothing ran

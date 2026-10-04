@@ -70,7 +70,10 @@ def _close_portal() -> None:
 
 def run(coro_fn, *args, **kwargs):
     """Run `coro_fn(*args, **kwargs)` on the shared loop and block until it completes (sync
-    bridge). `BlockingPortal.call` takes only positional args, so kwargs ride via partial."""
+    bridge). `BlockingPortal.call` takes only positional args, so kwargs ride via partial.
+    Refused from inside a running event loop, on every call: blocking there would freeze that
+    loop for the whole call."""
+    _guard_no_running_loop()
     if kwargs:
         return portal().call(functools.partial(coro_fn, *args, **kwargs))
     return portal().call(coro_fn, *args)
