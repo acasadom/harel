@@ -45,17 +45,24 @@ orthogonal parent's regions — a region is a separate Execution with its own
 All other commands propagate to an orthogonal parent's regions (each region is a
 separate child `Execution`/group) and use optimistic-concurrency retry, since a
 worker may be committing an event for the same Execution concurrently.
+
+Each command is written once, as a flow over the store (`*_flow`, see `harel.engine.flow`):
+the functions here run it in the caller's thread over a sync `ExecutionStore`, and
+`harel.engine.aio.control` runs the same flow with coroutines over an async one. The
+runners' own control plane (`DurableRunner.cancel`, ...) runs these flows too.
 """
 
 from __future__ import annotations
 
+import inspect
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from harel import engine
 from harel.definition.model import Definition, NodeKind, is_descendant
 from harel.engine.execution import Execution, ExecutionSummary, Status, stamp
+from harel.engine.flow import Await, Flow, call, parallel, run_inline
 from harel.engine.store import ExecutionStore, StoreConflict, TimerOp
 from harel.spec.states import Event
 
@@ -65,18 +72,21 @@ _RETRIES = 5
 _TERMINAL = (Status.CANCELLED, Status.DONE)
 
 
-def _children(store: ExecutionStore, exe: Execution) -> list[Execution]:
+def _store(method: str, *args: Any, **kwargs: Any) -> Flow:
+    return (yield from call("store", method, *args, **kwargs))
+
+
+def _inline(flow: Flow, store: ExecutionStore) -> Any:
+    return run_inline(flow, {"store": store})
+
+
+def _children_flow(exe: Execution) -> Flow:
     """Load an orthogonal parent's live region Executions (direct children)."""
-    out: list[Execution] = []
-    for cid in exe.children:
-        child = store.load(cid)
-        if child is not None:
-            out.append(child)
-    return out
+    loaded = yield from parallel([_store("load", cid) for cid in exe.children])
+    return [child for child in loaded if child is not None]
 
 
-def _commit_status(
-    store: ExecutionStore,
+def _commit_status_flow(
     execution_id: str,
     new_status: Status,
     *,
@@ -87,7 +97,7 @@ def _commit_status(
     clear_history: bool = False,
     rearm_ttl_of: Optional[Definition] = None,
     clock: Callable[[], float] = time.time,
-) -> None:
+) -> Flow:
     """CAS the Execution to `new_status`, retrying on a concurrent writer.
     `require_status`, when given, is re-checked on every attempt (not just before
     the loop) — a no-op once it no longer holds, e.g. a concurrent writer already
@@ -101,7 +111,7 @@ def _commit_status(
     own history entry, even though descendants that exited cleanly earlier in the
     same cascade did, so a partial, inconsistent history is worse than none)."""
     for _ in range(_RETRIES):
-        exe = store.load(execution_id)
+        exe = yield from _store("load", execution_id)
         if exe is None:
             raise KeyError(execution_id)
         if require_status is not None and exe.status is not require_status:
@@ -124,41 +134,43 @@ def _commit_status(
             timers = (TimerOp("schedule", engine.TTL_PATH, exe.expires_at),)
         try:
             stamp(exe, clock())
-            store.commit(exe, [], timers=timers)
+            yield from _store("commit", exe, [], timers=timers)
             return
         except StoreConflict:
             continue
 
 
-def _propagate(
-    store: ExecutionStore, parent_id: str, new_status: Status, *, clock: Callable[[], float] = time.time
-) -> None:
-    """Forcefully apply `new_status` to a parent's region children (recursively)."""
-    parent = store.load(parent_id)
+def _propagate_flow(parent_id: str, new_status: Status, *, clock: Callable[[], float] = time.time) -> Flow:
+    """Forcefully apply `new_status` to a parent's region children (recursively). Each
+    region is its own record, so they're independent (concurrent where the interpreter
+    allows)."""
+    parent = yield from _store("load", parent_id)
     if parent is None:
         return
-    for child in _children(store, parent):
-        _commit_status(store, child.id, new_status, clock=clock)
-        _propagate(store, child.id, new_status, clock=clock)
+
+    def propagate_one(child: Execution) -> Flow:
+        yield from _commit_status_flow(child.id, new_status, clock=clock)
+        yield from _propagate_flow(child.id, new_status, clock=clock)
+
+    yield from parallel([propagate_one(child) for child in (yield from _children_flow(parent))])
 
 
-def terminate(store: ExecutionStore, execution_id: str, *, clock: Callable[[], float] = time.time) -> None:
+def terminate_flow(execution_id: str, *, clock: Callable[[], float] = time.time) -> Flow:
     """Forceful cancel: status -> CANCELLED now, no hooks, no cleanup. Regions
     follow. The queued backlog drains as no-ops. No-op if the execution already
-    finished (`_commit_status`'s terminal guard) — it does not retroactively
+    finished (`_commit_status_flow`'s terminal guard) — it does not retroactively
     reclassify a `DONE` execution as `CANCELLED`."""
-    _commit_status(store, execution_id, Status.CANCELLED, clock=clock)
-    _propagate(store, execution_id, Status.CANCELLED, clock=clock)
+    yield from _commit_status_flow(execution_id, Status.CANCELLED, clock=clock)
+    yield from _propagate_flow(execution_id, Status.CANCELLED, clock=clock)
 
 
-def cancel(
-    store: ExecutionStore,
+def cancel_flow(
     defn: Definition,
     execution_id: str,
     *,
     reason: Optional[dict] = None,
     clock: Callable[[], float] = time.time,
-) -> None:
+) -> Flow:
     """Cancel respecting the machine: cooperative if the active state models a
     `Cancel` transition (-> CANCELLING + an injected `Cancel` for the cleanup),
     forceful terminate otherwise. Regions are terminated forcefully (a cancelled
@@ -177,47 +189,47 @@ def cancel(
     write (a worker failing the execution, or moving it elsewhere) the decision is
     re-made against the fresh record rather than applied to a stale one."""
     for _ in range(_RETRIES):
-        exe = store.load(execution_id)
+        exe = yield from _store("load", execution_id)
         if exe is None:
             raise KeyError(execution_id)
         if exe.status in _TERMINAL:
             return
         cancel_event = Event(kind="Cancel", data=dict(reason or {}))
         if exe.status is Status.FAILED or not engine.has_cancel_handler(defn, exe, cancel_event):
-            terminate(store, execution_id, clock=clock)
+            yield from terminate_flow(execution_id, clock=clock)
             return
         exe.status = Status.CANCELLING
         stamp(exe, clock())
         try:
-            store.commit(exe, [(exe.id, cancel_event)])
+            yield from _store("commit", exe, [(exe.id, cancel_event)])
         except StoreConflict:
             continue
-        _propagate(store, execution_id, Status.CANCELLED, clock=clock)
+        yield from _propagate_flow(execution_id, Status.CANCELLED, clock=clock)
         return
 
 
-def suspend(store: ExecutionStore, execution_id: str, *, clock: Callable[[], float] = time.time) -> None:
+def suspend_flow(execution_id: str, *, clock: Callable[[], float] = time.time) -> Flow:
     """Pause: RUNNING -> SUSPENDED. State, history and the backlog are preserved.
     No-op if not RUNNING. Regions are suspended too."""
-    exe = store.load(execution_id)
+    exe = yield from _store("load", execution_id)
     if exe is None:
         raise KeyError(execution_id)
     if exe.status is not Status.RUNNING:
         return
-    _commit_status(store, execution_id, Status.SUSPENDED, clock=clock)
-    _propagate(store, execution_id, Status.SUSPENDED, clock=clock)
+    yield from _commit_status_flow(execution_id, Status.SUSPENDED, clock=clock)
+    yield from _propagate_flow(execution_id, Status.SUSPENDED, clock=clock)
 
 
-def resume(store: ExecutionStore, execution_id: str, *, clock: Callable[[], float] = time.time) -> None:
+def resume_flow(execution_id: str, *, clock: Callable[[], float] = time.time) -> Flow:
     """Unpause: SUSPENDED -> RUNNING, continuing where it stopped (the backlog is
     intact). No-op if not SUSPENDED. Regions resume too."""
-    exe = store.load(execution_id)
+    exe = yield from _store("load", execution_id)
     if exe is None:
         raise KeyError(execution_id)
     if exe.status is not Status.SUSPENDED:
         return
-    _commit_status(store, execution_id, Status.RUNNING, clock=clock)
-    _propagate(store, execution_id, Status.RUNNING, clock=clock)
+    yield from _commit_status_flow(execution_id, Status.RUNNING, clock=clock)
+    yield from _propagate_flow(execution_id, Status.RUNNING, clock=clock)
 
 
 def _validate_redrive_target(defn: Definition, exe: Execution, target_path: str) -> None:
@@ -226,13 +238,11 @@ def _validate_redrive_target(defn: Definition, exe: Execution, target_path: str)
     spawning a child, or the check could otherwise run against a stale snapshot,
     between an initial check and the winning write. Raises `ValueError`.
 
-    Same three structural checks as `engine.is_valid_reposition_target` and its
-    async mirror `aio.control._validate_redrive_target` (leaf, within this
-    Execution's own branch, not nested inside an orthogonal ancestor) — three
-    independent copies now, so a change to this invariant must touch all three —
-    kept as its own walk here, not a call to that shared boolean, because `redrive` is
-    control-plane-invoked and wants a precise, caller-facing reason for exactly
-    which check failed. If the invariant ever changes, update both."""
+    Same three structural checks as `engine.is_valid_reposition_target` (leaf, within
+    this Execution's own branch, not nested inside an orthogonal ancestor) — kept as its
+    own walk here, not a call to that shared boolean, because `redrive` is
+    control-plane-invoked and wants a precise, caller-facing reason for exactly which
+    check failed. If the invariant ever changes, update both."""
     node = defn.index.get(target_path)
     if node is None or node.is_composite:
         raise ValueError(f"redrive target must be a leaf state, got {target_path!r}")
@@ -264,14 +274,13 @@ def _validate_redrive_target(defn: Definition, exe: Execution, target_path: str)
         raise ValueError("redrive refused: execution has unfinished children (cancel/terminate them first)")
 
 
-def redrive(
-    store: ExecutionStore,
+def redrive_flow(
     defn: Definition,
     execution_id: str,
     target_path: str,
     *,
     clock: Callable[[], float] = time.time,
-) -> None:
+) -> Flow:
     """Force a dead-lettered execution back to life: FAILED -> RUNNING, repositioned
     at `target_path` (a caller-chosen leaf — never inferred from the failed
     `active_path`, which an `on_exit` failure may have left parked mid-cascade on a
@@ -292,14 +301,13 @@ def redrive(
     still unfinished: an `on_exit` failure can dead-letter a parent before it
     cancels its live regions (see `_take`), and moving the parent elsewhere would
     orphan them — cancel or terminate those children first."""
-    exe = store.load(execution_id)
+    exe = yield from _store("load", execution_id)
     if exe is None:
         raise KeyError(execution_id)
     if exe.status is not Status.FAILED:
         return
     _validate_redrive_target(defn, exe, target_path)  # fail fast before any CAS work
-    _commit_status(
-        store,
+    yield from _commit_status_flow(
         execution_id,
         Status.RUNNING,
         require_status=Status.FAILED,
@@ -366,25 +374,30 @@ def _tree_of(root: Execution, found: dict[str, Execution]) -> tuple[list[Executi
     return tree, missing
 
 
-def _collect_tree(store: ExecutionStore, root: Execution) -> tuple[list[Execution], list[str]]:
+def _collect_tree_flow(root: Execution) -> Flow:
     """The root and every descendant still stored (regions, invokes, fan-out instances),
     parents first. Two sources, since neither alone is complete: a parent drops a child
     from `children` once done with it (an invoke that returned, a fork or fan-out
     re-entered, a `Reset`) while its record stays in the store — found by the id prefix a
     child's id extends its parent's with; and `children` lists what a parent spawned."""
-    found = {i: e for i in store.ids_with_prefix(root.id + ":") if (e := store.load(i)) is not None}
+    found: dict[str, Execution] = {}
+    for i in (yield from _store("ids_with_prefix", root.id + ":")):
+        if (e := (yield from _store("load", i))) is not None:
+            found[i] = e
     frontier = [root, *found.values()]
     while frontier:
         for cid in frontier.pop().children:
-            if cid != root.id and cid not in found and (child := store.load(cid)) is not None:
+            if (
+                cid != root.id
+                and cid not in found
+                and (child := (yield from _store("load", cid))) is not None
+            ):
                 found[cid] = child
                 frontier.append(child)
     return _tree_of(root, found)
 
 
-def purge(
-    store: ExecutionStore, execution_id: str, *, archive: Optional[Callable[[dict], None]] = None
-) -> bool:
+def purge_flow(execution_id: str, *, archive: Optional[Callable[[dict], Any]] = None) -> Flow:
     """Permanently delete a finished execution tree — the root, every region/invoke
     descendant, and everything the store keys by them (dedupe, trace, timers, pending
     outbox/spawns). Returns False if no such execution exists (already purged).
@@ -393,29 +406,36 @@ def purge(
     `DONE`/`CANCELLED` — a `FAILED` dead letter must be abandoned with `terminate()`
     first. `archive`, when given, receives the tree (see `_archive_bundle`) before
     anything is deleted, so a failing archiver aborts the purge; it may see the same
-    root again if a purge is retried.
+    root again if a purge is retried. It may be a coroutine function where the flow runs
+    with coroutines (`aio.control`); in the caller's thread it must be a plain function.
 
     Descendants go first and the root last, each deleted only if unchanged since it was
     checked: a member that moved on concurrently (e.g. a `Reset` revived it) raises
     `StoreConflict` and stops the purge. Because the root is still there, re-running
     `purge` resumes it and also sweeps the leftovers of children already deleted."""
-    root = store.load(execution_id)
+    root = yield from _store("load", execution_id)
     if root is None:
         return False
-    tree, missing = _collect_tree(store, root)
+    tree, missing = yield from _collect_tree_flow(root)
     _check_purgeable(root, tree)
     if archive is not None:
-        archive(_archive_bundle(root, tree, {e.id: store.read_trace(e.id) for e in tree}))
+        traces = {}
+        for e in tree:
+            traces[e.id] = yield from _store("read_trace", e.id)
+        result = archive(_archive_bundle(root, tree, traces))
+        if inspect.isawaitable(result):
+            yield Await(result)
     for exe in reversed(tree[1:]):
-        _purge_one(store, exe)
+        yield from _purge_one_flow(exe)
     for cid in missing:
-        store.purge(cid, 0)  # sweep what an interrupted purge left behind (version unused when absent)
-    _purge_one(store, root)
+        # sweep what an interrupted purge left behind (version unused when absent)
+        yield from _store("purge", cid, 0)
+    yield from _purge_one_flow(root)
     return True
 
 
-def _purge_one(store: ExecutionStore, exe: Execution) -> None:
-    if not store.purge(exe.id, exe.version):
+def _purge_one_flow(exe: Execution) -> Flow:
+    if not (yield from _store("purge", exe.id, exe.version)):
         raise StoreConflict(exe.id, expected=exe.version, found=None)
 
 
@@ -457,17 +477,16 @@ def _take_candidates(
         candidates.append(summary.id)
 
 
-def purge_finished(
-    store: ExecutionStore,
+def purge_finished_flow(
     *,
     older_than: float,
     statuses: Iterable[Status] = _PURGEABLE,
-    archive: Optional[Callable[[dict], None]] = None,
+    archive: Optional[Callable[[dict], Any]] = None,
     include_undated: bool = False,
     limit: Optional[int] = None,
     dry_run: bool = False,
     now: Optional[float] = None,
-) -> PurgeReport:
+) -> Flow:
     """Purge every root tree that finished more than `older_than` seconds ago (see `purge`).
 
     Candidates are the roots in `statuses` (a subset of DONE/CANCELLED) whose
@@ -482,7 +501,9 @@ def purge_finished(
     candidates: list[str] = []
     cursor: Optional[str] = None
     while limit is None or len(candidates) < limit:
-        page = store.list_executions(status=statuses, roots_only=True, limit=500, cursor=cursor)
+        page = yield from _store(
+            "list_executions", status=statuses, roots_only=True, limit=500, cursor=cursor
+        )
         _take_candidates(page.items, cutoff, include_undated, report, candidates)
         cursor = page.next_cursor
         if cursor is None:
@@ -492,11 +513,11 @@ def purge_finished(
         # the same whole-tree check `purge` makes, without deleting: a root whose tree
         # has a member not yet finished is reported as refused, not as purgeable
         for root_id in candidates:
-            root = store.load(root_id)
+            root = yield from _store("load", root_id)
             if root is None:
                 continue
             try:
-                _check_purgeable(root, _collect_tree(store, root)[0])
+                _check_purgeable(root, (yield from _collect_tree_flow(root))[0])
             except PurgeRefused as exc:
                 report.refused[root_id] = str(exc)
             else:
@@ -504,8 +525,81 @@ def purge_finished(
         return report
     for root_id in candidates:
         try:
-            if purge(store, root_id, archive=archive):
+            if (yield from purge_flow(root_id, archive=archive)):
                 report.purged.append(root_id)
         except (PurgeRefused, StoreConflict) as exc:  # anything else, e.g. the archiver, stops the run
             report.refused[root_id] = str(exc)
     return report
+
+
+# --- over a sync store, in the caller's thread ---------------------------------------------
+def terminate(store: ExecutionStore, execution_id: str, *, clock: Callable[[], float] = time.time) -> None:
+    """`terminate_flow` over `store`."""
+    _inline(terminate_flow(execution_id, clock=clock), store)
+
+
+def cancel(
+    store: ExecutionStore,
+    defn: Definition,
+    execution_id: str,
+    *,
+    reason: Optional[dict] = None,
+    clock: Callable[[], float] = time.time,
+) -> None:
+    """`cancel_flow` over `store`."""
+    _inline(cancel_flow(defn, execution_id, reason=reason, clock=clock), store)
+
+
+def suspend(store: ExecutionStore, execution_id: str, *, clock: Callable[[], float] = time.time) -> None:
+    """`suspend_flow` over `store`."""
+    _inline(suspend_flow(execution_id, clock=clock), store)
+
+
+def resume(store: ExecutionStore, execution_id: str, *, clock: Callable[[], float] = time.time) -> None:
+    """`resume_flow` over `store`."""
+    _inline(resume_flow(execution_id, clock=clock), store)
+
+
+def redrive(
+    store: ExecutionStore,
+    defn: Definition,
+    execution_id: str,
+    target_path: str,
+    *,
+    clock: Callable[[], float] = time.time,
+) -> None:
+    """`redrive_flow` over `store`."""
+    _inline(redrive_flow(defn, execution_id, target_path, clock=clock), store)
+
+
+def purge(
+    store: ExecutionStore, execution_id: str, *, archive: Optional[Callable[[dict], None]] = None
+) -> bool:
+    """`purge_flow` over `store`: `archive` must be a plain function."""
+    return _inline(purge_flow(execution_id, archive=archive), store)
+
+
+def purge_finished(
+    store: ExecutionStore,
+    *,
+    older_than: float,
+    statuses: Iterable[Status] = _PURGEABLE,
+    archive: Optional[Callable[[dict], None]] = None,
+    include_undated: bool = False,
+    limit: Optional[int] = None,
+    dry_run: bool = False,
+    now: Optional[float] = None,
+) -> PurgeReport:
+    """`purge_finished_flow` over `store`."""
+    return _inline(
+        purge_finished_flow(
+            older_than=older_than,
+            statuses=statuses,
+            archive=archive,
+            include_undated=include_undated,
+            limit=limit,
+            dry_run=dry_run,
+            now=now,
+        ),
+        store,
+    )

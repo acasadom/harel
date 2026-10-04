@@ -12,10 +12,9 @@ import time
 from typing import Any, Callable, Optional
 
 from harel.definition.model import Definition
-from harel.engine.aio import control
 from harel.engine.execution import Execution
 from harel.engine.flow import Flow, run_async
-from harel.engine.hosting import ControlPort, DurableLogic
+from harel.engine.hosting import DurableLogic
 from harel.engine.resolve import MachineResolver
 from harel.spec.states import Event
 
@@ -34,7 +33,7 @@ class AsyncDurableRunner(DurableLogic):
         self.store = store
 
     async def _serve(self, flow: Flow) -> Any:
-        return await run_async(flow, {"store": self.store, "control": ControlPort(control, self.store)})
+        return await run_async(flow, {"store": self.store})
 
     async def create(
         self,

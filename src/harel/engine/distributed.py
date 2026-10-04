@@ -29,11 +29,9 @@ import time
 from typing import Any, Callable, Optional
 
 from harel.definition.model import Definition
-from harel.engine import control
 from harel.engine.execution import Execution
 from harel.engine.flow import Flow, run_inline
 from harel.engine.hosting import (  # noqa: F401 (re-exported)
-    ControlPort,
     SenderLogic,
     WorkerLogic,
     _defn_for,
@@ -201,7 +199,7 @@ class DistributedRunner:
         self.execution = execution
         if execution == "inline":
             self._inline: Optional[SenderLogic] = SenderLogic(definitions, clock, resolver, trace)
-            self._ports = {"store": store, "transport": transport, "control": ControlPort(control, store)}
+            self._ports = {"store": store, "transport": transport}
             return
         self._inline = None
         self._async = self._portal_build(store, transport, definitions, clock, resolver, trace)

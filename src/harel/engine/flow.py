@@ -60,6 +60,14 @@ class Parallel:
     flows: tuple
 
 
+@dataclass(frozen=True)
+class Await:
+    """Await `awaitable` — what a user callback that may be a coroutine function (a purge's
+    `archive`) returned — and return its result. Only an interpreter with an event loop can."""
+
+    awaitable: Any
+
+
 def call(port: str, method: str, *args: Any, **kwargs: Any) -> Flow:
     """`yield from call("store", "load", eid)`: one IO call from inside a flow."""
     return (yield Call(port, method, args, kwargs))
@@ -101,12 +109,15 @@ async def _serve_async(request: Any, ports: dict[str, Any]) -> Any:
         return await loop.run_in_executor(None, bound)
     if isinstance(request, Parallel):
         return list(await asyncio.gather(*[run_async(f, ports) for f in request.flows]))
+    if isinstance(request, Await):
+        return await request.awaitable
     raise TypeError(f"a flow yielded {request!r}, which is not an IO request")
 
 
 def run_inline(flow: Flow, ports: dict[str, Any]) -> Any:
     """Run `flow` in the caller's thread, without an event loop: `ports` hold sync
-    stores/transports. A coroutine action is refused — there is no loop to await it on."""
+    stores/transports. A coroutine action (or `Await`) is refused — there is no loop to await
+    it on."""
     try:
         request = next(flow)
         while True:
@@ -132,4 +143,12 @@ def _serve_inline(request: Any, ports: dict[str, Any]) -> Any:
         return request.fn(request.proxy, request.event, **request.inputs)
     if isinstance(request, Parallel):
         return [run_inline(f, ports) for f in request.flows]
+    if isinstance(request, Await):
+        close = getattr(request.awaitable, "close", None)
+        if close is not None:
+            close()  # never awaited: closed, so it doesn't warn
+        raise TypeError(
+            "a callback returned an awaitable (a coroutine function?): it needs an event loop, "
+            "which running in the caller's thread doesn't have"
+        )
     raise TypeError(f"a flow yielded {request!r}, which is not an IO request")

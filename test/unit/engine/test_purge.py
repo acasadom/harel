@@ -190,6 +190,22 @@ async def test_async_purge_with_a_coroutine_archiver():
     assert await store.load(exe.id) is None
 
 
+def test_the_sync_purge_refuses_a_coroutine_archiver_and_deletes_nothing():
+    # in the caller's thread there is no loop to await it on: refused before anything is
+    # deleted, so the tree is never removed unarchived
+    from harel.engine import control
+
+    runner, store, root_id, children = _terminated_fork()
+
+    async def archive(bundle):
+        raise AssertionError("never awaited")
+
+    with pytest.raises(TypeError, match="needs an event loop"):
+        control.purge(store, root_id, archive=archive)
+    assert store.load(root_id) is not None
+    assert all(store.load(cid) is not None for cid in children)
+
+
 # --- descendants the parent no longer lists ------------------------------------------
 CHILD = "event Go {}\nmachine Child { initial W  state W {}  final D success {}  from W to D on Go }"
 CALLER = """

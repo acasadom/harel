@@ -382,8 +382,9 @@ that drives it follows the same approach one level up. The driver and the runner
 once as **flows** (`harel/engine/flow.py`): generators that yield IO requests — a call on the
 store or the transport, a user action, independent work in parallel — and receive their results.
 The logic lives in `harel/engine/driving.py` (run the engine for an event, call the actions and
-route their errors, commit, relay the outbox) and `harel/engine/hosting.py` (the durable host,
-the distributed sender, the worker). An **interpreter** serves those requests, and that is the
+route their errors, commit, relay the outbox), `harel/engine/hosting.py` (the durable host,
+the distributed sender, the worker) and `harel/engine/control.py` (the control plane: cancel,
+suspend, purge, …). An **interpreter** serves those requests, and that is the
 execution model:
 
 | | interpreter | used by |

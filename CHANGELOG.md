@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- The control plane is written once, as flows in `harel.engine.control`: the sync functions
+  there and their async counterparts in `harel.engine.aio.control` run the same flows, and so
+  do the runners' `cancel`, `terminate`, `suspend`, `resume`, `purge` and `redrive`. Their
+  signatures and behaviour are unchanged.
+
+### Fixed
+
+- The sync `purge` / `purge_finished` (and a runner's `purge` with `execution="inline"`) refuse a
+  coroutine-function `archive` with a `TypeError` before deleting anything. It was called and
+  never awaited, so the tree was deleted without being archived. The async control plane, and
+  the sync runners in the background model, await it as before.
+
 ## 0.6.0 — 2026-10-03
 
 ### Added
