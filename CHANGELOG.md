@@ -15,6 +15,9 @@
   coroutine-function `archive` with a `TypeError` before deleting anything. It was called and
   never awaited, so the tree was deleted without being archived. The async control plane, and
   the sync runners in the background model, await it as before.
+- The distribution guide said the headless runner fires the timers due in one sweep
+  concurrently; it delivers them one at a time (two timers of one execution must not race on its
+  version) — only a worker publishes them concurrently.
 
 ## 0.6.0 — 2026-10-03
 

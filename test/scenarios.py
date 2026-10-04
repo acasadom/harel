@@ -294,11 +294,11 @@ SCENARIOS = [
 # --- new-engine harness (a tiny in-memory multi-Execution driver) -------------
 
 
-# `_Runner` (used by test_battery) is the public `Driver` — now the async facade — so the
-# battery spec exercises the real async path. `run_new` is the parity ORACLE: it uses the
-# genuine sync engine (`_SyncDriver`) directly, so it is an independent reference AND it is
-# loop-safe (the async parity tests call it from inside an event loop, where the sync facade
-# would refuse to start its portal).
+# `_Runner` (used by test_battery) is the public `Driver`, so the battery spec exercises the
+# real driver logic (`DriverLogic`) in the execution model the suite runs under
+# (`--execution`). `run_new` is the parity ORACLE: it uses the hand-written sync driver
+# (`_SyncDriver`) directly, so it is an independent reference AND it is loop-safe (the async
+# parity tests call it from inside an event loop, where the sync facade refuses to run).
 from harel.engine.runtime import Driver as _Runner  # noqa: E402,F401  (re-exported for test_battery)
 from harel.engine.runtime import _SyncDriver  # noqa: E402
 

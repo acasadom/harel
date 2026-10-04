@@ -231,15 +231,17 @@ through the transport to the parent's join. The model you wrote in the tutorial 
 without change. Region and fan-out children **inherit the parent's priority**, so a
 high-priority workflow's parallel work is claimed at that priority too (not demoted to 0).
 
-The async engine uses `asyncio.gather` throughout to parallelise independent work on the event
-loop. In the headless `DurableRunner` this gives true parallelism even in a single-process
-deployment:
+Independent work is marked as such in the runners' logic, and run with coroutines (the async
+runners, and the sync ones in the default `execution="background"`) it overlaps on the event
+loop — concurrency even in a single-process `DurableRunner`. In the caller's thread
+(`execution="inline"`) the same work runs in order, with the same result:
 
-- **Spawn relay** (`_flush`): all pending children start concurrently — their `on enter` actions
+- **Spawn relay**: all pending children start concurrently — their `on enter` actions
   (LLM calls, HTTP requests, …) overlap rather than running one after another.
 - **Broadcast** (`inject`): a domain event delivered to multiple live regions runs each region's
   handler concurrently.
-- **Timer sweep** (`fire_due_timers`): all timers due in the same sweep are fired concurrently;
-  per-timer order (deliver before delete) is preserved via a local coroutine.
+- **Timer sweep** (`fire_due_timers`): a worker publishes all the timers due in one sweep
+  concurrently. The headless runner delivers them one at a time, since two timers of the same
+  execution must not race on its version.
 - **Control-plane propagation** (`cancel`/`suspend`/`resume`): status changes propagate to all
   children at each level of the tree concurrently.
