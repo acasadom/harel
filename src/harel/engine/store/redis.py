@@ -12,6 +12,7 @@ from harel.engine.store._base import (
     DEFAULT_TRACE_MAX,
     OutboxEntry,
     SpawnEntry,
+    Step,
     StoreConflict,
     TimerOp,
     _matches,
@@ -96,6 +97,7 @@ class RedisStore:
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,
+        step: Optional[Step] = None,
     ) -> list[int]:
         # fast path: an event that only advances state (no emits/spawns/timers/trace) commits
         # in ONE atomic round-trip — version-CAS + SET + optional dedupe — instead of WATCH/MULTI.

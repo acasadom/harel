@@ -14,6 +14,7 @@ from harel.engine.store._base import (
     DEFAULT_TRACE_MAX,
     OutboxEntry,
     SpawnEntry,
+    Step,
     StoreConflict,
     TimerOp,
     _decode_offset,
@@ -141,6 +142,7 @@ class PostgresStore:
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,
+        step: Optional[Step] = None,
     ) -> list[int]:
         # fast path: a state-only event (no emits/spawns/timers/trace) commits in ONE atomic
         # round-trip via the version-CAS function — instead of UPDATE + (SELECT/INSERT) + INSERT.

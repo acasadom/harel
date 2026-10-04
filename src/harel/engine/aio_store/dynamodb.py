@@ -9,7 +9,7 @@ from typing import Any, Iterable, Optional
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.schema import DEFAULT_PREFIX, Names
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
-from harel.engine.store._base import DEFAULT_TRACE_MAX, _decode_offset, _encode_offset, _matches
+from harel.engine.store._base import DEFAULT_TRACE_MAX, Step, _decode_offset, _encode_offset, _matches
 from harel.engine.store.dynamodb import _PURGE_PARTITIONS
 from harel.spec.states import Event
 
@@ -239,6 +239,7 @@ class AsyncDynamoDBStore:
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,  # execution-trace deferred for this backend (accepted, ignored)
+        step: Optional[Step] = None,
     ) -> list[int]:
         from decimal import Decimal
 

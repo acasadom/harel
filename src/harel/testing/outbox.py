@@ -10,8 +10,8 @@ Everything is namespaced by `ns`, and every assertion filters by the seeded ids,
 holds on a real backend shared with other executions.
 """
 
-from harel.engine.execution import Execution
-from harel.engine.store import TimerOp
+from harel.engine.execution import Execution, Status
+from harel.engine.store import Step, TimerOp
 from harel.spec.states import Event
 
 _KINDS = ("First", "Second", "Third")
@@ -36,6 +36,8 @@ def _side_effects(exe: Execution) -> dict:
         timers=(TimerOp("schedule", "P", 1.0),),
         spawns=((f"{exe.id}-child", "", {}),),
         trace={"event": "Tick"},
+        # every writer passes one: a store's `commit` must take it (and may ignore it)
+        step=Step(cause="event", from_status=Status.RUNNING, to_status=Status.RUNNING, event_kind="Tick"),
     )
 
 

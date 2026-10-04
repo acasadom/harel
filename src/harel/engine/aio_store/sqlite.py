@@ -13,6 +13,7 @@ from harel.engine.store._base import (
     _IDS_WITH_PREFIX_SQL,
     _PURGE_COMPANIONS_SQL,
     DEFAULT_TRACE_MAX,
+    Step,
     _decode_offset,
     _like_prefix,
     _listing_page,
@@ -173,6 +174,7 @@ class AsyncSqliteStore:
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,
+        step: Optional[Step] = None,
     ) -> list[int]:
         async with self._lock:
             old = exe.version

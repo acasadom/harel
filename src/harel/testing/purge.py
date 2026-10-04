@@ -13,7 +13,7 @@ holds on a real backend shared with other executions.
 """
 
 from harel.engine.execution import Execution, Status
-from harel.engine.store import StoreConflict, TimerOp
+from harel.engine.store import Step, StoreConflict, TimerOp
 from harel.spec.states import Event
 
 FIRE_AT = 1.0
@@ -27,6 +27,8 @@ def _commit_args(exe: Execution) -> dict:
         timers=(TimerOp("schedule", "P", FIRE_AT),),
         spawns=((f"{exe.id}-child", "", {}),),
         trace={"event": "Tick"},
+        # every writer passes one: a store's `commit` must take it (and may ignore it)
+        step=Step(cause="event", from_status=Status.RUNNING, to_status=Status.RUNNING, event_kind="Tick"),
     )
 
 

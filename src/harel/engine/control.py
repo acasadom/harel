@@ -63,7 +63,7 @@ from harel import engine
 from harel.definition.model import Definition, NodeKind, is_descendant
 from harel.engine.execution import Execution, ExecutionSummary, Status, stamp
 from harel.engine.flow import Await, Flow, call, parallel, run_inline
-from harel.engine.store import ExecutionStore, StoreConflict, TimerOp
+from harel.engine.store import ExecutionStore, Step, StoreConflict, TimerOp
 from harel.spec.states import Event
 
 _RETRIES = 5
@@ -97,8 +97,10 @@ def _commit_status_flow(
     clear_history: bool = False,
     rearm_ttl_of: Optional[Definition] = None,
     clock: Callable[[], float] = time.time,
+    command: str,
 ) -> Flow:
-    """CAS the Execution to `new_status`, retrying on a concurrent writer.
+    """CAS the Execution to `new_status`, retrying on a concurrent writer. `command` names the
+    control-plane command for the commit's `Step`.
     `require_status`, when given, is re-checked on every attempt (not just before
     the loop) — a no-op once it no longer holds, e.g. a concurrent writer already
     moved the Execution on. `validate`,
@@ -120,6 +122,7 @@ def _commit_status_flow(
             return  # already finished; no control-plane command changes it further
         if validate is not None:
             validate(exe)  # raises to abort — not caught, doesn't count as a retry
+        from_status, from_path = exe.status, exe.active_path
         exe.status = new_status
         if active_path is not None:
             exe.active_path = active_path
@@ -134,13 +137,28 @@ def _commit_status_flow(
             timers = (TimerOp("schedule", engine.TTL_PATH, exe.expires_at),)
         try:
             stamp(exe, clock())
-            yield from _store("commit", exe, [], timers=timers)
+            yield from _store(
+                "commit", exe, [], timers=timers, step=_control_step(command, from_status, from_path, exe)
+            )
             return
         except StoreConflict:
             continue
 
 
-def _propagate_flow(parent_id: str, new_status: Status, *, clock: Callable[[], float] = time.time) -> Flow:
+def _control_step(command: str, from_status: Status, from_path: Optional[str], exe: Execution) -> Step:
+    return Step(
+        cause="control",
+        command=command,
+        from_status=from_status,
+        to_status=exe.status,
+        from_path=from_path,
+        to_path=exe.active_path,
+    )
+
+
+def _propagate_flow(
+    parent_id: str, new_status: Status, *, clock: Callable[[], float] = time.time, command: str
+) -> Flow:
     """Forcefully apply `new_status` to a parent's region children (recursively). Each
     region is its own record, so they're independent (concurrent where the interpreter
     allows)."""
@@ -149,8 +167,8 @@ def _propagate_flow(parent_id: str, new_status: Status, *, clock: Callable[[], f
         return
 
     def propagate_one(child: Execution) -> Flow:
-        yield from _commit_status_flow(child.id, new_status, clock=clock)
-        yield from _propagate_flow(child.id, new_status, clock=clock)
+        yield from _commit_status_flow(child.id, new_status, clock=clock, command=command)
+        yield from _propagate_flow(child.id, new_status, clock=clock, command=command)
 
     yield from parallel([propagate_one(child) for child in (yield from _children_flow(parent))])
 
@@ -160,8 +178,12 @@ def terminate_flow(execution_id: str, *, clock: Callable[[], float] = time.time)
     follow. The queued backlog drains as no-ops. No-op if the execution already
     finished (`_commit_status_flow`'s terminal guard) — it does not retroactively
     reclassify a `DONE` execution as `CANCELLED`."""
-    yield from _commit_status_flow(execution_id, Status.CANCELLED, clock=clock)
-    yield from _propagate_flow(execution_id, Status.CANCELLED, clock=clock)
+    yield from _terminate_flow(execution_id, clock=clock, command="terminate")
+
+
+def _terminate_flow(execution_id: str, *, clock: Callable[[], float], command: str) -> Flow:
+    yield from _commit_status_flow(execution_id, Status.CANCELLED, clock=clock, command=command)
+    yield from _propagate_flow(execution_id, Status.CANCELLED, clock=clock, command=command)
 
 
 def cancel_flow(
@@ -196,15 +218,17 @@ def cancel_flow(
             return
         cancel_event = Event(kind="Cancel", data=dict(reason or {}))
         if exe.status is Status.FAILED or not engine.has_cancel_handler(defn, exe, cancel_event):
-            yield from terminate_flow(execution_id, clock=clock)
+            yield from _terminate_flow(execution_id, clock=clock, command="cancel")
             return
+        from_status = exe.status
         exe.status = Status.CANCELLING
         stamp(exe, clock())
         try:
-            yield from _store("commit", exe, [(exe.id, cancel_event)])
+            step = _control_step("cancel", from_status, exe.active_path, exe)
+            yield from _store("commit", exe, [(exe.id, cancel_event)], step=step)
         except StoreConflict:
             continue
-        yield from _propagate_flow(execution_id, Status.CANCELLED, clock=clock)
+        yield from _propagate_flow(execution_id, Status.CANCELLED, clock=clock, command="cancel")
         return
 
 
@@ -216,8 +240,8 @@ def suspend_flow(execution_id: str, *, clock: Callable[[], float] = time.time) -
         raise KeyError(execution_id)
     if exe.status is not Status.RUNNING:
         return
-    yield from _commit_status_flow(execution_id, Status.SUSPENDED, clock=clock)
-    yield from _propagate_flow(execution_id, Status.SUSPENDED, clock=clock)
+    yield from _commit_status_flow(execution_id, Status.SUSPENDED, clock=clock, command="suspend")
+    yield from _propagate_flow(execution_id, Status.SUSPENDED, clock=clock, command="suspend")
 
 
 def resume_flow(execution_id: str, *, clock: Callable[[], float] = time.time) -> Flow:
@@ -228,8 +252,8 @@ def resume_flow(execution_id: str, *, clock: Callable[[], float] = time.time) ->
         raise KeyError(execution_id)
     if exe.status is not Status.SUSPENDED:
         return
-    yield from _commit_status_flow(execution_id, Status.RUNNING, clock=clock)
-    yield from _propagate_flow(execution_id, Status.RUNNING, clock=clock)
+    yield from _commit_status_flow(execution_id, Status.RUNNING, clock=clock, command="resume")
+    yield from _propagate_flow(execution_id, Status.RUNNING, clock=clock, command="resume")
 
 
 def _validate_redrive_target(defn: Definition, exe: Execution, target_path: str) -> None:
@@ -317,6 +341,7 @@ def redrive_flow(
         clear_history=True,
         rearm_ttl_of=defn,
         clock=clock,
+        command="redrive",
     )
 
 

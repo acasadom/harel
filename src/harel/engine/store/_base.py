@@ -205,6 +205,30 @@ class SpawnEntry:
     context: dict
 
 
+@dataclass(frozen=True)
+class Step:
+    """What one `commit` records, described: what caused it and how the execution moved —
+    for an observer of the commits (see `harel.engine.observe`). A store may ignore it; it is
+    not persisted (the opt-in `trace` is the persisted timeline).
+
+    `cause` is `"create"` (a new execution, its `Start` queued), `"start"` (an execution
+    started without an event: `DurableRunner.create`, a child the relay spawns), `"event"`
+    (an event processed, `event_kind`/`event_id` naming it) or `"control"` (a control-plane
+    command, named by `command`). `from_status` is the execution's status before this commit,
+    `to_status` after it; `actions` the actions the committed step ran, by name — none for a
+    step that failed the execution, whose effects are dropped (its `error` names the failure)."""
+
+    cause: str
+    from_status: Status
+    to_status: Status
+    from_path: Optional[str] = None
+    to_path: Optional[str] = None
+    event_kind: Optional[str] = None
+    event_id: Optional[str] = None
+    actions: tuple[str, ...] = ()
+    command: Optional[str] = None
+
+
 @dataclass
 class TimerOp:
     """A durable-timer mutation applied atomically with a `commit`: `schedule`
@@ -279,6 +303,7 @@ class ExecutionStore(Protocol):
         timers: "tuple[TimerOp, ...]" = (),
         spawns: "tuple[tuple[str, str, dict], ...]" = (),
         trace: "Optional[dict]" = None,
+        step: "Optional[Step]" = None,
     ) -> list[int]:
         """Atomically `save` the Execution, enqueue its emitted events into the
         outbox, record `processed_event_id` as handled (if given), apply the
@@ -294,7 +319,11 @@ class ExecutionStore(Protocol):
         written in the SAME transaction as the advance — no extra round-trip or fsync,
         and `load` is unaffected (it still reads the snapshot, not a replay). The store
         keeps only the last `trace_max` steps (a ring). Recorded by the SQL-family and
-        Dict backends; the others accept and ignore it for now."""
+        Dict backends; the others accept and ignore it for now.
+
+        `step` describes the commit (a `Step`: what caused it, how the execution moved) — every
+        writer passes one. A store may ignore it; one that observes its commits (signals once
+        a transaction is confirmed, metrics, audit) reads it here."""
         ...
 
     def is_processed(self, execution_id: str, event_id: str) -> bool:

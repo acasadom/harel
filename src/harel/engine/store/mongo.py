@@ -12,6 +12,7 @@ from harel.engine.store._base import (
     DEFAULT_TRACE_MAX,
     OutboxEntry,
     SpawnEntry,
+    Step,
     StoreConflict,
     TimerOp,
     _decode_offset,
@@ -152,6 +153,7 @@ class MongoStore:
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,  # execution-trace deferred for this backend (accepted, ignored)
+        step: Optional[Step] = None,
     ) -> list[int]:
         # allocate monotonic seqs up front (one find_one_and_update each; a seq
         # wasted by a lost CAS is harmless), then build the embedded entries

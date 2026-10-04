@@ -11,6 +11,8 @@ from harel import (
     Event, Execution,                                           # runtime data
     Driver, DurableRunner,                                      # runners
     ExecutionStore, DictStore, SqliteStore,                     # stores (durable extras: RedisStore, …)
+    ObservedStore, AsyncObservedStore, Step,                    # observing every commit
+    ContextError, EventError, ExpressionError, StoreConflict, PurgeRefused,   # errors to catch
     MachineResolver, DictResolver, FileResolver, ModuleResolver, SourceResolver, ResolveError,
 )
 ```

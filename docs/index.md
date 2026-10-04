@@ -62,6 +62,7 @@ guide/resolvers
 guide/control-plane
 guide/faas
 guide/monitor
+guide/observing
 guide/architecture
 guide/dsl-reference
 guide/api-reference

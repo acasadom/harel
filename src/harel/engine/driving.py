@@ -21,7 +21,7 @@ from harel.engine.execution import Execution, Status, stamp
 from harel.engine.flow import CallAction, Flow, call, parallel, run_inline
 from harel.engine.resolve import ResolveError
 from harel.engine.runtime import _CONTROL, _action_name, _ActionKeys, _Proxy, _resolve, _trace_step
-from harel.engine.store import TimerOp
+from harel.engine.store import Step, TimerOp
 from harel.spec.states import Event
 
 logger = logging.getLogger(__name__)
@@ -78,7 +78,7 @@ class DriverLogic:
         """Drive the engine's effects for one event and commit. Returns whether the commit
         enqueued anything for the relay (outbox emits or child spawns), so the caller can skip
         the relay round-trips when there is nothing to deliver."""
-        from_path = exe.active_path
+        from_path, from_status = exe.active_path, exe.status
         keys = _ActionKeys(exe.id, event_id if event_id is not None else "start")
         emits, timer_ops, spawns, actions, assigned = yield from self._drive_flow(exe, gen, keys=keys)
         step = (
@@ -95,6 +95,16 @@ class DriverLogic:
             timers=tuple(timer_ops),
             spawns=tuple(spawns),
             trace=step,
+            step=Step(
+                cause="event" if event is not None else "start",
+                from_status=from_status,
+                to_status=exe.status,
+                from_path=from_path,
+                to_path=exe.active_path,
+                event_kind=event.kind if event is not None else None,
+                event_id=event.id if event is not None else None,
+                actions=tuple(actions),
+            ),
         )
         return bool(emits or spawns)
 
@@ -355,7 +365,22 @@ class DriverLogic:
             [],
             processed_event_id=event.id,
             timers=(TimerOp("schedule", engine.TTL_PATH, exe.expires_at),),
+            step=_broadcast_step(exe, event),
         )
+
+
+def _broadcast_step(exe: Execution, event: Event) -> Step:
+    """The step of a parent whose regions an event was broadcast to: it stays where it is (the
+    regions take the event), and the event is recorded as processed."""
+    return Step(
+        cause="event",
+        from_status=exe.status,
+        to_status=exe.status,
+        from_path=exe.active_path,
+        to_path=exe.active_path,
+        event_kind=event.kind,
+        event_id=event.id,
+    )
 
 
 def _error_message(exc: Exception) -> str:
@@ -434,7 +459,14 @@ class TransportDriverLogic(DriverLogic):
                 exe.expires_at = self._clock() + delay
                 timers = (TimerOp("schedule", engine.TTL_PATH, exe.expires_at),)
             stamp(exe, self._clock())
-            yield from store("commit", exe, [], processed_event_id=event.id, timers=timers)
+            yield from store(
+                "commit",
+                exe,
+                [],
+                processed_event_id=event.id,
+                timers=timers,
+                step=_broadcast_step(exe, event),
+            )
             enqueued = False  # broadcast went straight to the transport; nothing in the outbox
         else:
             enqueued = yield from self._run_flow(

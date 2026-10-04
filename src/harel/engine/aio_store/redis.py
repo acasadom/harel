@@ -8,7 +8,7 @@ from typing import Any, Iterable, Optional
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.schema import DEFAULT_PREFIX, Names
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
-from harel.engine.store._base import _COMMIT_CAS_LUA, DEFAULT_TRACE_MAX, _matches
+from harel.engine.store._base import _COMMIT_CAS_LUA, DEFAULT_TRACE_MAX, Step, _matches
 from harel.engine.store.redis import _glob_escape, _text, _timer_owner
 from harel.spec.states import Event
 
@@ -90,6 +90,7 @@ class AsyncRedisStore:
         timers: tuple[TimerOp, ...] = (),
         spawns: tuple[tuple[str, str, dict], ...] = (),
         trace: Optional[dict] = None,
+        step: Optional[Step] = None,
     ) -> list[int]:
         # fast path: an event that only advances state (no emits/spawns/timers/trace) commits
         # in ONE atomic round-trip — version-CAS + SET + optional dedupe — instead of WATCH/MULTI.
