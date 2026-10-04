@@ -6,7 +6,7 @@ outbox; `route` fans a domain event out to region groups) and `harel.engine.host
 over an async store + transport: `AsyncTransportDriver`, `AsyncWorker` — whose `run()`
 drives up to `concurrency` events in flight at once on one loop, with per-group exclusivity
 from the transport's claim and `StoreConflict`→nack as the CAS fence — and
-`AsyncDistributedRunner`, the façade (create/send/worker + control plane, `aio.control`).
+`AsyncDistributedRunner`, the façade (create/send/worker + control plane).
 """
 
 from __future__ import annotations
@@ -17,13 +17,12 @@ import time
 from typing import Any, Callable, Optional
 
 from harel.definition.model import Definition
-from harel.engine.aio import control
 from harel.engine.aio.driver import _AsyncRuntimeDriver
 from harel.engine.distributed import _defn_for, _resolve_machine
 from harel.engine.driving import TransportDriverLogic
 from harel.engine.execution import Execution
 from harel.engine.flow import Flow, run_async
-from harel.engine.hosting import ControlPort, SenderLogic, WorkerLogic
+from harel.engine.hosting import SenderLogic, WorkerLogic
 from harel.engine.resolve import MachineResolver
 from harel.engine.transport import Lease
 from harel.spec.states import Event
@@ -198,12 +197,7 @@ class AsyncDistributedRunner(SenderLogic):
         self.transport = transport
 
     async def _serve(self, flow: Flow) -> Any:
-        ports = {
-            "store": self.store,
-            "transport": self.transport,
-            "control": ControlPort(control, self.store),
-        }
-        return await run_async(flow, ports)
+        return await run_async(flow, {"store": self.store, "transport": self.transport})
 
     def _transport_driver(self, defn: Definition) -> AsyncTransportDriver:
         return AsyncTransportDriver(

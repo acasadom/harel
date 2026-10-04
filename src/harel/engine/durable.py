@@ -26,12 +26,11 @@ import time
 from typing import Any, Callable, Optional
 
 from harel.definition.model import Definition
-from harel.engine import control
 from harel.engine.aio import facade
 from harel.engine.aio.durable import AsyncDurableRunner
 from harel.engine.execution import Execution
 from harel.engine.flow import Flow, run_inline
-from harel.engine.hosting import ControlPort, DurableLogic, check_execution
+from harel.engine.hosting import DurableLogic, check_execution
 from harel.engine.resolve import MachineResolver
 from harel.engine.store import ExecutionStore
 from harel.spec.states import Event
@@ -42,7 +41,7 @@ class _InlineDurable(DurableLogic):
 
     def __init__(self, store: ExecutionStore, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self._ports = {"store": store, "control": ControlPort(control, store)}
+        self._ports = {"store": store}
 
     def serve(self, flow: Flow) -> Any:
         facade._guard_no_running_loop()

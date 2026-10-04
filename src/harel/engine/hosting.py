@@ -7,13 +7,12 @@ synchronous semantics, whatever the execution model. `SenderLogic` is the distri
 runner's side that only writes: create an execution and queue its `Start`, send an event;
 a worker processes them later — an asynchronous semantics. `WorkerLogic` is what a worker
 does with one claimed message. A concrete runner runs these flows with an interpreter and
-gives them their ports: the `store`, the `transport`, and `control` (the control-plane
-functions, bound to the store — `ControlPort`).
+gives them their ports: the `store` and the `transport`. The control plane is
+`harel.engine.control`'s flows, over the same store.
 """
 
 from __future__ import annotations
 
-import functools
 import inspect
 import logging
 import random
@@ -23,27 +22,15 @@ from typing import Any, Callable, Optional
 from harel import engine
 from harel.definition.events import check_context, with_defaults
 from harel.definition.model import Definition
+from harel.engine import control
 from harel.engine.driving import DriverLogic, FailOnActionError, TransportDriverLogic, store, transport
 from harel.engine.execution import Execution, Status, stamp
-from harel.engine.flow import Flow, call, parallel
+from harel.engine.flow import Flow, parallel
 from harel.engine.resolve import MachineResolver, ResolveError
 from harel.engine.store import StoreConflict
 from harel.spec.states import Event
 
 logger = logging.getLogger(__name__)
-
-
-class ControlPort:
-    """The control-plane functions of `module` (`harel.engine.control`, or its async mirror
-    `harel.engine.aio.control`) with their store bound: `control("cancel", defn, eid, ...)`
-    from a flow calls `module.cancel(store, defn, eid, ...)`."""
-
-    def __init__(self, module: Any, store: Any) -> None:
-        self._module = module
-        self._store = store
-
-    def __getattr__(self, name: str) -> Callable[..., Any]:
-        return functools.partial(getattr(self._module, name), self._store)
 
 
 EXECUTION_MODELS = ("background", "inline")
@@ -61,11 +48,6 @@ def check_execution(execution: str, *ports: tuple[str, Any]) -> None:
                     f"execution='inline' runs in the caller's thread, without an event loop: "
                     f"it needs a sync {name}, got the async {type(port).__name__}"
                 )
-
-
-def control(method: str, *args: Any, **kwargs: Any) -> Flow:
-    """`yield from control("suspend", eid, clock=...)`: a control-plane call, from a flow."""
-    return (yield from call("control", method, *args, **kwargs))
 
 
 class _HostedDriverLogic(FailOnActionError, DriverLogic):
@@ -212,31 +194,31 @@ class DurableLogic:
         if exe is None:
             raise KeyError(execution_id)
         driver = self._driver_logic(exe.definition_id)
-        yield from control("cancel", driver.defn, execution_id, reason=reason, clock=self._clock)
+        yield from control.cancel_flow(driver.defn, execution_id, reason=reason, clock=self._clock)
         yield from driver._flush_flow()  # deliver the injected Cancel inline (runs the cleanup)
         return (yield from self._loaded_flow(execution_id))
 
     def terminate_flow(self, execution_id: str) -> Flow:
-        yield from control("terminate", execution_id, clock=self._clock)
+        yield from control.terminate_flow(execution_id, clock=self._clock)
         return (yield from self._loaded_flow(execution_id))
 
     def suspend_flow(self, execution_id: str) -> Flow:
-        yield from control("suspend", execution_id, clock=self._clock)
+        yield from control.suspend_flow(execution_id, clock=self._clock)
         return (yield from self._loaded_flow(execution_id))
 
     def resume_flow(self, execution_id: str) -> Flow:
-        yield from control("resume", execution_id, clock=self._clock)
+        yield from control.resume_flow(execution_id, clock=self._clock)
         return (yield from self._loaded_flow(execution_id))
 
     def purge_flow(self, execution_id: str, archive: Optional[Callable[[dict], Any]] = None) -> Flow:
-        return (yield from control("purge", execution_id, archive=archive))
+        return (yield from control.purge_flow(execution_id, archive=archive))
 
     def redrive_flow(self, execution_id: str, target_path: str) -> Flow:
         exe = yield from store("load", execution_id)
         if exe is None:
             raise KeyError(execution_id)
         driver = self._driver_logic(exe.definition_id)
-        yield from control("redrive", driver.defn, execution_id, target_path, clock=self._clock)
+        yield from control.redrive_flow(driver.defn, execution_id, target_path, clock=self._clock)
         return (yield from self._loaded_flow(execution_id))
 
 
@@ -367,24 +349,24 @@ class SenderLogic:
 
     def cancel_flow(self, execution_id: str, reason: Optional[dict] = None) -> Flow:
         logic, exe = yield from self._logic_for_flow(execution_id)
-        yield from control("cancel", logic.defn, execution_id, reason=reason, clock=self._clock)
+        yield from control.cancel_flow(logic.defn, execution_id, reason=reason, clock=self._clock)
         yield from logic._flush_flow(primary_priority={execution_id: exe.priority})
 
     def terminate_flow(self, execution_id: str) -> Flow:
-        yield from control("terminate", execution_id, clock=self._clock)
+        yield from control.terminate_flow(execution_id, clock=self._clock)
 
     def suspend_flow(self, execution_id: str) -> Flow:
-        yield from control("suspend", execution_id, clock=self._clock)
+        yield from control.suspend_flow(execution_id, clock=self._clock)
 
     def resume_flow(self, execution_id: str) -> Flow:
-        yield from control("resume", execution_id, clock=self._clock)
+        yield from control.resume_flow(execution_id, clock=self._clock)
 
     def purge_flow(self, execution_id: str, archive: Optional[Callable[[dict], Any]] = None) -> Flow:
-        return (yield from control("purge", execution_id, archive=archive))
+        return (yield from control.purge_flow(execution_id, archive=archive))
 
     def redrive_flow(self, execution_id: str, target_path: str) -> Flow:
         logic, _exe = yield from self._logic_for_flow(execution_id)
-        yield from control("redrive", logic.defn, execution_id, target_path, clock=self._clock)
+        yield from control.redrive_flow(logic.defn, execution_id, target_path, clock=self._clock)
 
 
 class WorkerLogic:

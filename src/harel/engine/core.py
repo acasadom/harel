@@ -905,11 +905,10 @@ def is_valid_reposition_target(defn: Definition, exe: Execution, target_path: st
     uncaught (not a RunAction/RunSelector, so the driver's action-error handling
     never sees it either).
 
-    Mirrors `control._validate_redrive_target` and its async twin
-    `aio.control._validate_redrive_target` (same three checks; those raise a
+    Mirrors `control._validate_redrive_target` (same three checks; it raises a
     caller-facing `ValueError` per check instead of returning a single bool, since
     `redrive` is control-plane-invoked and wants a precise reason back) — if this
-    invariant ever changes, update all three.
+    invariant ever changes, update both.
 
     One combined walk up from `target_path`'s parent: `is_descendant` and the
     orthogonal-ancestor check both traverse the same `.parent` chain, so this does
