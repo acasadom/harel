@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.1 — 2026-10-04
+
+### Fixed
+
+- **The Postgres and Mongo transports could lose a message published while its group was being
+  acked.** An `ack` that found the group drained deleted it, while a concurrent `publish` into
+  the same group had inserted its message but found the group still there: the message was left
+  without a group, and no `claim` would reach it. Postgres now locks the group's row in both
+  `publish` and `ack` — one waits for the other. Mongo, which has no row lock, re-checks after
+  the delete and readies the group again; `claim`'s cleanup of an empty group does the same.
+- `SCHEMA_VERSION` is 2: the Postgres transport's `ack` function changed. A backend built with
+  `create_schema=True` replaces it when it starts; where a migration tool owns the schema,
+  apply `sql_schema("postgres", prefix)` again (it is idempotent).
+
 ## 0.7.0 — 2026-10-04
 
 ### Breaking

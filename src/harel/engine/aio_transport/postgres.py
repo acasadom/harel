@@ -62,9 +62,12 @@ class AsyncPostgresTransport:
                     f"INSERT INTO {self._n.messages} (group_id, event) VALUES (%s, %s)",
                     (group_id, event.model_dump_json()),
                 )
+                # ready the group iff new; the no-op update locks its row, as the ack
+                # function does, so a concurrent ack can't delete it under this message
                 await cur.execute(
                     f"INSERT INTO {self._n.groups} (group_id, locked_by, lock_expiry, priority) "
-                    "VALUES (%s, NULL, NULL, %s) ON CONFLICT (group_id) DO NOTHING",
+                    "VALUES (%s, NULL, NULL, %s) "
+                    f"ON CONFLICT (group_id) DO UPDATE SET priority = {self._n.groups}.priority",
                     (group_id, priority),
                 )
             await conn.commit()

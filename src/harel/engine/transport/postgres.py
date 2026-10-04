@@ -80,11 +80,14 @@ class PostgresTransport:
                 f"INSERT INTO {self._n.messages} (group_id, event) VALUES (%s, %s)",
                 (group_id, event.model_dump_json()),
             )
-            # ready the group iff new (ON CONFLICT DO NOTHING) — a publish into an in-flight or
-            # parked group must not reset its lease or priority
+            # ready the group iff new — a publish into an in-flight or parked group must not
+            # reset its lease or priority, so the update changes nothing. It does lock the row,
+            # which the ack function locks too: a concurrent ack can't decide the group is
+            # drained and delete it under this message (see `schema`)
             cur.execute(
                 f"INSERT INTO {self._n.groups} (group_id, locked_by, lock_expiry, priority) "
-                "VALUES (%s, NULL, NULL, %s) ON CONFLICT (group_id) DO NOTHING",
+                "VALUES (%s, NULL, NULL, %s) "
+                f"ON CONFLICT (group_id) DO UPDATE SET priority = {self._n.groups}.priority",
                 (group_id, priority),
             )
         self._conn.commit()

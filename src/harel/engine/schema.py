@@ -21,7 +21,7 @@ import re
 from dataclasses import dataclass
 from functools import cached_property
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_PREFIX = "harel"
 
 # an SQL identifier; at most 30 characters, so the longest name built from it (an index) stays
@@ -252,11 +252,15 @@ BEGIN
   END LOOP;
 END; $$ LANGUAGE plpgsql""",
     # ack: fenced by the lease token — remove the message, then free the group (it goes to the
-    # back of the round-robin) or, drained, delete it so its priority resets on the next publish
+    # back of the round-robin) or, drained, delete it so its priority resets on the next publish.
+    # The group's row is locked first, as publish locks it: a publish into this group either
+    # commits before the check below (which then sees its message) or waits for this ack, and
+    # recreates the group if this ack deleted it — never a message left without its group.
     """CREATE OR REPLACE FUNCTION {ack}(p_group text, p_seq bigint, p_token text, p_now double precision)
 RETURNS void AS $$
 BEGIN
-  IF EXISTS (SELECT 1 FROM {groups} WHERE group_id = p_group AND locked_by = p_token) THEN
+  PERFORM 1 FROM {groups} WHERE group_id = p_group AND locked_by = p_token FOR UPDATE;
+  IF FOUND THEN
     DELETE FROM {messages} WHERE seq = p_seq;
     IF EXISTS (SELECT 1 FROM {messages} WHERE group_id = p_group) THEN
       UPDATE {groups} SET locked_by = NULL, lock_expiry = p_now
