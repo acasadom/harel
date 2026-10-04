@@ -11,7 +11,7 @@ edges below react to the *same* event, `PaymentResult`, but branch on its `statu
 
 ```text
 event PlaceOrder {}
-event PaymentResult { status: string  amount: int }
+event PaymentResult { status: string  amount: int? }
 event Deliver {}
 
 guard authorized = status == "authorized"
@@ -49,9 +49,12 @@ guard reference is a predicate *atom*: you can use it alone (`where authorized`)
 with more conditions (`where authorized and amount <= 100`). Comparisons use
 `==  !=  <  <=  >  >=  in`, and you combine them with `and` / `or` / `not`.
 
-**`event` declarations.** `event PaymentResult { status: string  amount: int }` declares the
-event's shape. It is optional, but once you declare events, [validation](14-validation) can
-check that your guards reference fields that actually exist.
+**`event` declarations.** `event PaymentResult { status: string  amount: int? }` declares the
+event's shape: `status` is required, and `amount` optional (`?`) — a declined payment carries
+none. It is optional, but once you declare an event, [validation](14-validation) checks that your
+guards read fields that exist, and `process()` / `send()` refuse an event whose data doesn't fit
+— a missing required field, a value of the wrong type — with an `EventError`, before anything
+runs.
 
 ## Run the branches
 
@@ -60,7 +63,7 @@ from harel import definition_from_dsl, DurableRunner, DictStore, Event
 
 SOURCE = """
 event PlaceOrder {}
-event PaymentResult { status: string  amount: int }
+event PaymentResult { status: string  amount: int? }
 event Deliver {}
 
 guard authorized = status == "authorized"

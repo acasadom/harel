@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **A declared event is checked when it comes in**: `process()` and `send()` (sync and async)
+  raise `EventError`, a `ValueError` exported from `harel`, for an event whose data lacks a
+  required field or has a value of the wrong type — in the caller's stack, before anything runs,
+  commits or queues. Until now only `harel validate` checked events, statically: an incomplete
+  event was accepted. Undeclared fields and events, and the engine's own (`Timeout`, `Cancel`,
+  …), pass as before.
+
 ## 0.7.1 — 2026-10-04
 
 ### Fixed
