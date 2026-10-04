@@ -44,11 +44,15 @@ under a `pg_advisory_xact_lock` so several workers opening connections at once d
 ```text
 INSERT INTO harel_transport_messages (group_id, event) VALUES (%s, %s)
 INSERT INTO harel_transport_groups (group_id, locked_by, lock_expiry, priority) VALUES (%s, NULL, NULL, %s)
-  ON CONFLICT (group_id) DO NOTHING   -- ready the group only if new; never reset a live lease or priority
+  ON CONFLICT (group_id) DO UPDATE SET priority = harel_transport_groups.priority
+  -- ready the group only if new; never reset a live lease or priority — but lock its row
 ```
 
-`ON CONFLICT DO NOTHING` is the analogue of Redis's `ZADD … NX`: a publish into an in-flight or
-parked group must not clear its lease or overwrite the priority set on first publish.
+Readying the group only if it is new is the analogue of Redis's `ZADD … NX`: a publish into an
+in-flight or parked group must not clear its lease or overwrite the priority set on first
+publish, so the update changes nothing. It does lock the group's row, which `ack` locks too:
+otherwise an `ack` could find the group drained while this publish's message is not yet
+committed, and delete the group under it — leaving a message no `claim` would ever reach.
 
 ## claim — one server-side function: `harel_claim`
 
@@ -85,14 +89,16 @@ existing call sites without the argument are unaffected.
 
 ## ack — one server-side function; nack — fenced by the token
 
-`ack` is also one round-trip: `SELECT harel_ack(group, seq, token, now)`. The function fences on
-the token, deletes the head message, and sets `lock_expiry = now` (round-robin) rather than
+`ack` is also one round-trip: `SELECT harel_ack(group, seq, token, now)`. The function locks the
+group's row and fences on the token (a concurrent publish into the group then either committed
+before it looks for messages, or waits and recreates the group), deletes the head message, and sets `lock_expiry = now` (round-robin) rather than
 `NULL`, so the group row stays in the index as a recently-claimed row and fresh groups sort ahead
 of it. `nack` stays a single fenced `UPDATE`:
 
 ```text
 ack(lease):   SELECT harel_ack(group_id, seq, token, now)   -- ONE round-trip, server-side:
-                if EXISTS(transport_groups WHERE group_id=? AND locked_by=token):  # fence
+                lock the group's row WHERE group_id=? AND locked_by=token (FOR UPDATE)  # fence
+                if found:
                    DELETE FROM harel_transport_messages WHERE seq = ?                     # remove head
                    if messages remain for group:
                      UPDATE harel_transport_groups SET locked_by=NULL, lock_expiry=now    # free + round-robin

@@ -127,7 +127,7 @@ class MongoTransport:
             group_id = leased["_id"]
             head = self._msgs.find_one({"group_id": group_id}, sort=[("_id", 1)])
             if head is None:
-                self._locks.delete_one({"_id": group_id, "token": token})  # stale empty group
+                self._drop_group(group_id, token)  # stale empty group
                 continue
             return Lease(head["_id"], group_id, Event.model_validate_json(head["event"]), token=token)
 
@@ -146,7 +146,17 @@ class MongoTransport:
                 {"$set": {"available_at": self._clock(), "token": None}},
             )
         else:
-            self._locks.delete_one({"_id": lease.group_id, "token": lease.token})
+            self._drop_group(lease.group_id, lease.token)
+
+    def _drop_group(self, group_id: str, token: str) -> None:
+        """Delete a group found drained, as its lease holder. A publish may land between the
+        check and the delete: its message is in, but its upsert found this lock still there and
+        left it alone. Publish writes its message before its upsert, so a re-check after the
+        delete sees it — and readies the group again, with the priority it had."""
+        dropped = self._locks.find_one_and_delete({"_id": group_id, "token": token})
+        if dropped is not None and self._msgs.find_one({"group_id": group_id}) is not None:
+            ready = {"available_at": 0.0, "token": None, "priority": dropped.get("priority", 0)}
+            self._locks.update_one({"_id": group_id}, {"$setOnInsert": ready}, upsert=True)
 
     def nack(self, lease: Lease, delay: float = 0.0) -> None:
         if not self._owns(lease.group_id, lease.token):

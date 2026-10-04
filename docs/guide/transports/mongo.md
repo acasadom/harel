@@ -56,7 +56,7 @@ loop:
     if leased is None:  return None                                      # nothing due at this priority
     G = leased._id
     head = _messages.find_one({group_id: G}, sort=[(_id, 1)])            # oldest message, NOT removed
-    if head is None:  _locks.delete_one({_id: G, token: token}); continue  # stale empty group, drop + retry
+    if head is None:  drop_group(G, token); continue                     # stale empty group, drop + retry
     return Lease(head._id, G, head.event, token=token)
 ```
 
@@ -74,7 +74,18 @@ ack(lease):   if _locks doc's token != lease.token: return             # fencing
                  _locks.update_one({_id:G, token:lease.token},
                      {$set:{available_at: now, token:None}})             # round-robin: now (not 0.0)
               else:
-                 _locks.delete_one({_id:G, token:lease.token})          # group drained -> drop it
+                 drop_group(G, lease.token)                             # group drained -> drop it
+
+drop_group(G, token):
+   dropped = _locks.find_one_and_delete({_id:G, token:token})
+   if dropped and a message for G exists:      # a publish landed between the check and the delete
+      _locks.update_one({_id:G}, {$setOnInsert: {available_at:0, token:None,
+                                                  priority: dropped.priority}}, upsert=True)
+
+A publish writes its message, then upserts the group's lock; there is no row lock to make the
+check-then-delete atomic, so `drop_group` re-checks after deleting. A publish that landed in
+between — its message in, its upsert a no-op on the lock still there — is then seen, and the
+group readied again, with its priority.
 
 nack(lease, delay):  (token-fenced)
    if delay>0:  $set available_at = now+delay        # park (keep token so the head isn't re-claimed)

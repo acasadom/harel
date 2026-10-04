@@ -41,7 +41,8 @@ test-stack: ## Run each backend's tests directly against the real stack (needs D
 	    "test/integration/test_store_outbox.py::test_postgres_outbox" \
 	    "test/integration/test_store_outbox.py::test_async_postgres_outbox" \
 	    "test/integration/test_transport_contract.py::test_postgres_transport_contract" \
-	    test/integration/test_schema_stack.py -v || EXIT=1; \
+	    test/integration/test_schema_stack.py \
+	    test/integration/test_transport_race.py -v || EXIT=1; \
 	echo "=== rqlite ===" && \
 	$$DC -e HAREL_STORE_BACKEND=rqlite -e HAREL_TRANSPORT_BACKEND=rqlite \
 	    test uv run pytest -m stack \

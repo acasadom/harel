@@ -109,7 +109,7 @@ class AsyncMongoTransport:
             group_id = leased["_id"]
             head = await self._msgs.find_one({"group_id": group_id}, sort=[("_id", 1)])
             if head is None:
-                await self._locks.delete_one({"_id": group_id, "token": token})  # stale empty group
+                await self._drop_group(group_id, token)  # stale empty group
                 continue
             return Lease(head["_id"], group_id, Event.model_validate_json(head["event"]), token=token)
 
@@ -128,7 +128,15 @@ class AsyncMongoTransport:
                 {"$set": {"available_at": self._clock(), "token": None}},
             )
         else:
-            await self._locks.delete_one({"_id": lease.group_id, "token": lease.token})
+            await self._drop_group(lease.group_id, lease.token)
+
+    async def _drop_group(self, group_id: str, token: str) -> None:
+        """Delete a group found drained, re-readying it if a publish raced the delete (see the
+        sync `MongoTransport._drop_group`)."""
+        dropped = await self._locks.find_one_and_delete({"_id": group_id, "token": token})
+        if dropped is not None and await self._msgs.find_one({"group_id": group_id}) is not None:
+            ready = {"available_at": 0.0, "token": None, "priority": dropped.get("priority", 0)}
+            await self._locks.update_one({"_id": group_id}, {"$setOnInsert": ready}, upsert=True)
 
     async def nack(self, lease: Lease, delay: float = 0.0) -> None:
         if not await self._owns(lease.group_id, lease.token):
