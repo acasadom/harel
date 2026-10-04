@@ -87,14 +87,21 @@ The store is hardened beyond just persisting state:
 ## At-least-once actions & idempotency
 
 Delivery is **at least once**. The dedupe above stops a *redelivered* event from re-running once
-its prior attempt **committed** — but if a worker crashes *after* an action ran and *before* the
-commit, the event is redelivered and the action **runs again**. Dedupe is per *event*, not per
-*action*.
+its prior attempt **committed** — but when an attempt runs its actions and then doesn't commit,
+the event is redelivered and the actions **run again**. Dedupe is per *event*, not per *action*.
+That happens when a worker crashes between an action and the commit — and, with nothing
+crashing, when the commit loses to another writer of the same execution (a `StoreConflict`): a
+control-plane command (`suspend`, `cancel`, …) or a `process()` landing while a worker runs the
+step, or a lease that expired under an action slower than `visibility`.
 
 For a side-effecting action (charge a card, send an email — local or a remote FaaS function) the
-driver exposes a stable key, `stm.idempotency_key = {execution_id}:{version}:{index}`. It is
-deterministic — the pure engine reproduces the same action sequence and the version is the
-pre-commit value — so a redelivery hands each action the *same* key.
+driver exposes a stable key, `stm.idempotency_key = {execution_id}:{step}:{index}:{action}`:
+`step` is the id of the event being processed (`start` when the execution starts), `index` the
+action's position in that step, `action` its name. Every attempt at the same event hands each
+action the *same* key — even when another writer moved the execution on in between, since the
+event's id, unlike the version, doesn't change. So give a retried submission the same
+`Event(id=...)` (a webhook's own event id, a request id) and the key — and the dedupe — follow
+it.
 
 The dedupe must live in an **external** backend you own (Redis `SET NX`, a DynamoDB conditional
 put, a service's native idempotency key) — **not** in harel's store or context. The gap is a crash

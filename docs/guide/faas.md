@@ -47,7 +47,7 @@ out = entrypoint(
         "context": {},
         "event": {"kind": "Pay", "data": {}},
         "inputs": {"amount": 42},
-        "idempotency_key": "exe:1:0",
+        "idempotency_key": "exe:pay-1:0:charge",
     }
 )
 assert out == {"context": {"charged": 42}, "result": "ok"}
@@ -118,9 +118,10 @@ context is small. Switch to a patch only if a context ever grows large.
 ## Idempotency across the at-least-once window
 
 Delivery is **at least once** (see [Durability](durability.md)): if the worker crashes after the
-remote invoke but before the commit, the event is redelivered and the action — local or remote —
-**runs again**. The payload carries `idempotency_key` (the same stable
-`stm.idempotency_key = {execution_id}:{version}:{index}`) so the function can dedupe its side
+remote invoke but before the commit — or the commit loses to another writer of the execution —
+the event is redelivered and the action, local or remote, **runs again**. The payload carries
+`idempotency_key` (the same stable `stm.idempotency_key = {execution_id}:{step}:{index}:{action}`,
+identical on every attempt at the event) so the function can dedupe its side
 effect against the callee's native idempotency (Stripe's idempotency key, a DynamoDB conditional
 put). harel records nothing extra — a harel-side record would roll back with the failed commit, so
 it could not survive the crash window. This is the **B** approach; see [Durability](durability.md)

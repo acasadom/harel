@@ -71,6 +71,23 @@ def _trace_step(
     return step
 
 
+class _ActionKeys:
+    """The idempotency keys of one step's actions: `{execution_id}:{step}:{index}:{action}`,
+    `step` being the id of the event the step processes (`start` when the execution starts).
+    Every attempt at the same event computes the same keys, whatever else wrote the execution
+    in between — the event id, unlike the version, doesn't move. The action's name keeps two
+    different actions from sharing a key, should the attempts reach different states."""
+
+    def __init__(self, execution_id: str, step: str) -> None:
+        self._base = f"{execution_id}:{step}"
+        self._index = 0
+
+    def next(self, action_name: str) -> str:
+        key = f"{self._base}:{self._index}:{action_name}"
+        self._index += 1
+        return key
+
+
 class _Proxy:
     """Stand-in passed to an Execution's actions: exposes its `execution_ctx` and
     a stable `idempotency_key` for the current action (set by the driver before
@@ -166,7 +183,8 @@ class _SyncDriver:
         tracing is enabled, one timeline step (transition + actions + context_out) is
         recorded in the same `commit` (`event=None` is the initial start)."""
         from_path = exe.active_path
-        emits, timer_ops, spawns, actions, assigned = self._drive(exe, gen)
+        keys = _ActionKeys(exe.id, event_id if event_id is not None else "start")
+        emits, timer_ops, spawns, actions, assigned = self._drive(exe, gen, keys=keys)
         step = (
             _trace_step(event, from_path, exe, actions, self._clock(), assigned)
             if self._trace_enabled
@@ -182,7 +200,9 @@ class _SyncDriver:
             trace=step,
         )
 
-    def _expression_error(self, exe: Execution, exc: Exception, original_exc: Optional[Exception]):
+    def _expression_error(
+        self, exe: Execution, exc: Exception, original_exc: Optional[Exception], keys: _ActionKeys
+    ):
         """The engine couldn't evaluate a model expression (a `set`): routed exactly like an
         action error — to an `on error` in scope (`_error` + the error event carry it),
         else the runner's policy. It is raised before the transition leaves any state, so
@@ -195,12 +215,16 @@ class _SyncDriver:
         ev = engine.error_event(exc)
         if engine.has_error_handler(defn, exe, ev):
             exe.context["_error"] = dict(ev.data)
-            return self._drive(exe, engine.process(defn, exe, ev), original_exc=exc)
+            return self._drive(exe, engine.process(defn, exe, ev), original_exc=exc, keys=keys)
         self._on_action_error(exe, exc)
         return [], [], [], [], {}
 
     def _drive(
-        self, exe: Execution, gen, original_exc: Optional[Exception] = None
+        self,
+        exe: Execution,
+        gen,
+        original_exc: Optional[Exception] = None,
+        keys: Optional[_ActionKeys] = None,
     ) -> tuple[
         list[tuple[Optional[str], Event]], list[TimerOp], list[tuple[str, str, dict]], list[str], dict
     ]:
@@ -210,7 +234,8 @@ class _SyncDriver:
         actions: list[str] = []
         assigned: dict = {}  # context values a `set` wrote this step (for the trace)
         proxy = self._proxy(exe)
-        action_index = 0  # per-event counter -> a deterministic, replay-stable idempotency key
+        if keys is None:
+            keys = _ActionKeys(exe.id, "start")
         try:
             effect = next(gen)
             while True:
@@ -219,10 +244,7 @@ class _SyncDriver:
                     action = (
                         effect.selector.action if isinstance(effect, engine.RunSelector) else effect.action
                     )
-                    # version is the pre-commit value (a failed attempt didn't bump it),
-                    # so the key is identical across an at-least-once redelivery
-                    proxy.idempotency_key = f"{exe.id}:{exe.version}:{action_index}"
-                    action_index += 1
+                    proxy.idempotency_key = keys.next(_action_name(action))
                     actions.append(_action_name(action))
                     try:
                         ret = _resolve(action)(proxy, effect.event, **dict(action.inputs))
@@ -253,7 +275,9 @@ class _SyncDriver:
                         ev = engine.error_event(exc)
                         if engine.has_error_handler(defn, exe, ev):
                             exe.context["_error"] = dict(ev.data)
-                            return self._drive(exe, engine.process(defn, exe, ev), original_exc=exc)
+                            return self._drive(
+                                exe, engine.process(defn, exe, ev), original_exc=exc, keys=keys
+                            )
                         self._on_action_error(exe, exc)  # base: re-raises; runtime: fails the exe
                         return [], [], [], [], {}
                     effect = gen.send(engine.ActionResult(value=ret))
@@ -287,7 +311,7 @@ class _SyncDriver:
         except StopIteration:
             pass
         except engine.ExpressionError as exc:
-            return self._expression_error(exe, exc, original_exc)
+            return self._expression_error(exe, exc, original_exc, keys)
         return emits, timer_ops, spawns, actions, assigned
 
     def _create_spawn(self, entry) -> None:

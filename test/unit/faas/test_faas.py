@@ -258,9 +258,9 @@ def test_remote_action_runs_through_the_engine():
     )
     runner = DurableRunner(DictStore(), {defn.id: defn})
     exe = runner.create(defn.id)
-    exe = runner.process(exe.id, Event(kind="Go"))  # enters Charging -> remote charge
+    exe = runner.process(exe.id, Event(kind="Go", id="go-1"))  # enters Charging -> remote charge
 
     assert exe.context["seen"] == "Go"
     # the remote action received the engine's stable idempotency key
-    assert exe.context["key"] == f"{exe.id}:1:0"
+    assert exe.context["key"].startswith(f"{exe.id}:go-1:0:")
     assert client.calls  # the remote function was actually invoked

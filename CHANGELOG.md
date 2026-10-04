@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **An action's idempotency key is the same on every attempt at an event**, also when another
+  writer moved the execution on in between. The key was `{execution_id}:{version}:{index}`: a
+  step whose commit lost to another writer — a control-plane command or a `process()` landing
+  while a worker ran it, with nothing crashing — was redelivered, ran its actions on the new
+  version, and handed them new keys, so a side effect deduped on the key happened twice. It is
+  now `{execution_id}:{step}:{index}:{action}`, `step` being the event's id (`start` when the
+  execution starts). The format changes: a dedupe record written under an old key won't match a
+  retry made after the upgrade.
+- The durability and distribution guides say when a step's actions run twice without a crash.
+
 ## 0.8.0 — 2026-10-04
 
 ### Fixed

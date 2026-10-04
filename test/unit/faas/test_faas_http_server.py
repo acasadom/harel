@@ -96,7 +96,7 @@ def test_remote_http_action_drives_a_machine(server_url):
     exe = runner.create(defn.id)
     # the charge action takes no `amount` input here -> the server returns "skip",
     # but the context it mutated still flows back through the real HTTP round-trip.
-    exe = runner.process(exe.id, Event(kind="Go"))
+    exe = runner.process(exe.id, Event(kind="Go", id="go-1"))
 
     assert exe.context["charged"] == 0
-    assert exe.context["key"] == f"{exe.id}:1:0"  # the engine's stable idempotency key
+    assert exe.context["key"].startswith(f"{exe.id}:go-1:0:")  # the engine's stable idempotency key

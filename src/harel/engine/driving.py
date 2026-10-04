@@ -20,7 +20,7 @@ from harel.definition.model import Definition
 from harel.engine.execution import Execution, Status, stamp
 from harel.engine.flow import CallAction, Flow, call, parallel, run_inline
 from harel.engine.resolve import ResolveError
-from harel.engine.runtime import _CONTROL, _action_name, _Proxy, _resolve, _trace_step
+from harel.engine.runtime import _CONTROL, _action_name, _ActionKeys, _Proxy, _resolve, _trace_step
 from harel.engine.store import TimerOp
 from harel.spec.states import Event
 
@@ -79,7 +79,8 @@ class DriverLogic:
         enqueued anything for the relay (outbox emits or child spawns), so the caller can skip
         the relay round-trips when there is nothing to deliver."""
         from_path = exe.active_path
-        emits, timer_ops, spawns, actions, assigned = yield from self._drive_flow(exe, gen)
+        keys = _ActionKeys(exe.id, event_id if event_id is not None else "start")
+        emits, timer_ops, spawns, actions, assigned = yield from self._drive_flow(exe, gen, keys=keys)
         step = (
             _trace_step(event, from_path, exe, actions, self._clock(), assigned)
             if self._trace_enabled
@@ -98,7 +99,7 @@ class DriverLogic:
         return bool(emits or spawns)
 
     def _expression_error_flow(
-        self, exe: Execution, exc: Exception, original_exc: Optional[Exception]
+        self, exe: Execution, exc: Exception, original_exc: Optional[Exception], keys: "_ActionKeys"
     ) -> Flow:
         """The engine couldn't evaluate a model expression (a `set`): routed exactly like an
         action error — to an `on error` in scope (`_error` + the error event carry it),
@@ -112,21 +113,31 @@ class DriverLogic:
         ev = engine.error_event(exc)
         if engine.has_error_handler(defn, exe, ev):
             exe.context["_error"] = dict(ev.data)
-            return (yield from self._drive_flow(exe, engine.process(defn, exe, ev), original_exc=exc))
+            return (
+                yield from self._drive_flow(exe, engine.process(defn, exe, ev), original_exc=exc, keys=keys)
+            )
         self._on_action_error(exe, exc)
         return [], [], [], [], {}
 
-    def _drive_flow(self, exe: Execution, gen, original_exc: Optional[Exception] = None) -> Flow:
+    def _drive_flow(
+        self,
+        exe: Execution,
+        gen,
+        original_exc: Optional[Exception] = None,
+        keys: Optional[_ActionKeys] = None,
+    ) -> Flow:
         """Run the engine generator `gen` to its end for `exe`, serving its effects: call the
         actions (routing a raise to `on error` or the runner's policy) and collect what the
-        step commits — emits, timer ops, spawns, the actions run, what a `set` wrote."""
+        step commits — emits, timer ops, spawns, the actions run, what a `set` wrote. `keys`
+        numbers the step's actions across an `on error` recovery too."""
+        if keys is None:
+            keys = _ActionKeys(exe.id, "start")
         emits: list[tuple[Optional[str], Event]] = []
         timer_ops: list[TimerOp] = []
         spawns: list[tuple[str, str, dict]] = []
         actions: list[str] = []
         assigned: dict = {}  # context values a `set` wrote this step (for the trace)
         proxy = self._proxy(exe)
-        action_index = 0  # per-event counter -> a deterministic, replay-stable idempotency key
         try:
             effect = next(gen)
             while True:
@@ -135,10 +146,7 @@ class DriverLogic:
                     action = (
                         effect.selector.action if isinstance(effect, engine.RunSelector) else effect.action
                     )
-                    # version is the pre-commit value (a failed attempt didn't bump it),
-                    # so the key is identical across an at-least-once redelivery
-                    proxy.idempotency_key = f"{exe.id}:{exe.version}:{action_index}"
-                    action_index += 1
+                    proxy.idempotency_key = keys.next(_action_name(action))
                     actions.append(_action_name(action))
                     try:
                         ret = yield CallAction(_resolve(action), proxy, effect.event, dict(action.inputs))
@@ -171,7 +179,7 @@ class DriverLogic:
                             exe.context["_error"] = dict(ev.data)
                             return (
                                 yield from self._drive_flow(
-                                    exe, engine.process(defn, exe, ev), original_exc=exc
+                                    exe, engine.process(defn, exe, ev), original_exc=exc, keys=keys
                                 )
                             )
                         self._on_action_error(exe, exc)  # base: re-raises; production: fails the exe
@@ -207,7 +215,7 @@ class DriverLogic:
         except StopIteration:
             pass
         except engine.ExpressionError as exc:
-            return (yield from self._expression_error_flow(exe, exc, original_exc))
+            return (yield from self._expression_error_flow(exe, exc, original_exc, keys))
         return emits, timer_ops, spawns, actions, assigned
 
     def _create_spawn_flow(self, entry) -> Flow:
