@@ -25,8 +25,8 @@ context:
 ```{mermaid}
 stateDiagram-v2
 [*] --> Draft
-Approved : outcome: success
-Rejected : outcome: rejected
+Approved : outcome#58; success
+Rejected : outcome#58; rejected
 Draft --> Review : Submit
 Review --> Approved : Approve
 Review --> Rejected : Reject

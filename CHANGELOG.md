@@ -26,6 +26,9 @@
   a running event loop raises in the background model too, on every call, as documented: once
   the shared background loop was up, the call ran instead — blocking the caller's loop for its
   whole duration.
+- `harel render --mermaid` (`harel.viz.mermaid`) writes a `:` in a state description or an edge
+  label (`on enter: …`, `outcome: …`, a guard's string) as Mermaid's entity `#58;`, still drawn
+  as a colon: Mermaid 11.12 rejected the whole diagram.
 - The NiceGUI example uses the async API (`AsyncDurableRunner` over an `AsyncSqliteStore`,
   `async` handlers): NiceGUI calls its handlers on its event loop, which every click blocked.
 

@@ -24,8 +24,8 @@ pay order-1:
 ```{mermaid}
 stateDiagram-v2
 [*] --> Reserving
-Reserving : on enter: reserve_stock
-Paid : outcome: success
+Reserving : on enter#58; reserve_stock
+Paid : outcome#58; success
 Reserving --> AwaitingPayment
 AwaitingPayment --> Paid : Pay
 Paid --> [*]

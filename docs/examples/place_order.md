@@ -27,20 +27,20 @@ prints every step:
 ```{mermaid}
 stateDiagram-v2
 [*] --> Cart
-Cart : on enter: on_cart
-AwaitingPayment : on enter: request_payment
-Retrying : on enter: on_retry
-Paid : on enter: capture_payment
+Cart : on enter#58; on_cart
+AwaitingPayment : on enter#58; request_payment
+Retrying : on enter#58; on_retry
+Paid : on enter#58; capture_payment
 state "Fulfilling<br/>on enter: start_fulfilment" as Fulfilling {
   [*] --> Fulfilling_Picking
   state "Picking" as Fulfilling_Picking
-  Fulfilling_Picking : on enter: pick
+  Fulfilling_Picking : on enter#58; pick
   state "Packing" as Fulfilling_Packing
-  Fulfilling_Packing : on enter: pack
+  Fulfilling_Packing : on enter#58; pack
   state "Express" as Fulfilling_Express
-  Fulfilling_Express : on enter: book_express
+  Fulfilling_Express : on enter#58; book_express
   state "Standard" as Fulfilling_Standard
-  Fulfilling_Standard : on enter: book_standard
+  Fulfilling_Standard : on enter#58; book_standard
   Fulfilling_Picking --> Fulfilling_Packing : Picked
   state Fulfilling_Packing__choose_carrier <<choice>>
   Fulfilling_Packing --> Fulfilling_Packing__choose_carrier : Packed
@@ -49,15 +49,15 @@ state "Fulfilling<br/>on enter: start_fulfilment" as Fulfilling {
   Fulfilling_Express --> Shipped : Dispatched
   Fulfilling_Standard --> Shipped : Dispatched
 }
-Shipped : on enter: ship
-Delivered : on enter: deliver
-Delivered : outcome: success
-Cancelled : on enter: cancel_order
-Cancelled : outcome: cancelled
-PaymentError : on enter: on_payment_error
-PaymentError : outcome: failed
-FulfilmentError : on enter: on_fulfilment_error
-FulfilmentError : outcome: failed
+Shipped : on enter#58; ship
+Delivered : on enter#58; deliver
+Delivered : outcome#58; success
+Cancelled : on enter#58; cancel_order
+Cancelled : outcome#58; cancelled
+PaymentError : on enter#58; on_payment_error
+PaymentError : outcome#58; failed
+FulfilmentError : on enter#58; on_fulfilment_error
+FulfilmentError : outcome#58; failed
 Cart --> AwaitingPayment : PlaceOrder
 AwaitingPayment --> Paid : PaymentAuthorized
 state AwaitingPayment__choose <<choice>>

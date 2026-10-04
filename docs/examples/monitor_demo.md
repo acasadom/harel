@@ -25,15 +25,15 @@ stateDiagram-v2
 state "Checkout<br/>on enter: reserve_inventory" as Checkout {
   [*] --> Checkout_Payment
   state "Payment" as Checkout_Payment
-  Checkout_Payment : timeout: 300
+  Checkout_Payment : timeout#58; 300
   state "Confirm" as Checkout_Confirm
-  Checkout_Confirm : on enter: charge_card
+  Checkout_Confirm : on enter#58; charge_card
   Checkout_Payment --> Checkout_Confirm : Paid<br/>/ context.charge_id = event.charge_id
   Checkout_Payment --> Cart : Timeout
   Checkout_Confirm --> [*]
 }
-Delivered : on enter: notify_customer
-Delivered : outcome: success
+Delivered : on enter#58; notify_customer
+Delivered : outcome#58; success
 Cart --> Checkout : Checkout
 Checkout --> Shipped : Ship<br/>/ context.tracking = event.tracking
 Shipped --> Delivered : Deliver
@@ -51,9 +51,9 @@ state Fork {
     [*] --> Fork_Picking_P1
     state "P1" as Fork_Picking_P1
     state "P2" as Fork_Picking_P2
-    Fork_Picking_P2 : outcome: success
+    Fork_Picking_P2 : outcome#58; success
     state "P3" as Fork_Picking_P3
-    Fork_Picking_P3 : outcome: failed
+    Fork_Picking_P3 : outcome#58; failed
     Fork_Picking_P1 --> Fork_Picking_P2 : Picked
     Fork_Picking_P1 --> Fork_Picking_P3 : PickFailed
     Fork_Picking_P2 --> [*]
@@ -64,13 +64,13 @@ state Fork {
     [*] --> Fork_Billing_B1
     state "B1" as Fork_Billing_B1
     state "B2" as Fork_Billing_B2
-    Fork_Billing_B2 : outcome: success
+    Fork_Billing_B2 : outcome#58; success
     Fork_Billing_B1 --> Fork_Billing_B2 : Billed
     Fork_Billing_B2 --> [*]
   }
 }
-Done : outcome: success
-Failed : outcome: failed
+Done : outcome#58; success
+Failed : outcome#58; failed
 state Fork__join_success <<choice>>
 Fork --> Fork__join_success
 Fork__join_success --> Done : join_success=pass
