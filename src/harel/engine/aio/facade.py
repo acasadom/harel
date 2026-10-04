@@ -158,6 +158,10 @@ class _AsyncTransportAdapter:
     def __init__(self, transport: Any) -> None:
         self._t = transport
 
+    @property
+    def shares_store_transaction(self) -> bool:
+        return getattr(self._t, "shares_store_transaction", False)
+
     async def publish(self, group_id, event, priority=0):
         return self._t.publish(group_id, event, priority)
 

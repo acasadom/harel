@@ -1,7 +1,7 @@
 """PostgresStore contract tests, run against the real Postgres in the stack.
 
 There is no in-process Postgres fake (unlike fakeredis), so these run as part of
-the compose `test` service when STM_STORE_BACKEND=postgres (skipped otherwise).
+the compose `test` service when HAREL_STORE_BACKEND=postgres (skipped otherwise).
 They cover the store contract directly — version/CAS conflict, transactional
 outbox, dedupe — which the pipeline test in test_compose_stack.py exercises only
 along the happy path. Unique (uuid) execution ids isolate runs on the shared db.
@@ -20,11 +20,11 @@ pytestmark = pytest.mark.stack
 
 @pytest.fixture
 def store():
-    if os.environ.get("STM_STORE_BACKEND") != "postgres":
+    if os.environ.get("HAREL_STORE_BACKEND") != "postgres":
         pytest.skip("not the postgres backend")
-    dsn = os.environ.get("STM_POSTGRES_DSN")
+    dsn = os.environ.get("HAREL_POSTGRES_DSN")
     if not dsn:
-        pytest.skip("STM_POSTGRES_DSN not set")
+        pytest.skip("HAREL_POSTGRES_DSN not set")
     from harel.engine.store import PostgresStore
 
     s = PostgresStore.from_dsn(dsn)

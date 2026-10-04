@@ -6,6 +6,7 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 
+from harel.engine.schema import DEFAULT_PREFIX, Names
 from harel.engine.transport._base import _ACK_LUA, _CLAIM_LUA, _PUBLISH_LUA, Lease
 from harel.spec.states import Event
 
@@ -44,20 +45,23 @@ class RedisTransport:
     # group does not starve other ready groups).
     _CANDIDATES = 8
 
-    def __init__(self, client: Any, prefix: str = "stm", clock: Callable[[], float] = time.time) -> None:
+    def __init__(
+        self, client: Any, clock: Callable[[], float] = time.time, *, prefix: str = DEFAULT_PREFIX
+    ) -> None:
+        """`prefix` namespaces its keys (`<prefix>:...`, see `harel.engine.schema`)."""
         self._r = client
-        self._prefix = prefix
+        self._prefix = Names(prefix).prefix  # checked: the same rule as every backend's
         self._clock = clock  # injectable so the ready-score clock is deterministic in tests
         self._claim_script = client.register_script(_CLAIM_LUA)  # atomic server-side claim
         self._ack_script = client.register_script(_ACK_LUA)  # atomic server-side ack
         self._publish_script = client.register_script(_PUBLISH_LUA)  # atomic tier-routed publish
 
     @classmethod
-    def from_url(cls, url: str, prefix: str = "stm") -> "RedisTransport":
+    def from_url(cls, url: str, *, prefix: str = DEFAULT_PREFIX) -> "RedisTransport":
         """Convenience constructor; imports `redis` lazily (the optional dep)."""
         import redis
 
-        return cls(redis.Redis.from_url(url), prefix)
+        return cls(redis.Redis.from_url(url), prefix=prefix)
 
     def _k_ready(self, priority: int) -> str:
         return f"{self._prefix}:ready:{priority}"

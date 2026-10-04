@@ -8,7 +8,7 @@
 #   docker compose -f deploy/docker-compose.yml run --rm test
 #   docker compose -f deploy/docker-compose.yml down -v
 #
-# STM_STORE_BACKEND picks the durable store: sqlite (default, shared volume),
+# HAREL_STORE_BACKEND picks the durable store: sqlite (default, shared volume),
 # redis, postgres, rqlite, mongo, libsql or dynamodb (all-network; dynamodb runs
 # on localstack). For each non-sqlite backend also bring up its matching service.
 # See deploy/README.md.
@@ -77,20 +77,20 @@ services:
     depends_on:
       - redis
     environment:
-      STM_STORE_BACKEND: ${STM_STORE_BACKEND:-sqlite}
-      STM_TRANSPORT_BACKEND: ${STM_TRANSPORT_BACKEND:-redis}
-      STM_REDIS_URL: redis://redis:6379/0
-      STM_STORE_DB: /state/stm.db
-      STM_TRANSPORT_DB: /state/queue.db
-      STM_POSTGRES_DSN: postgresql://stm:stm@postgres:5432/stm
-      STM_RQLITE_URL: http://rqlite:4001
-      STM_MONGO_URL: mongodb://mongo:27017
-      STM_MONGO_DB: harel
-      STM_LIBSQL_DB: /state/libsql.db
-      STM_SQS_ENDPOINT: http://localstack:4566
-      STM_DYNAMODB_ENDPOINT: http://localstack:4566
-      STM_AWS_REGION: us-east-1
-      STM_VISIBILITY: "30"
+      HAREL_STORE_BACKEND: ${HAREL_STORE_BACKEND:-sqlite}
+      HAREL_TRANSPORT_BACKEND: ${HAREL_TRANSPORT_BACKEND:-redis}
+      HAREL_REDIS_URL: redis://redis:6379/0
+      HAREL_STORE_DB: /state/stm.db
+      HAREL_TRANSPORT_DB: /state/queue.db
+      HAREL_POSTGRES_DSN: postgresql://stm:stm@postgres:5432/stm
+      HAREL_RQLITE_URL: http://rqlite:4001
+      HAREL_MONGO_URL: mongodb://mongo:27017
+      HAREL_MONGO_DB: harel
+      HAREL_LIBSQL_DB: /state/libsql.db
+      HAREL_SQS_ENDPOINT: http://localstack:4566
+      HAREL_DYNAMODB_ENDPOINT: http://localstack:4566
+      HAREL_AWS_REGION: us-east-1
+      HAREL_VISIBILITY: "30"
     volumes:
       - state:/state
 
@@ -103,25 +103,25 @@ services:
       - redis
       - worker
     environment:
-      STM_STACK: "1"
-      STM_STORE_BACKEND: ${STM_STORE_BACKEND:-sqlite}
-      STM_TRANSPORT_BACKEND: ${STM_TRANSPORT_BACKEND:-redis}
-      STM_REDIS_URL: redis://redis:6379/0
-      STM_STORE_DB: /state/stm.db
-      STM_TRANSPORT_DB: /state/queue.db
-      STM_POSTGRES_DSN: postgresql://stm:stm@postgres:5432/stm
-      STM_RQLITE_URL: http://rqlite:4001
-      STM_MONGO_URL: mongodb://mongo:27017
-      STM_MONGO_DB: harel
-      STM_LIBSQL_DB: /state/libsql.db
-      STM_SQS_ENDPOINT: http://localstack:4566
-      STM_DYNAMODB_ENDPOINT: http://localstack:4566
-      STM_AWS_REGION: us-east-1
+      HAREL_STACK: "1"
+      HAREL_STORE_BACKEND: ${HAREL_STORE_BACKEND:-sqlite}
+      HAREL_TRANSPORT_BACKEND: ${HAREL_TRANSPORT_BACKEND:-redis}
+      HAREL_REDIS_URL: redis://redis:6379/0
+      HAREL_STORE_DB: /state/stm.db
+      HAREL_TRANSPORT_DB: /state/queue.db
+      HAREL_POSTGRES_DSN: postgresql://stm:stm@postgres:5432/stm
+      HAREL_RQLITE_URL: http://rqlite:4001
+      HAREL_MONGO_URL: mongodb://mongo:27017
+      HAREL_MONGO_DB: harel
+      HAREL_LIBSQL_DB: /state/libsql.db
+      HAREL_SQS_ENDPOINT: http://localstack:4566
+      HAREL_DYNAMODB_ENDPOINT: http://localstack:4566
+      HAREL_AWS_REGION: us-east-1
       # the FaaS Lambda stack test (test_faas_lambda.py): the LocalStack lambda
       # endpoint + the zip built by the Dockerfile.lambda export target. Unset (or a
       # missing zip) => that test skips.
-      STM_LAMBDA_ENDPOINT: http://localstack:4566
-      STM_LAMBDA_ZIP: /app/deploy/build/function.zip
+      HAREL_LAMBDA_ENDPOINT: http://localstack:4566
+      HAREL_LAMBDA_ZIP: /app/deploy/build/function.zip
     volumes:
       - state:/state
       # the prebuilt Lambda zip (docker build --target export --output deploy/build ..)

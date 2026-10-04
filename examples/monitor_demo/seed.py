@@ -5,7 +5,7 @@ machines in `machines/` with the headless runner (tracing on), on a clock set a 
 the past so the timestamps differ. Run it, then launch the monitor on the same DB:
 
     uv run python -m examples.monitor_demo.seed /tmp/harel-demo.db
-    STM_STORE_BACKEND=sqlite STM_STORE_DB=/tmp/harel-demo.db \
+    HAREL_STORE_BACKEND=sqlite HAREL_STORE_DB=/tmp/harel-demo.db \
         uv run harel monitor --definitions-dir examples/monitor_demo/machines
 
 (or `python -m harel.tui` with the same env). Re-running reseeds a fresh DB.
@@ -109,7 +109,9 @@ def main() -> None:
     seed(db)
     print(f"seeded {db}")
     print("launch the monitor with:")
-    print(f"  STM_STORE_BACKEND=sqlite STM_STORE_DB={db} uv run harel monitor --definitions-dir {MACHINES}")
+    print(
+        f"  HAREL_STORE_BACKEND=sqlite HAREL_STORE_DB={db} uv run harel monitor --definitions-dir {MACHINES}"
+    )
 
 
 if __name__ == "__main__":

@@ -13,21 +13,21 @@ worker starting alongside Postgres in compose waits rather than crashing.
 ## Schema
 
 ```text
-CREATE TABLE transport_messages (
+CREATE TABLE harel_transport_messages (
   seq      BIGSERIAL PRIMARY KEY,   -- monotonic id: FIFO order + the Lease handle
   group_id TEXT NOT NULL,           -- the execution id (the exclusivity group)
   event    TEXT NOT NULL)           -- the Event JSON
-CREATE INDEX transport_messages_group ON transport_messages (group_id, seq)   -- head-of-group lookup
+CREATE INDEX harel_transport_messages_by_group ON harel_transport_messages (group_id, seq)   -- head-of-group lookup
 
-CREATE TABLE transport_groups (
+CREATE TABLE harel_transport_groups (
   group_id    TEXT PRIMARY KEY,     -- one row per group that has messages
   locked_by   TEXT,                 -- lease token (worker_id:uuid) while in flight, else NULL
   lock_expiry DOUBLE PRECISION,     -- epoch when the lease/park ends (NULL = free; >now = in-flight/parked)
   priority    INT NOT NULL DEFAULT 0)  -- set on first publish (0–4); used for priority filtering
-CREATE INDEX transport_groups_claimable ON transport_groups (lock_expiry)
+CREATE INDEX harel_transport_groups_claimable ON harel_transport_groups (lock_expiry)
 ```
 
-The messages and the lease are **split**: `transport_messages` is the queue; `transport_groups`
+The messages and the lease are **split**: `harel_transport_messages` is the queue; `harel_transport_groups`
 holds *exactly one row per active group* with its lease and priority. Claiming leases the **group
 row**, not a message — that is what lets `SKIP LOCKED` pick a different group per worker.
 
@@ -42,8 +42,8 @@ under a `pg_advisory_xact_lock` so several workers opening connections at once d
 ## publish
 
 ```text
-INSERT INTO transport_messages (group_id, event) VALUES (%s, %s)
-INSERT INTO transport_groups (group_id, locked_by, lock_expiry, priority) VALUES (%s, NULL, NULL, %s)
+INSERT INTO harel_transport_messages (group_id, event) VALUES (%s, %s)
+INSERT INTO harel_transport_groups (group_id, locked_by, lock_expiry, priority) VALUES (%s, NULL, NULL, %s)
   ON CONFLICT (group_id) DO NOTHING   -- ready the group only if new; never reset a live lease or priority
 ```
 
@@ -61,19 +61,19 @@ SELECT group_id, seq, event FROM harel_claim(now, now+visibility, token, min_pri
 
 -- harel_claim(p_now, p_lease, p_token, p_min_priority DEFAULT 0), server-side:
 loop:
-  UPDATE transport_groups SET locked_by = p_token, lock_expiry = p_lease
+  UPDATE harel_transport_groups SET locked_by = p_token, lock_expiry = p_lease
     WHERE group_id = (
-      SELECT group_id FROM transport_groups
+      SELECT group_id FROM harel_transport_groups
       WHERE (locked_by IS NULL OR lock_expiry < p_now)   -- free, or its lease lapsed (recovery)
         AND priority >= p_min_priority                    -- priority floor
       ORDER BY COALESCE(lock_expiry, 0) ASC, group_id    -- oldest-claimed first (round-robin)
         FOR UPDATE SKIP LOCKED LIMIT 1)                  -- lock THIS row; others skip it
     RETURNING group_id INTO g
   if g IS NULL:  return                                   -- nothing claimable at this priority
-  RETURN QUERY SELECT group_id, seq, event FROM transport_messages
+  RETURN QUERY SELECT group_id, seq, event FROM harel_transport_messages
                WHERE group_id = g ORDER BY seq LIMIT 1    -- the head
   if FOUND:  return
-  DELETE FROM transport_groups WHERE group_id = g AND locked_by = p_token  -- stale empty group, retry
+  DELETE FROM harel_transport_groups WHERE group_id = g AND locked_by = p_token  -- stale empty group, retry
 ```
 
 `FOR UPDATE SKIP LOCKED` is the crux: Postgres row-locks the selected group row for the
@@ -93,17 +93,17 @@ of it. `nack` stays a single fenced `UPDATE`:
 ```text
 ack(lease):   SELECT harel_ack(group_id, seq, token, now)   -- ONE round-trip, server-side:
                 if EXISTS(transport_groups WHERE group_id=? AND locked_by=token):  # fence
-                   DELETE FROM transport_messages WHERE seq = ?                     # remove head
+                   DELETE FROM harel_transport_messages WHERE seq = ?                     # remove head
                    if messages remain for group:
-                     UPDATE transport_groups SET locked_by=NULL, lock_expiry=now    # free + round-robin
+                     UPDATE harel_transport_groups SET locked_by=NULL, lock_expiry=now    # free + round-robin
                        WHERE group_id=? AND locked_by=token
                    else:
-                     DELETE FROM transport_groups WHERE group_id=? AND locked_by=token  # drain: drop row
+                     DELETE FROM harel_transport_groups WHERE group_id=? AND locked_by=token  # drain: drop row
 
 nack(lease, delay):
-   if delay>0:  UPDATE transport_groups SET lock_expiry = now+delay                # park (keep token)
+   if delay>0:  UPDATE harel_transport_groups SET lock_expiry = now+delay                # park (keep token)
                   WHERE group_id=? AND locked_by=token
-   else:        UPDATE transport_groups SET locked_by=NULL, lock_expiry=NULL       # retry now
+   else:        UPDATE harel_transport_groups SET locked_by=NULL, lock_expiry=NULL       # retry now
                   WHERE group_id=? AND locked_by=token
 ```
 

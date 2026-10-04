@@ -10,6 +10,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 COPY test ./test
+COPY docs ./docs
 COPY deploy ./deploy
 
 # setuptools-scm needs a git repo to detect the version; supply a fallback so the
@@ -24,6 +25,6 @@ RUN uv sync --frozen --extra redis --extra postgres --extra rqlite --extra mongo
 
 # demo_actions resolves from deploy/ at worker runtime; the registry is baked in
 ENV PYTHONPATH=/app/deploy
-ENV STM_DEFINITIONS_DIR=/app/deploy/definitions
+ENV HAREL_DEFINITIONS_DIR=/app/deploy/definitions
 
 CMD ["/app/.venv/bin/python", "-u", "-m", "harel.worker"]

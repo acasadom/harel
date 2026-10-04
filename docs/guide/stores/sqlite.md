@@ -13,7 +13,7 @@ need persistence, point it at a file path.
   connection is opened once in `__init__` and reused for every operation:
   `sqlite3.connect(str(path), check_same_thread=False)` (the `check_same_thread=False` lets the
   same connection be used from a worker thread, e.g. the timer sweep).
-- **Storage model:** each `Execution` is stored as **one row** in `executions`, keyed by its
+- **Storage model:** each `Execution` is stored as **one row** in `harel_executions`, keyed by its
   `id`, with the whole object serialized to JSON in the `data` column (`exe.model_dump_json()`).
   Reloading rehydrates it with `Execution.model_validate_json(...)`. A fresh `SqliteStore`
   opened on the same file reads the committed rows, so a run resumes after a process restart.
@@ -38,10 +38,10 @@ need persistence, point it at a file path.
 
 Six tables, all created with `CREATE TABLE IF NOT EXISTS` in `__init__` and then committed.
 
-### `executions` — the durable state
+### `harel_executions` — the durable state
 
 ```text
-CREATE TABLE IF NOT EXISTS executions
+CREATE TABLE IF NOT EXISTS harel_executions
 (id TEXT PRIMARY KEY, definition_id TEXT NOT NULL, data TEXT NOT NULL,
  version INTEGER NOT NULL)
 ```
@@ -56,10 +56,10 @@ CREATE TABLE IF NOT EXISTS executions
 `data` is the source of truth for the Execution; `definition_id` and `version` are denormalized
 out of it purely so the hot paths (CAS, listing) don't have to parse JSON.
 
-### `outbox` — the transactional event outbox
+### `harel_outbox` — the transactional event outbox
 
 ```text
-CREATE TABLE IF NOT EXISTS outbox
+CREATE TABLE IF NOT EXISTS harel_outbox
 (seq INTEGER PRIMARY KEY AUTOINCREMENT, target_id TEXT, event TEXT NOT NULL)
 ```
 
@@ -74,10 +74,10 @@ transaction as the state advance, and a relay drains them after commit (`pending
 `ack_outbox`). A crash between the state write and the delivery cannot lose an emitted
 `Finished` — it is already durable in this table.
 
-### `processed_events` — at-least-once dedupe
+### `harel_processed_events` — at-least-once dedupe
 
 ```text
-CREATE TABLE IF NOT EXISTS processed_events
+CREATE TABLE IF NOT EXISTS harel_processed_events
 (execution_id TEXT NOT NULL, event_id TEXT NOT NULL,
  PRIMARY KEY (execution_id, event_id))
 ```
@@ -92,10 +92,10 @@ Under at-least-once delivery the same event can arrive twice; recording its id h
 checking it on load) makes the effect take hold **once**. The composite primary key is what
 makes the `INSERT OR IGNORE` in `commit` a no-op on a redelivery.
 
-### `timers` — durable timers
+### `harel_timers` — durable timers
 
 ```text
-CREATE TABLE IF NOT EXISTS timers
+CREATE TABLE IF NOT EXISTS harel_timers
 (execution_id TEXT NOT NULL, path TEXT NOT NULL, fire_at REAL NOT NULL,
  PRIMARY KEY (execution_id, path))
 ```
@@ -111,10 +111,10 @@ A `timeout:` state arms a timer on enter and cancels it on exit, both applied in
 `commit` as the transition that entered/exited it. The sweep (`due_timers`) finds rows whose
 `fire_at <= now` and publishes a `Timeout` event.
 
-### `spawns` — the orthogonal-fork spawn outbox
+### `harel_spawns` — the orthogonal-fork spawn outbox
 
 ```text
-CREATE TABLE IF NOT EXISTS spawns
+CREATE TABLE IF NOT EXISTS harel_spawns
 (seq INTEGER PRIMARY KEY AUTOINCREMENT, parent_id TEXT NOT NULL, child_id TEXT NOT NULL,
  root_path TEXT NOT NULL, context TEXT NOT NULL)
 ```
@@ -132,10 +132,10 @@ intent per region here, committed atomically with the parent's advance and its `
 expectations. A relay then creates each child idempotently (`pending_spawns` / `ack_spawn`).
 This mirrors the event outbox and is what makes a crash-during-fork safe.
 
-### `trace` — the execution-timeline ring (opt-in)
+### `harel_trace` — the execution-timeline ring (opt-in)
 
 ```text
-CREATE TABLE IF NOT EXISTS trace
+CREATE TABLE IF NOT EXISTS harel_trace
 (execution_id TEXT NOT NULL, idx INTEGER NOT NULL, entry TEXT NOT NULL,
  PRIMARY KEY (execution_id, idx))
 ```
@@ -158,7 +158,7 @@ from the commit of the transaction** so it can be batched with the rest of `comm
 statements:
 
 ```text
-UPDATE executions SET data = ?, version = ? WHERE id = ? AND version = ?
+UPDATE harel_executions SET data = ?, version = ? WHERE id = ? AND version = ?
 ```
 
 The code:
@@ -168,14 +168,14 @@ old = exe.version
 exe.version = old + 1
 data = exe.model_dump_json()
 cur = self._conn.execute(
-    "UPDATE executions SET data = ?, version = ? WHERE id = ? AND version = ?",
+    "UPDATE harel_executions SET data = ?, version = ? WHERE id = ? AND version = ?",
     (data, exe.version, exe.id, old),
 )
 if cur.rowcount == 0:
-    found = self._conn.execute("SELECT version FROM executions WHERE id = ?", (exe.id,)).fetchone()
+    found = self._conn.execute("SELECT version FROM harel_executions WHERE id = ?", (exe.id,)).fetchone()
     if found is None and old == 0:
         self._conn.execute(
-            "INSERT INTO executions (id, definition_id, data, version) VALUES (?, ?, ?, ?)",
+            "INSERT INTO harel_executions (id, definition_id, data, version) VALUES (?, ?, ?, ?)",
             (exe.id, exe.definition_id, data, exe.version),
         )
     else:
@@ -222,33 +222,33 @@ def commit(self, exe, emits, processed_event_id=None, timers=(), spawns=(), trac
         seqs = []
         for target_id, event in emits:                     # 2. enqueue emitted events (outbox)
             cur = self._conn.execute(
-                "INSERT INTO outbox (target_id, event) VALUES (?, ?)",
+                "INSERT INTO harel_outbox (target_id, event) VALUES (?, ?)",
                 (target_id, event.model_dump_json()),
             )
             seqs.append(cur.lastrowid)                     #    each entry's seq, for the caller
 
         if processed_event_id is not None:                 # 3. record this event handled (dedupe)
             self._conn.execute(
-                "INSERT OR IGNORE INTO processed_events (execution_id, event_id) VALUES (?, ?)",
+                "INSERT OR IGNORE INTO harel_processed_events (execution_id, event_id) VALUES (?, ?)",
                 (exe.id, processed_event_id),
             )
 
         for child_id, root_path, context in spawns:        # 4. enqueue orthogonal child creations
             self._conn.execute(
-                "INSERT INTO spawns (parent_id, child_id, root_path, context) VALUES (?, ?, ?, ?)",
+                "INSERT INTO harel_spawns (parent_id, child_id, root_path, context) VALUES (?, ?, ?, ?)",
                 (exe.id, child_id, root_path, json.dumps(context)),
             )
 
         for op in timers:                                  # 5. arm / disarm durable timers
             if op.action == "schedule":
                 self._conn.execute(
-                    "INSERT INTO timers (execution_id, path, fire_at) VALUES (?, ?, ?) "
+                    "INSERT INTO harel_timers (execution_id, path, fire_at) VALUES (?, ?, ?) "
                     "ON CONFLICT(execution_id, path) DO UPDATE SET fire_at = excluded.fire_at",
                     (exe.id, op.path, op.fire_at),
                 )
             else:
                 self._conn.execute(
-                    "DELETE FROM timers WHERE execution_id = ? AND path = ?", (exe.id, op.path)
+                    "DELETE FROM harel_timers WHERE execution_id = ? AND path = ?", (exe.id, op.path)
                 )
 
         if trace is not None:                              # 6. append a trace step (opt-in)
@@ -268,7 +268,7 @@ Statement by statement:
    `StoreConflict`, no further statements run; the `except` rolls back and re-raises.
 2. **Outbox INSERTs** — one row per emitted event. Deferred delivery, durable before the relay
    touches it.
-3. **`INSERT OR IGNORE` into `processed_events`** — mark the event that drove this step as
+3. **`INSERT OR IGNORE` into `harel_processed_events`** — mark the event that drove this step as
    handled. `OR IGNORE` makes a redelivery a no-op against the composite PK, so dedupe is
    idempotent.
 4. **Spawn INSERTs** — one row per orthogonal child to create. Committed together with the
@@ -301,15 +301,15 @@ is the durability contract; the relay and sweep below complete the at-least-once
 transaction). It is two statements:
 
 ```text
-INSERT INTO trace (execution_id, idx, entry)
-SELECT ?, COALESCE((SELECT MAX(idx) FROM trace WHERE execution_id = ?), -1) + 1, ?
+INSERT INTO harel_trace (execution_id, idx, entry)
+SELECT ?, COALESCE((SELECT MAX(idx) FROM harel_trace WHERE execution_id = ?), -1) + 1, ?
 ```
 
 then, if `trace_max` is set, the ring cap:
 
 ```text
-DELETE FROM trace WHERE execution_id = ? AND idx <=
-(SELECT MAX(idx) FROM trace WHERE execution_id = ?) - trace_max
+DELETE FROM harel_trace WHERE execution_id = ? AND idx <=
+(SELECT MAX(idx) FROM harel_trace WHERE execution_id = ?) - trace_max
 ```
 
 Why it is shaped this way:
@@ -326,7 +326,7 @@ Why it is shaped this way:
   carry its own index:
 
   ```text
-  SELECT idx, entry FROM trace WHERE execution_id = ? ORDER BY idx
+  SELECT idx, entry FROM harel_trace WHERE execution_id = ? ORDER BY idx
   -> [{**json.loads(entry), "index": idx} for idx, entry in rows]
   ```
 
@@ -344,7 +344,7 @@ def append_trace(self, execution_id, entry):
 ### `load`
 
 ```text
-SELECT data FROM executions WHERE id = ?
+SELECT data FROM harel_executions WHERE id = ?
 ```
 
 Returns `Execution.model_validate_json(row[0])` or `None` if no row. The full snapshot, rehydrated.
@@ -364,7 +364,7 @@ columns:
 ```text
 SELECT id, definition_id, version, json_extract(data,'$.status'),
        json_extract(data,'$.outcome'), json_extract(data,'$.active_path'),
-       json_extract(data,'$.parent_id'), json_extract(data,'$.finished_at') FROM executions
+       json_extract(data,'$.parent_id'), json_extract(data,'$.finished_at') FROM harel_executions
 WHERE <conditions> ORDER BY id LIMIT ? OFFSET ?
 ```
 
@@ -381,7 +381,7 @@ WHERE <conditions> ORDER BY id LIMIT ? OFFSET ?
 ### `is_processed`
 
 ```text
-SELECT 1 FROM processed_events WHERE execution_id = ? AND event_id = ?
+SELECT 1 FROM harel_processed_events WHERE execution_id = ? AND event_id = ?
 ```
 
 Returns `True` if the marker exists — the dedupe lookup under at-least-once delivery.
@@ -389,8 +389,8 @@ Returns `True` if the marker exists — the dedupe lookup under at-least-once de
 ### `pending_outbox` / `ack_outbox`
 
 ```text
-SELECT seq, target_id, event FROM outbox ORDER BY seq          -- oldest first
-DELETE FROM outbox WHERE seq = ?                               -- then commit
+SELECT seq, target_id, event FROM harel_outbox ORDER BY seq          -- oldest first
+DELETE FROM harel_outbox WHERE seq = ?                               -- then commit
 ```
 
 `pending_outbox` returns the undelivered `OutboxEntry` list (oldest first), deserializing each
@@ -400,8 +400,8 @@ is its own small transaction, independent of the event step that enqueued it).
 ### `pending_spawns` / `ack_spawn`
 
 ```text
-SELECT seq, parent_id, child_id, root_path, context FROM spawns ORDER BY seq
-DELETE FROM spawns WHERE seq = ?                               -- then commit
+SELECT seq, parent_id, child_id, root_path, context FROM harel_spawns ORDER BY seq
+DELETE FROM harel_spawns WHERE seq = ?                               -- then commit
 ```
 
 `pending_spawns` returns `SpawnEntry` rows (oldest first), `json.loads`-ing the context.
@@ -411,14 +411,14 @@ idempotently before acking, so a crash between create and ack just retries a har
 ### `due_timers` / `delete_timer`
 
 ```text
-SELECT execution_id, path, fire_at FROM timers WHERE fire_at <= ? ORDER BY fire_at
+SELECT execution_id, path, fire_at FROM harel_timers WHERE fire_at <= ? ORDER BY fire_at
 ```
 
 `due_timers(now)` returns the timers whose `fire_at <= now` as `(execution_id, path, fire_at)`,
 soonest first — the sweep publishes a `Timeout` for each.
 
 ```text
-DELETE FROM timers WHERE execution_id = ? AND path = ? AND fire_at = ?
+DELETE FROM harel_timers WHERE execution_id = ? AND path = ? AND fire_at = ?
 ```
 
 `delete_timer` is **guarded on `fire_at`**: it deletes the row only if it still holds the exact
@@ -437,13 +437,13 @@ the stale sweep instead of being silently dropped. It commits on its own.
 it, in **one transaction** — the same all-or-nothing unit as `commit`:
 
 ```text
-DELETE FROM executions WHERE id = ? AND version = ?        -- the CAS
+DELETE FROM harel_executions WHERE id = ? AND version = ?        -- the CAS
 -- 0 rows and the id still exists -> it moved on: roll back, return False
-DELETE FROM processed_events WHERE execution_id = ?
-DELETE FROM trace            WHERE execution_id = ?
-DELETE FROM timers           WHERE execution_id = ?
-DELETE FROM outbox           WHERE target_id    = ?
-DELETE FROM spawns           WHERE parent_id    = ?
+DELETE FROM harel_processed_events WHERE execution_id = ?
+DELETE FROM harel_trace            WHERE execution_id = ?
+DELETE FROM harel_timers           WHERE execution_id = ?
+DELETE FROM harel_outbox           WHERE target_id    = ?
+DELETE FROM harel_spawns           WHERE parent_id    = ?
 COMMIT
 ```
 
@@ -452,7 +452,7 @@ Afterwards a commit of a stale copy of the Execution finds no row at its version
 `StoreConflict` (`_write` inserts only when `old == 0`), so a purged Execution is never recreated.
 The async twin runs the same transaction under its connection lock.
 
-`ids_with_prefix(prefix)` — `SELECT id FROM executions WHERE id LIKE ? ESCAPE '\'`, with
+`ids_with_prefix(prefix)` — `SELECT id FROM harel_executions WHERE id LIKE ? ESCAPE '\'`, with
 `%`, `_` and `\` in the prefix escaped — is how the control plane finds a tree's descendants.
 ## Async twin (`aio_store/sqlite.py`)
 
@@ -478,11 +478,11 @@ same SQL, same CAS, same one-transaction `commit`. The differences are mechanica
   `CREATE TABLE`s; the async version sets it in `__init__`).
 - It additionally provides **`load_for_event`** — load + dedupe-check in **one round-trip** (the
   worker's per-event pair), a single query that selects the data and an `EXISTS` over
-  `processed_events` together:
+  `harel_processed_events` together:
 
   ```text
-  SELECT (SELECT data FROM executions WHERE id = ?),
-         EXISTS(SELECT 1 FROM processed_events WHERE execution_id = ? AND event_id = ?)
+  SELECT (SELECT data FROM harel_executions WHERE id = ?),
+         EXISTS(SELECT 1 FROM harel_processed_events WHERE execution_id = ? AND event_id = ?)
   ```
 
   It returns `(Execution | None, already_processed: bool)`; if the data sub-select is `NULL`
@@ -520,5 +520,5 @@ Reach for a **networked backend** instead when you need **many hosts** writing c
 design as this page, just over a network engine — `SqliteStore` is the reference to read first.
 
 See the [stores hub](../stores) for the full backend matrix and the
-[`STM_STORE_BACKEND`](../distribution) selector, and [durability](../durability) for the
+[`HAREL_STORE_BACKEND`](../distribution) selector, and [durability](../durability) for the
 crash-safety guarantees this backend implements.

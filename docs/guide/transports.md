@@ -6,7 +6,7 @@ reference: the invariant they all uphold, the contract, the shared lease/parking
 a page per backend with its **exact queue layout and every operation** (the table/keys/documents,
 how `claim` leases a group, how `ack`/`nack` work, and why). For the concepts (the seam, running
 workers, scaling) start with [distribution](distribution); to select one at the worker see
-[`STM_TRANSPORT_BACKEND`](distribution).
+[`HAREL_TRANSPORT_BACKEND`](distribution).
 
 ## The invariant: single active consumer per group
 
@@ -79,6 +79,12 @@ def test_my_transport():
 its deadlines elsewhere than the injected clock (server-side TTLs, a queue service's visibility)
 and `priorities=False` if it has none.
 
+A transport whose writes go into the store's transaction — a table on the caller's own
+connection, next to the store's — sets `shares_store_transaction = True`. `create()` then lets a
+failed publish of the new execution's `Start` reach the caller, whose transaction can't commit.
+Without it, `create()` tolerates the failure: the `Start` is already in the store's outbox, and a
+later flush delivers it.
+
 ## The backends
 
 Each backend has its own page with the full queue layout and every operation broken down with the
@@ -107,6 +113,15 @@ transports/sqs
 | [RqliteTransport](transports/rqlite) | one serialized `UPDATE` (Raft orders it) |
 | [MongoTransport](transports/mongo) | per-group ready-index/lock doc; `claim` is one atomic sorted `find_one_and_update` |
 | [SqsTransport](transports/sqs) | SQS FIFO `MessageGroupId` (native) + visibility-timeout lease |
+
+## Naming and schema ownership
+
+Like the stores, every persistent transport takes `prefix` (default `"harel"`), which names its
+tables, keys or collections, and, where it has a schema, `create_schema` — see [naming and
+schema ownership](stores.md#naming-and-schema-ownership). A store and a transport in the same
+database share a prefix without colliding: the transport's names carry `transport`
+(`harel_transport_messages`). The SQS transport is named by its queue (`queue_name`, default
+`harel.fifo`).
 
 ## Store and transport are independent
 

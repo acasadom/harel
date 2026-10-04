@@ -18,19 +18,14 @@ _PARKED = "__parked__"
 # by arrival) with nothing in flight, and its head — its oldest message. It walks `groups` in
 # that order and stops at the first eligible one, so its cost doesn't grow with the backlog.
 # A group with nothing in flight has a free head: unlocked, or its lease or park ended.
-# Params: (min_priority, now).
+# Params: (min_priority, now). A template (`schema.Names.sql`).
 _SQLITE_CLAIM_SQL = (
-    "SELECT m.seq, m.group_id, m.event FROM groups g "
-    "JOIN messages m ON m.seq = (SELECT MIN(seq) FROM messages WHERE group_id = g.group_id) "
+    "SELECT m.seq, m.group_id, m.event FROM {groups} g "
+    "JOIN {messages} m ON m.seq = (SELECT MIN(seq) FROM {messages} WHERE group_id = g.group_id) "
     "WHERE g.priority >= ? AND NOT EXISTS ("
-    "  SELECT 1 FROM messages x WHERE x.group_id = g.group_id "
+    "  SELECT 1 FROM {messages} x WHERE x.group_id = g.group_id "
     "  AND x.locked_by IS NOT NULL AND x.lock_expiry >= ?"
     ") ORDER BY g.last_claimed_at, g.rowid LIMIT 1"
-)
-# what `_SQLITE_CLAIM_SQL` (and ack's empty-group check) walk
-_SQLITE_TRANSPORT_INDEXES = (
-    "CREATE INDEX IF NOT EXISTS groups_by_last_claimed ON groups (last_claimed_at)",
-    "CREATE INDEX IF NOT EXISTS messages_by_group ON messages (group_id, seq)",
 )
 
 # The Redis `publish`, server-side and atomic (shared by the sync + async backends). Pushes
@@ -136,53 +131,6 @@ redis.call('DEL', lockkey)
 return 1
 """
 
-# Postgres `claim`/`ack` as PL/pgSQL functions (shared by the sync + async backends). The
-# diagnostic showed the PG worker is round-trip-bound (NOT fsync-bound — `synchronous_commit=off`
-# didn't help), with ~7 statements/event across the ops. Folding each op's statements into one
-# server-side function call is the Postgres analog of the Redis Lua scripts: `claim` (UPDATE-lease
-# + SELECT-head + stale-empty cleanup) and `ack` (fence + DELETE + free-lock) each become ONE
-# round-trip. Created idempotently in the transport's schema setup. The lease itself was already
-# atomic (FOR UPDATE SKIP LOCKED), so this is about round-trips, not a claim race.
-_PG_CLAIM_FN = """
-CREATE OR REPLACE FUNCTION harel_claim(p_now double precision, p_lease double precision, p_token text, p_min_priority int DEFAULT 0)
-RETURNS TABLE(group_id text, seq bigint, event text) AS $$
-DECLARE g text;
-BEGIN
-  LOOP
-    UPDATE transport_groups tg SET locked_by = p_token, lock_expiry = p_lease
-    WHERE tg.group_id = (
-      SELECT s.group_id FROM transport_groups s
-      WHERE (s.locked_by IS NULL OR s.lock_expiry < p_now)
-        AND s.priority >= p_min_priority
-      ORDER BY COALESCE(s.lock_expiry, 0) ASC, s.group_id FOR UPDATE SKIP LOCKED LIMIT 1
-    ) RETURNING tg.group_id INTO g;
-    IF g IS NULL THEN RETURN; END IF;
-    RETURN QUERY SELECT m.group_id, m.seq, m.event FROM transport_messages m
-                 WHERE m.group_id = g ORDER BY m.seq LIMIT 1;
-    IF FOUND THEN RETURN; END IF;
-    DELETE FROM transport_groups WHERE transport_groups.group_id = g AND locked_by = p_token;
-  END LOOP;
-END; $$ LANGUAGE plpgsql;
-"""
-_PG_ACK_FN = """
-DROP FUNCTION IF EXISTS harel_ack(text, bigint, text);
-CREATE OR REPLACE FUNCTION harel_ack(p_group text, p_seq bigint, p_token text, p_now double precision)
-RETURNS void AS $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM transport_groups WHERE group_id = p_group AND locked_by = p_token) THEN
-    DELETE FROM transport_messages WHERE seq = p_seq;
-    IF EXISTS (SELECT 1 FROM transport_messages WHERE group_id = p_group) THEN
-      -- lock_expiry = p_now so this group sorts after fresh ones in the next claim (round-robin)
-      UPDATE transport_groups SET locked_by = NULL, lock_expiry = p_now
-      WHERE group_id = p_group AND locked_by = p_token;
-    ELSE
-      -- group drained: delete the row so priority is reset on next publish (no stale priority)
-      DELETE FROM transport_groups WHERE group_id = p_group AND locked_by = p_token;
-    END IF;
-  END IF;
-END; $$ LANGUAGE plpgsql;
-"""
-
 
 @dataclass
 class Lease:
@@ -199,6 +147,15 @@ class Lease:
 
 @runtime_checkable
 class Transport(Protocol):
+    """A queue with single-active-consumer per group (`group_id` = execution id).
+
+    A transport whose writes go into the same transaction as the store's — both on the
+    caller's connection — sets `shares_store_transaction = True` (an optional attribute; absent
+    means False). The runner then lets a failed `publish` of a new execution's `Start` reach
+    the caller: the transaction it was part of can't commit, so there is nothing for a later
+    relay to deliver. Otherwise the `Start` committed to the outbox stays queued, and a later
+    flush delivers it."""
+
     def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
         """Enqueue `event` in `group_id`'s FIFO. `priority` is stored on first publish only
         (INSERT OR IGNORE / HSETNX semantics); subsequent publishes to the same group ignore it."""

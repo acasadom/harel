@@ -158,10 +158,10 @@ From the repo root, with the stack's backends up and no worker running:
 ```text
 docker compose -f deploy/docker-compose.yml up -d --wait redis postgres rqlite mongo
 docker compose -f deploy/docker-compose.yml run --rm --no-deps -v "$PWD/bench:/app/bench:ro" \
-    -e STM_STORE_BACKEND=postgres -e STM_TRANSPORT_BACKEND=postgres \
+    -e HAREL_STORE_BACKEND=postgres -e HAREL_TRANSPORT_BACKEND=postgres \
     test /app/.venv/bin/python bench/bench_workers.py --n-executions 2000 --workers 1,2,4,8
 ```
 
-For SQLite set `STM_STORE_DB` and `STM_TRANSPORT_DB` to two paths under `/state`. For DBOS,
+For SQLite set `HAREL_STORE_DB` and `HAREL_TRANSPORT_DB` to two paths under `/state`. For DBOS,
 `uv pip install --python /app/.venv/bin/python dbos` inside the container and set
-`STM_DBOS_DSN=postgresql://stm:stm@postgres:5432/dbosbench`.
+`HAREL_DBOS_DSN=postgresql://stm:stm@postgres:5432/dbosbench`.

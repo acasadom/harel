@@ -89,46 +89,46 @@ After connecting, `__init__` creates the six tables (`CREATE TABLE IF NOT EXISTS
 The schema is created verbatim in `__init__` (identical shape to `SqliteStore`):
 
 ```text
-CREATE TABLE IF NOT EXISTS executions
+CREATE TABLE IF NOT EXISTS harel_executions
   (id TEXT PRIMARY KEY, definition_id TEXT NOT NULL, data TEXT NOT NULL, version INTEGER NOT NULL)
 
-CREATE TABLE IF NOT EXISTS outbox
+CREATE TABLE IF NOT EXISTS harel_outbox
   (seq INTEGER PRIMARY KEY AUTOINCREMENT, target_id TEXT, event TEXT NOT NULL)
 
-CREATE TABLE IF NOT EXISTS processed_events
+CREATE TABLE IF NOT EXISTS harel_processed_events
   (execution_id TEXT NOT NULL, event_id TEXT NOT NULL, PRIMARY KEY (execution_id, event_id))
 
-CREATE TABLE IF NOT EXISTS timers
+CREATE TABLE IF NOT EXISTS harel_timers
   (execution_id TEXT NOT NULL, path TEXT NOT NULL, fire_at REAL NOT NULL,
    PRIMARY KEY (execution_id, path))
 
-CREATE TABLE IF NOT EXISTS spawns
+CREATE TABLE IF NOT EXISTS harel_spawns
   (seq INTEGER PRIMARY KEY AUTOINCREMENT, parent_id TEXT NOT NULL, child_id TEXT NOT NULL,
    root_path TEXT NOT NULL, context TEXT NOT NULL)
 
-CREATE TABLE IF NOT EXISTS trace
+CREATE TABLE IF NOT EXISTS harel_trace
   (execution_id TEXT NOT NULL, idx INTEGER NOT NULL, entry TEXT NOT NULL,
    PRIMARY KEY (execution_id, idx))
 ```
 
 What each holds:
 
-- **`executions`** — one row per Execution. `data` is the full `Execution` serialized as JSON
+- **`harel_executions`** — one row per Execution. `data` is the full `Execution` serialized as JSON
   (`exe.model_dump_json()`); `version` is the optimistic-concurrency counter; `definition_id` lets
   `list_executions` filter without parsing the blob. PK is `id`.
-- **`outbox`** — the transactional outbox of emitted events awaiting delivery. `seq` is a
+- **`harel_outbox`** — the transactional outbox of emitted events awaiting delivery. `seq` is a
   monotonic auto-increment used to order and ack entries; `target_id` is the Execution the event
   is delivered to (nullable = no target); `event` is the event JSON. The relay drains it after
   the commit, so a crash never loses a `Finished`.
-- **`processed_events`** — the dedupe ledger: `(execution_id, event_id)` for every event already
+- **`harel_processed_events`** — the dedupe ledger: `(execution_id, event_id)` for every event already
   handled, PK on both. Makes at-least-once delivery effect-once.
-- **`timers`** — durable timers, one per `(execution_id, path)` (PK), firing at `fire_at` (a
+- **`harel_timers`** — durable timers, one per `(execution_id, path)` (PK), firing at `fire_at` (a
   REAL epoch second). Re-arming the same path replaces the row (upsert).
-- **`spawns`** — pending orthogonal child-Execution creation intents, persisted in the same
+- **`harel_spawns`** — pending orthogonal child-Execution creation intents, persisted in the same
   transaction as the parent's advance + join expectations. `seq` orders/acks; `parent_id`,
   `child_id`, `root_path` and the JSON `context` describe the child the relay must create
   idempotently.
-- **`trace`** — the opt-in execution timeline ring. `(execution_id, idx)` PK; `entry` is the JSON
+- **`harel_trace`** — the opt-in execution timeline ring. `(execution_id, idx)` PK; `entry` is the JSON
   step (event/transition/actions/`context_out`). Off by default.
 
 ## The CAS write + `commit`
@@ -144,14 +144,14 @@ def _write(self, exe: Execution) -> None:
     exe.version = old + 1
     data = exe.model_dump_json()
     cur = self._conn.execute(
-        "UPDATE executions SET data = ?, version = ? WHERE id = ? AND version = ?",
+        "UPDATE harel_executions SET data = ?, version = ? WHERE id = ? AND version = ?",
         (data, exe.version, exe.id, old),
     )
     if cur.rowcount == 0:
-        found = self._conn.execute("SELECT version FROM executions WHERE id = ?", (exe.id,)).fetchone()
+        found = self._conn.execute("SELECT version FROM harel_executions WHERE id = ?", (exe.id,)).fetchone()
         if found is None and old == 0:
             self._conn.execute(
-                "INSERT INTO executions (id, definition_id, data, version) VALUES (?, ?, ?, ?)",
+                "INSERT INTO harel_executions (id, definition_id, data, version) VALUES (?, ?, ?, ?)",
                 (exe.id, exe.definition_id, data, exe.version),
             )
         else:
@@ -211,30 +211,30 @@ def commit(
         seqs = []
         for target_id, event in emits:
             cur = self._conn.execute(
-                "INSERT INTO outbox (target_id, event) VALUES (?, ?)",
+                "INSERT INTO harel_outbox (target_id, event) VALUES (?, ?)",
                 (target_id, event.model_dump_json()),
             )
             seqs.append(cur.lastrowid)
         if processed_event_id is not None:
             self._conn.execute(
-                "INSERT OR IGNORE INTO processed_events (execution_id, event_id) VALUES (?, ?)",
+                "INSERT OR IGNORE INTO harel_processed_events (execution_id, event_id) VALUES (?, ?)",
                 (exe.id, processed_event_id),
             )
         for child_id, root_path, context in spawns:
             self._conn.execute(
-                "INSERT INTO spawns (parent_id, child_id, root_path, context) VALUES (?, ?, ?, ?)",
+                "INSERT INTO harel_spawns (parent_id, child_id, root_path, context) VALUES (?, ?, ?, ?)",
                 (exe.id, child_id, root_path, json.dumps(context)),
             )
         for op in timers:
             if op.action == "schedule":
                 self._conn.execute(
-                    "INSERT INTO timers (execution_id, path, fire_at) VALUES (?, ?, ?) "
+                    "INSERT INTO harel_timers (execution_id, path, fire_at) VALUES (?, ?, ?) "
                     "ON CONFLICT(execution_id, path) DO UPDATE SET fire_at = excluded.fire_at",
                     (exe.id, op.path, op.fire_at),
                 )
             else:
                 self._conn.execute(
-                    "DELETE FROM timers WHERE execution_id = ? AND path = ?", (exe.id, op.path)
+                    "DELETE FROM harel_timers WHERE execution_id = ? AND path = ?", (exe.id, op.path)
                 )
         if trace is not None:
             self._write_trace(exe.id, trace)
@@ -251,18 +251,18 @@ Statement by statement:
 1. **`self._write(exe)`** — the version-CAS UPDATE/INSERT above (uncommitted). If it raises
    `StoreConflict`, the whole transaction is rolled back and the error re-raised — nothing else in
    the batch is applied.
-2. **Outbox** — for each `(target_id, event)`, `INSERT INTO outbox (target_id, event)`. The
+2. **Outbox** — for each `(target_id, event)`, `INSERT INTO harel_outbox (target_id, event)`. The
    `seq` auto-increments, and `commit` returns the new seqs in `emits` order (so a caller that
    delivers an entry itself can ack it). These are the deferred events the relay delivers
    post-commit.
-3. **Dedupe** — if `processed_event_id` is given, `INSERT OR IGNORE INTO processed_events`. The
+3. **Dedupe** — if `processed_event_id` is given, `INSERT OR IGNORE INTO harel_processed_events`. The
    `OR IGNORE` makes recording the handled event idempotent against the PK (a re-delivery is a
    no-op).
-4. **Spawns** — for each `(child_id, root_path, context)`, `INSERT INTO spawns`, with `context`
+4. **Spawns** — for each `(child_id, root_path, context)`, `INSERT INTO harel_spawns`, with `context`
    JSON-encoded. Persisted alongside the parent's advance so the orthogonal fork is atomic.
 5. **Timers** — for each `TimerOp`: `schedule` does an upsert (`ON CONFLICT(execution_id, path) DO
    UPDATE SET fire_at = excluded.fire_at`, so re-arming the same path replaces its `fire_at`);
-   `cancel` does `DELETE FROM timers WHERE execution_id=? AND path=?`. Arming/cancelling happens in
+   `cancel` does `DELETE FROM harel_timers WHERE execution_id=? AND path=?`. Arming/cancelling happens in
    the same transaction as the transition that caused it — no dual-write, a scheduled timer cannot
    be lost.
 6. **Trace** — if a `trace` step is given, `_write_trace` appends it (still inside this txn; see
@@ -283,14 +283,14 @@ trimmed.
 ```text
 def _write_trace(self, execution_id: str, entry: dict) -> None:
     self._conn.execute(
-        "INSERT INTO trace (execution_id, idx, entry) "
-        "SELECT ?, COALESCE((SELECT MAX(idx) FROM trace WHERE execution_id = ?), -1) + 1, ?",
+        "INSERT INTO harel_trace (execution_id, idx, entry) "
+        "SELECT ?, COALESCE((SELECT MAX(idx) FROM harel_trace WHERE execution_id = ?), -1) + 1, ?",
         (execution_id, execution_id, json.dumps(entry)),
     )
     if self.trace_max:
         self._conn.execute(
-            "DELETE FROM trace WHERE execution_id = ? AND idx <= "
-            "(SELECT MAX(idx) FROM trace WHERE execution_id = ?) - ?",
+            "DELETE FROM harel_trace WHERE execution_id = ? AND idx <= "
+            "(SELECT MAX(idx) FROM harel_trace WHERE execution_id = ?) - ?",
             (execution_id, execution_id, self.trace_max),
         )
 ```
@@ -313,7 +313,7 @@ def append_trace(self, execution_id: str, entry: dict) -> None:
 
 def read_trace(self, execution_id: str) -> list[dict]:
     rows = self._conn.execute(
-        "SELECT idx, entry FROM trace WHERE execution_id = ? ORDER BY idx", (execution_id,)
+        "SELECT idx, entry FROM harel_trace WHERE execution_id = ? ORDER BY idx", (execution_id,)
     ).fetchall()
     return [{**json.loads(entry), "index": idx} for idx, entry in rows]
 ```
@@ -328,13 +328,13 @@ one round-trip via a correlated subquery + `EXISTS`.
 
 ```text
 def load(self, execution_id: str) -> Optional[Execution]:
-    row = self._conn.execute("SELECT data FROM executions WHERE id = ?", (execution_id,)).fetchone()
+    row = self._conn.execute("SELECT data FROM harel_executions WHERE id = ?", (execution_id,)).fetchone()
     return Execution.model_validate_json(row[0]) if row is not None else None
 
 def load_for_event(self, execution_id: str, event_id: str) -> tuple[Optional[Execution], bool]:
     row = self._conn.execute(
-        "SELECT (SELECT data FROM executions WHERE id = ?), "
-        "EXISTS(SELECT 1 FROM processed_events WHERE execution_id = ? AND event_id = ?)",
+        "SELECT (SELECT data FROM harel_executions WHERE id = ?), "
+        "EXISTS(SELECT 1 FROM harel_processed_events WHERE execution_id = ? AND event_id = ?)",
         (execution_id, execution_id, event_id),
     ).fetchone()
     if row is None or row[0] is None:
@@ -354,7 +354,7 @@ fetching `limit + 1` rows to know whether a next page exists:
 rows = self._conn.execute(
     "SELECT id, definition_id, version, json_extract(data,'$.status'), "
     "json_extract(data,'$.outcome'), json_extract(data,'$.active_path'), "
-    "json_extract(data,'$.parent_id'), json_extract(data,'$.finished_at') FROM executions "
+    "json_extract(data,'$.parent_id'), json_extract(data,'$.finished_at') FROM harel_executions "
     f"WHERE {' AND '.join(where)} ORDER BY id LIMIT ? OFFSET ?",
     (*params, limit + 1, off),
 ).fetchall()
@@ -362,12 +362,12 @@ rows = self._conn.execute(
 
 ### `is_processed`
 
-The dedupe lookup, a simple existence check on `processed_events`:
+The dedupe lookup, a simple existence check on `harel_processed_events`:
 
 ```text
 def is_processed(self, execution_id: str, event_id: str) -> bool:
     row = self._conn.execute(
-        "SELECT 1 FROM processed_events WHERE execution_id = ? AND event_id = ?",
+        "SELECT 1 FROM harel_processed_events WHERE execution_id = ? AND event_id = ?",
         (execution_id, event_id),
     ).fetchone()
     return row is not None
@@ -380,13 +380,13 @@ def is_processed(self, execution_id: str, event_id: str) -> bool:
 
 ```text
 def pending_outbox(self) -> list[OutboxEntry]:
-    rows = self._conn.execute("SELECT seq, target_id, event FROM outbox ORDER BY seq").fetchall()
+    rows = self._conn.execute("SELECT seq, target_id, event FROM harel_outbox ORDER BY seq").fetchall()
     return [
         OutboxEntry(seq, target_id, Event.model_validate_json(event)) for seq, target_id, event in rows
     ]
 
 def ack_outbox(self, seq: int) -> None:
-    self._conn.execute("DELETE FROM outbox WHERE seq = ?", (seq,))
+    self._conn.execute("DELETE FROM harel_outbox WHERE seq = ?", (seq,))
     self._conn.commit()
 ```
 
@@ -398,12 +398,12 @@ creates each child idempotently, then acks):
 ```text
 def pending_spawns(self) -> list[SpawnEntry]:
     rows = self._conn.execute(
-        "SELECT seq, parent_id, child_id, root_path, context FROM spawns ORDER BY seq"
+        "SELECT seq, parent_id, child_id, root_path, context FROM harel_spawns ORDER BY seq"
     ).fetchall()
     return [SpawnEntry(seq, pid, cid, rp, json.loads(ctx)) for seq, pid, cid, rp, ctx in rows]
 
 def ack_spawn(self, seq: int) -> None:
-    self._conn.execute("DELETE FROM spawns WHERE seq = ?", (seq,))
+    self._conn.execute("DELETE FROM harel_spawns WHERE seq = ?", (seq,))
     self._conn.commit()
 ```
 
@@ -416,13 +416,13 @@ a stale sweep:
 ```text
 def due_timers(self, now: float) -> list[tuple[str, str, float]]:
     rows = self._conn.execute(
-        "SELECT execution_id, path, fire_at FROM timers WHERE fire_at <= ? ORDER BY fire_at", (now,)
+        "SELECT execution_id, path, fire_at FROM harel_timers WHERE fire_at <= ? ORDER BY fire_at", (now,)
     ).fetchall()
     return [(eid, path, fa) for eid, path, fa in rows]
 
 def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None:
     self._conn.execute(
-        "DELETE FROM timers WHERE execution_id = ? AND path = ? AND fire_at = ?",
+        "DELETE FROM harel_timers WHERE execution_id = ? AND path = ? AND fire_at = ?",
         (execution_id, path, fire_at),
     )
     self._conn.commit()
@@ -436,13 +436,13 @@ def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None:
 (shared SQL, `_PURGE_COMPANIONS_SQL`):
 
 ```text
-DELETE FROM executions WHERE id = ? AND version = ?        -- the CAS
+DELETE FROM harel_executions WHERE id = ? AND version = ?        -- the CAS
 -- 0 rows and the id still exists -> it moved on: roll back, return False
-DELETE FROM processed_events WHERE execution_id = ?
-DELETE FROM trace            WHERE execution_id = ?
-DELETE FROM timers           WHERE execution_id = ?
-DELETE FROM outbox           WHERE target_id    = ?
-DELETE FROM spawns           WHERE parent_id    = ?
+DELETE FROM harel_processed_events WHERE execution_id = ?
+DELETE FROM harel_trace            WHERE execution_id = ?
+DELETE FROM harel_timers           WHERE execution_id = ?
+DELETE FROM harel_outbox           WHERE target_id    = ?
+DELETE FROM harel_spawns           WHERE parent_id    = ?
 COMMIT
 ```
 

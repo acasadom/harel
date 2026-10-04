@@ -6,6 +6,7 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 
+from harel.engine.schema import DEFAULT_PREFIX, Names
 from harel.engine.transport import Lease
 from harel.spec.states import Event
 
@@ -22,16 +23,19 @@ class AsyncMongoTransport:
         self,
         client: Any,
         db_name: str = "harel",
-        prefix: str = "stm",
         clock: Callable[[], float] = time.time,
+        *,
+        prefix: str = DEFAULT_PREFIX,
     ) -> None:
+        """`prefix` names its collections under `db_name` (see `harel.engine.schema`)."""
         from pymongo import ReturnDocument
 
+        names = Names(prefix)
         self._client = client
         self._db = client[db_name]
-        self._msgs = self._db[f"{prefix}_messages"]
-        self._locks = self._db[f"{prefix}_locks"]
-        self._counters = self._db[f"{prefix}_counters"]
+        self._msgs = self._db[names.messages]
+        self._locks = self._db[names.transport_locks]
+        self._counters = self._db[names.transport_counters]
         self._after = ReturnDocument.AFTER
         self._clock = clock
 
@@ -42,7 +46,13 @@ class AsyncMongoTransport:
         db_name: str = "harel",
         connect_retries: int = 30,
         retry_delay: float = 1.0,
+        *,
+        prefix: str = DEFAULT_PREFIX,
+        create_schema: bool = True,
     ) -> "AsyncMongoTransport":
+        """Connect, retrying until Mongo answers; `prefix` names its collections (see
+        `harel.engine.schema`), and with `create_schema=False` the claim index is expected to
+        exist."""
         import anyio
         import motor.motor_asyncio
         from pymongo.errors import PyMongoError
@@ -52,8 +62,9 @@ class AsyncMongoTransport:
             try:
                 client: Any = motor.motor_asyncio.AsyncIOMotorClient(url)
                 await client.admin.command("ping")
-                inst = cls(client, db_name)
-                await inst._locks.create_index("available_at")  # the claim index
+                inst = cls(client, db_name, prefix=prefix)
+                if create_schema:
+                    await inst._locks.create_index("available_at")  # the claim index
                 return inst
             except PyMongoError as exc:
                 last = exc

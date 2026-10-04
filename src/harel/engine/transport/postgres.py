@@ -6,7 +6,9 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 
-from harel.engine.transport._base import _PG_ACK_FN, _PG_CLAIM_FN, Lease
+from harel.engine.schema import DEFAULT_PREFIX, Names, transport_schema
+from harel.engine.store._base import _PG_SCHEMA_LOCK
+from harel.engine.transport._base import Lease
 from harel.spec.states import Event
 
 
@@ -25,37 +27,40 @@ class PostgresTransport:
     `ack` removes it and frees the group (fenced by the lease token); `nack` frees it now or
     parks it for `delay`.
 
-    The connection is injected (duck-typed), so `psycopg` is an optional extra. `prefix` is
-    accepted for API compatibility (the table names are fixed)."""
+    The connection is injected (duck-typed), so `psycopg` is an optional extra. `prefix` names
+    its tables and functions (see `harel.engine.schema`); with `create_schema=False` they must
+    already exist."""
 
-    def __init__(self, conn: Any, prefix: str = "stm", clock: Callable[[], float] = time.time) -> None:
+    def __init__(
+        self,
+        conn: Any,
+        clock: Callable[[], float] = time.time,
+        *,
+        prefix: str = DEFAULT_PREFIX,
+        create_schema: bool = True,
+    ) -> None:
+        self._n = Names(prefix)
         self._conn = conn
         self._clock = clock
-        with conn.cursor() as cur:
-            # serialize concurrent schema setup: `CREATE OR REPLACE FUNCTION` rewrites pg_proc and
-            # several connections opening at once would collide ("tuple concurrently updated")
-            cur.execute("SELECT pg_advisory_xact_lock(7723019)")
-            cur.execute(
-                "CREATE TABLE IF NOT EXISTS transport_messages "
-                "(seq BIGSERIAL PRIMARY KEY, group_id TEXT NOT NULL, event TEXT NOT NULL)"
-            )
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS transport_messages_group ON transport_messages (group_id, seq)"
-            )
-            cur.execute(
-                "CREATE TABLE IF NOT EXISTS transport_groups "
-                "(group_id TEXT PRIMARY KEY, locked_by TEXT, lock_expiry DOUBLE PRECISION, "
-                "priority INT NOT NULL DEFAULT 0)"
-            )
-            cur.execute(
-                "CREATE INDEX IF NOT EXISTS transport_groups_claimable ON transport_groups (lock_expiry)"
-            )
-            cur.execute(_PG_CLAIM_FN)  # server-side claim (one round-trip)
-            cur.execute(_PG_ACK_FN)  # server-side ack (one round-trip)
-        conn.commit()
+        if create_schema:
+            with conn.cursor() as cur:
+                # serialize concurrent schema setup: `CREATE OR REPLACE FUNCTION` rewrites pg_proc
+                # and several connections opening at once would collide ("tuple concurrently updated")
+                cur.execute("SELECT pg_advisory_xact_lock(%s)", (_PG_SCHEMA_LOCK,))
+                for sql in transport_schema("postgres", prefix):
+                    cur.execute(sql)
+            conn.commit()
 
     @classmethod
-    def from_dsn(cls, dsn: str, connect_retries: int = 15, retry_delay: float = 1.0) -> "PostgresTransport":
+    def from_dsn(
+        cls,
+        dsn: str,
+        connect_retries: int = 15,
+        retry_delay: float = 1.0,
+        *,
+        prefix: str = DEFAULT_PREFIX,
+        create_schema: bool = True,
+    ) -> "PostgresTransport":
         import time as _time
 
         import psycopg
@@ -63,7 +68,7 @@ class PostgresTransport:
         last: Exception | None = None
         for _ in range(connect_retries):
             try:
-                return cls(psycopg.connect(dsn))
+                return cls(psycopg.connect(dsn), prefix=prefix, create_schema=create_schema)
             except psycopg.OperationalError as exc:
                 last = exc
                 _time.sleep(retry_delay)
@@ -72,13 +77,13 @@ class PostgresTransport:
     def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
         with self._conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO transport_messages (group_id, event) VALUES (%s, %s)",
+                f"INSERT INTO {self._n.messages} (group_id, event) VALUES (%s, %s)",
                 (group_id, event.model_dump_json()),
             )
             # ready the group iff new (ON CONFLICT DO NOTHING) — a publish into an in-flight or
             # parked group must not reset its lease or priority
             cur.execute(
-                "INSERT INTO transport_groups (group_id, locked_by, lock_expiry, priority) "
+                f"INSERT INTO {self._n.groups} (group_id, locked_by, lock_expiry, priority) "
                 "VALUES (%s, NULL, NULL, %s) ON CONFLICT (group_id) DO NOTHING",
                 (group_id, priority),
             )
@@ -92,7 +97,7 @@ class PostgresTransport:
         try:
             with self._conn.cursor() as cur:
                 cur.execute(
-                    "SELECT group_id, seq, event FROM harel_claim(%s, %s, %s, %s)",
+                    f"SELECT group_id, seq, event FROM {self._n.claim}(%s, %s, %s, %s)",
                     (now, now + visibility, token, min_priority),
                 )
                 row = cur.fetchone()
@@ -108,7 +113,8 @@ class PostgresTransport:
         # one round-trip: the function fences on the token, deletes the head, frees the lock
         with self._conn.cursor() as cur:
             cur.execute(
-                "SELECT harel_ack(%s, %s, %s, %s)", (lease.group_id, lease.seq, lease.token, self._clock())
+                f"SELECT {self._n.ack}(%s, %s, %s, %s)",
+                (lease.group_id, lease.seq, lease.token, self._clock()),
             )
         self._conn.commit()
 
@@ -117,12 +123,12 @@ class PostgresTransport:
             if delay > 0:
                 # park: keep the token so the still-present head isn't re-claimed until `delay` passes
                 cur.execute(
-                    "UPDATE transport_groups SET lock_expiry = %s WHERE group_id = %s AND locked_by = %s",
+                    f"UPDATE {self._n.groups} SET lock_expiry = %s WHERE group_id = %s AND locked_by = %s",
                     (self._clock() + delay, lease.group_id, lease.token),
                 )
             else:
                 cur.execute(
-                    "UPDATE transport_groups SET locked_by = NULL, lock_expiry = NULL "
+                    f"UPDATE {self._n.groups} SET locked_by = NULL, lock_expiry = NULL "
                     "WHERE group_id = %s AND locked_by = %s",
                     (lease.group_id, lease.token),
                 )

@@ -66,7 +66,7 @@ purge_finished(store, *, older_than, statuses=(DONE, CANCELLED), archive=None,
   automatically.
 - `clock` is injectable so [durable timers](../tutorial/07-timers) fire deterministically.
 - `resolver` resolves submachine `invoke` FQNs not already in `definitions`.
-- `trace=True` records the opt-in execution timeline in each commit (env `STM_TRACE`); off by
+- `trace=True` records the opt-in execution timeline in each commit (env `HAREL_TRACE`); off by
   default. See [stores](stores) and the [monitor](monitor).
 - `execution` is `"background"` (a shared background event loop, the default) or `"inline"`
   (the caller's own thread, no event loop, sync store only); `on_action_error` is `"fail"`

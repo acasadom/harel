@@ -192,7 +192,13 @@ class AsyncDistributedRunner(SenderLogic):
         resolver: Optional[MachineResolver] = None,
         trace: bool = False,
     ) -> None:
-        super().__init__(definitions, clock, resolver, trace)
+        super().__init__(
+            definitions,
+            clock,
+            resolver,
+            trace,
+            shares_store_transaction=getattr(transport, "shares_store_transaction", False),
+        )
         self.store = store
         self.transport = transport
 

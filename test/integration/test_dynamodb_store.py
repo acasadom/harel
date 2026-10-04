@@ -1,7 +1,7 @@
 """DynamoDBStore contract tests, run against real DynamoDB (LocalStack) in the stack.
 
 The unit tests use moto in-process; these run against a real DynamoDB endpoint
-(LocalStack) as the compose `test` service when STM_STORE_BACKEND=dynamodb
+(LocalStack) as the compose `test` service when HAREL_STORE_BACKEND=dynamodb
 (skipped otherwise). They cover the store contract directly — version/CAS conflict
 (the TransactWriteItems condition), transactional outbox, dedupe — which the
 pipeline test exercises only along the happy path. Unique (uuid) execution ids
@@ -21,14 +21,14 @@ pytestmark = pytest.mark.stack
 
 @pytest.fixture
 def store():
-    if os.environ.get("STM_STORE_BACKEND") != "dynamodb":
+    if os.environ.get("HAREL_STORE_BACKEND") != "dynamodb":
         pytest.skip("not the dynamodb backend")
-    endpoint = os.environ.get("STM_DYNAMODB_ENDPOINT")
+    endpoint = os.environ.get("HAREL_DYNAMODB_ENDPOINT")
     if not endpoint:
-        pytest.skip("STM_DYNAMODB_ENDPOINT not set")
+        pytest.skip("HAREL_DYNAMODB_ENDPOINT not set")
     from harel.engine.store import DynamoDBStore
 
-    s = DynamoDBStore.create(endpoint, os.environ.get("STM_AWS_REGION", "us-east-1"))
+    s = DynamoDBStore.create(endpoint, os.environ.get("HAREL_AWS_REGION", "us-east-1"))
     yield s
     s.close()
 

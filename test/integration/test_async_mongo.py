@@ -1,7 +1,7 @@
 """Async Mongo store + transport contract tests, run against a real MongoDB in the stack.
 
 mongomock is not faithfully atomic under concurrency, so these run against a real
-MongoDB as the compose `test` service when STM_STORE_BACKEND=mongo (skipped
+MongoDB as the compose `test` service when HAREL_STORE_BACKEND=mongo (skipped
 otherwise). Mirrors test_mongo_store.py + test_mongo_transport.py unit tests but
 async: AsyncMongoStore + AsyncMongoTransport over motor. Also drives the full
 AsyncDistributedRunner pipeline end-to-end over the pure-MongoDB backend.
@@ -16,18 +16,18 @@ pytestmark = pytest.mark.stack
 
 
 def _skip_if_not_mongo():
-    if os.environ.get("STM_STORE_BACKEND") != "mongo":
+    if os.environ.get("HAREL_STORE_BACKEND") != "mongo":
         pytest.skip("not the mongo backend")
-    url = os.environ.get("STM_MONGO_URL")
+    url = os.environ.get("HAREL_MONGO_URL")
     if not url:
-        pytest.skip("STM_MONGO_URL not set")
+        pytest.skip("HAREL_MONGO_URL not set")
     return url
 
 
 @pytest.fixture
 async def store():
     url = _skip_if_not_mongo()
-    db = os.environ.get("STM_MONGO_DB", "harel")
+    db = os.environ.get("HAREL_MONGO_DB", "harel")
     from harel.engine.aio_store import AsyncMongoStore
 
     s = await AsyncMongoStore.from_url(url, db)
@@ -38,7 +38,7 @@ async def store():
 @pytest.fixture
 async def transport():
     url = _skip_if_not_mongo()
-    db = os.environ.get("STM_MONGO_DB", "harel")
+    db = os.environ.get("HAREL_MONGO_DB", "harel")
     from harel.engine.aio_transport import AsyncMongoTransport
 
     t = await AsyncMongoTransport.from_url(url, db)
@@ -248,7 +248,7 @@ machine M {
 
 async def _mongo_runner():
     url = _skip_if_not_mongo()
-    db = os.environ.get("STM_MONGO_DB", "harel")
+    db = os.environ.get("HAREL_MONGO_DB", "harel")
     from harel.engine.aio_store import AsyncMongoStore
     from harel.engine.aio_transport import AsyncMongoTransport
 

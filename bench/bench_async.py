@@ -1,14 +1,14 @@
-"""Async throughput benchmark — measures events/sec vs STM_CONCURRENCY.
+"""Async throughput benchmark — measures events/sec vs HAREL_CONCURRENCY.
 
 Configures the backend from the same env vars as worker.py, so you can point it
 at Redis, Postgres, or any other backend without touching the script.
 
 Usage:
-    STM_STORE_BACKEND=redis STM_REDIS_URL=redis://localhost:6379/0 \\
+    HAREL_STORE_BACKEND=redis HAREL_REDIS_URL=redis://localhost:6379/0 \\
         python bench/bench_async.py
 
-    STM_STORE_BACKEND=postgres STM_TRANSPORT_BACKEND=postgres \\
-    STM_POSTGRES_DSN=postgresql://stm:stm@localhost:5432/stm \\
+    HAREL_STORE_BACKEND=postgres HAREL_TRANSPORT_BACKEND=postgres \\
+    HAREL_POSTGRES_DSN=postgresql://stm:stm@localhost:5432/stm \\
         python bench/bench_async.py --n-executions 100 --concurrency 1,4,16,64,256
 
 The machine used has one async IO-bound action (anyio.sleep) so the benchmark
@@ -106,17 +106,17 @@ async def _enqueue_all(runner: AsyncDistributedRunner, exe_ids: list[str], produ
 
 
 async def _build_store(pg_pool_size: int, redis_pool_size: int) -> Any:
-    backend = os.environ.get("STM_STORE_BACKEND", "redis")
+    backend = os.environ.get("HAREL_STORE_BACKEND", "redis")
     if backend == "postgres":
         from harel.engine.aio_store import AsyncPostgresStore
 
-        return await AsyncPostgresStore.from_dsn(os.environ["STM_POSTGRES_DSN"], pool_size=pg_pool_size)
+        return await AsyncPostgresStore.from_dsn(os.environ["HAREL_POSTGRES_DSN"], pool_size=pg_pool_size)
     if backend == "redis":
         import redis.asyncio as aioredis
 
         from harel.engine.aio_store import AsyncRedisStore
 
-        url = os.environ.get("STM_STORE_REDIS_URL") or os.environ["STM_REDIS_URL"]
+        url = os.environ.get("HAREL_STORE_REDIS_URL") or os.environ["HAREL_REDIS_URL"]
         return AsyncRedisStore(aioredis.Redis.from_url(url, max_connections=redis_pool_size))
     from harel.worker import build_store_async
 
@@ -124,17 +124,17 @@ async def _build_store(pg_pool_size: int, redis_pool_size: int) -> Any:
 
 
 async def _build_transport(pg_pool_size: int, redis_pool_size: int) -> Any:
-    backend = os.environ.get("STM_TRANSPORT_BACKEND", os.environ.get("STM_STORE_BACKEND", "redis"))
+    backend = os.environ.get("HAREL_TRANSPORT_BACKEND", os.environ.get("HAREL_STORE_BACKEND", "redis"))
     if backend == "postgres":
         from harel.engine.aio_transport import AsyncPostgresTransport
 
-        return await AsyncPostgresTransport.from_dsn(os.environ["STM_POSTGRES_DSN"], pool_size=pg_pool_size)
+        return await AsyncPostgresTransport.from_dsn(os.environ["HAREL_POSTGRES_DSN"], pool_size=pg_pool_size)
     if backend == "redis":
         import redis.asyncio as aioredis
 
         from harel.engine.aio_transport import AsyncRedisTransport
 
-        url = os.environ["STM_REDIS_URL"]
+        url = os.environ["HAREL_REDIS_URL"]
         return AsyncRedisTransport(aioredis.Redis.from_url(url, max_connections=redis_pool_size))
     from harel.worker import build_transport_async
 
@@ -216,8 +216,8 @@ _ROW = "{:>12}  {:>12.0f}  {:>12.2f}  {:>12}".format
 async def _main(args: argparse.Namespace) -> None:
     defn = definition_from_dsl(_DSL, "Bench", validate=True)
 
-    backend_store = os.environ.get("STM_STORE_BACKEND", "redis")
-    backend_transport = os.environ.get("STM_TRANSPORT_BACKEND", backend_store)
+    backend_store = os.environ.get("HAREL_STORE_BACKEND", "redis")
+    backend_transport = os.environ.get("HAREL_TRANSPORT_BACKEND", backend_store)
     mode = (
         f"end-to-end (enqueue+process timed, {args.producers} producers)"
         if args.e2e

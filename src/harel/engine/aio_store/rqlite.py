@@ -6,6 +6,7 @@ import json
 from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, Status
+from harel.engine.schema import DEFAULT_PREFIX, Names, store_schema
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
 from harel.engine.store._base import (
     _IDS_WITH_PREFIX_SQL,
@@ -25,7 +26,10 @@ class AsyncRqliteStore:
     side-write conditioned on the Execution row holding our exact `data`) with every
     HTTP call awaited. Build with `await AsyncRqliteStore.from_url(url)`."""
 
-    def __init__(self, client: Any, base_url: str, timeout: float = 10.0) -> None:
+    def __init__(
+        self, client: Any, base_url: str, timeout: float = 10.0, *, prefix: str = DEFAULT_PREFIX
+    ) -> None:
+        self._n = Names(prefix)
         self._client = client
         self._base = base_url.rstrip("/")
         self._timeout = timeout
@@ -38,7 +42,13 @@ class AsyncRqliteStore:
         timeout: float = 10.0,
         connect_retries: int = 30,
         retry_delay: float = 1.0,
+        *,
+        prefix: str = DEFAULT_PREFIX,
+        create_schema: bool = True,
     ) -> "AsyncRqliteStore":
+        """Connect, retrying until rqlite is up and has elected a leader; `prefix` names its
+        tables (see `harel.engine.schema`), and with `create_schema=False` they must already
+        exist."""
         import anyio
         import httpx
 
@@ -46,26 +56,11 @@ class AsyncRqliteStore:
         for _ in range(connect_retries):
             client = httpx.AsyncClient()
             try:
-                store = cls(client, url, timeout)
-                await store._execute(
-                    [
-                        "CREATE TABLE IF NOT EXISTS executions (id TEXT PRIMARY KEY, "
-                        "definition_id TEXT NOT NULL, data TEXT NOT NULL, version INTEGER NOT NULL)",
-                        "CREATE TABLE IF NOT EXISTS outbox (seq INTEGER PRIMARY KEY AUTOINCREMENT, "
-                        "target_id TEXT, event TEXT NOT NULL)",
-                        "CREATE TABLE IF NOT EXISTS processed_events "
-                        "(execution_id TEXT NOT NULL, event_id TEXT NOT NULL, "
-                        "PRIMARY KEY (execution_id, event_id))",
-                        "CREATE TABLE IF NOT EXISTS timers (execution_id TEXT NOT NULL, "
-                        "path TEXT NOT NULL, fire_at REAL NOT NULL, "
-                        "PRIMARY KEY (execution_id, path))",
-                        "CREATE TABLE IF NOT EXISTS spawns (seq INTEGER PRIMARY KEY AUTOINCREMENT, "
-                        "parent_id TEXT NOT NULL, child_id TEXT NOT NULL, "
-                        "root_path TEXT NOT NULL, context TEXT NOT NULL)",
-                        "CREATE TABLE IF NOT EXISTS trace (execution_id TEXT NOT NULL, idx INTEGER NOT NULL, "
-                        "entry TEXT NOT NULL, PRIMARY KEY (execution_id, idx))",
-                    ]
-                )
+                store = cls(client, url, timeout, prefix=prefix)
+                if create_schema:
+                    await store._execute(store_schema("sqlite", prefix))
+                else:
+                    await store._query("SELECT 1", ())  # nothing created: still wait for a leader
                 return store
             except Exception as exc:  # noqa: BLE001
                 await client.aclose()
@@ -99,7 +94,7 @@ class AsyncRqliteStore:
         return result.get("values") or []
 
     async def load(self, execution_id: str) -> Optional[Execution]:
-        rows = await self._query("SELECT data FROM executions WHERE id = ?", (execution_id,))
+        rows = await self._query(f"SELECT data FROM {self._n.executions} WHERE id = ?", (execution_id,))
         return Execution.model_validate_json(rows[0][0]) if rows else None
 
     async def list_executions(
@@ -113,14 +108,14 @@ class AsyncRqliteStore:
     ) -> ExecutionPage:
         """See `RqliteStore.list_executions`."""
         off = _decode_offset(cursor)
-        sql, params = _listing_sql_sqlite(status, definition_id, roots_only, limit, off)
+        sql, params = _listing_sql_sqlite(self._n.executions, status, definition_id, roots_only, limit, off)
         return _listing_page(await self._query(sql, params), limit, off)
 
     async def load_for_event(self, execution_id: str, event_id: str) -> tuple[Optional[Execution], bool]:
         """Load + dedupe-check in one HTTP request (one SELECT with an EXISTS subquery)."""
         rows = await self._query(
-            "SELECT data, EXISTS(SELECT 1 FROM processed_events WHERE execution_id = ? AND event_id = ?) "
-            "FROM executions WHERE id = ?",
+            f"SELECT data, EXISTS(SELECT 1 FROM {self._n.processed_events} WHERE execution_id = ? AND event_id = ?) "
+            f"FROM {self._n.executions} WHERE id = ?",
             (execution_id, event_id, execution_id),
         )
         if not rows:
@@ -146,7 +141,7 @@ class AsyncRqliteStore:
         # insert only a brand-new Execution, otherwise CAS-update — see RqliteStore.commit
         statements: list = [
             [
-                "INSERT OR IGNORE INTO executions (id, definition_id, data, version) VALUES (?, ?, ?, ?)",
+                f"INSERT OR IGNORE INTO {self._n.executions} (id, definition_id, data, version) VALUES (?, ?, ?, ?)",
                 exe.id,
                 exe.definition_id,
                 data,
@@ -154,7 +149,7 @@ class AsyncRqliteStore:
             ]
             if old == 0
             else [
-                "UPDATE executions SET data = ?, version = ? WHERE id = ? AND version = ?",
+                f"UPDATE {self._n.executions} SET data = ?, version = ? WHERE id = ? AND version = ?",
                 data,
                 new,
                 exe.id,
@@ -164,8 +159,8 @@ class AsyncRqliteStore:
         for target_id, event in emits:
             statements.append(
                 [
-                    "INSERT INTO outbox (target_id, event) SELECT ?, ? "
-                    "WHERE EXISTS (SELECT 1 FROM executions WHERE id = ? AND data = ?)",
+                    f"INSERT INTO {self._n.outbox} (target_id, event) SELECT ?, ? "
+                    f"WHERE EXISTS (SELECT 1 FROM {self._n.executions} WHERE id = ? AND data = ?)",
                     target_id,
                     event.model_dump_json(),
                     exe.id,
@@ -175,8 +170,8 @@ class AsyncRqliteStore:
         if processed_event_id is not None:
             statements.append(
                 [
-                    "INSERT OR IGNORE INTO processed_events (execution_id, event_id) SELECT ?, ? "
-                    "WHERE EXISTS (SELECT 1 FROM executions WHERE id = ? AND data = ?)",
+                    f"INSERT OR IGNORE INTO {self._n.processed_events} (execution_id, event_id) SELECT ?, ? "
+                    f"WHERE EXISTS (SELECT 1 FROM {self._n.executions} WHERE id = ? AND data = ?)",
                     exe.id,
                     processed_event_id,
                     exe.id,
@@ -186,8 +181,8 @@ class AsyncRqliteStore:
         for op in timers:
             statements.append(
                 [
-                    "DELETE FROM timers WHERE execution_id = ? AND path = ? "
-                    "AND EXISTS (SELECT 1 FROM executions WHERE id = ? AND data = ?)",
+                    f"DELETE FROM {self._n.timers} WHERE execution_id = ? AND path = ? "
+                    f"AND EXISTS (SELECT 1 FROM {self._n.executions} WHERE id = ? AND data = ?)",
                     exe.id,
                     op.path,
                     exe.id,
@@ -197,8 +192,8 @@ class AsyncRqliteStore:
             if op.action == "schedule":
                 statements.append(
                     [
-                        "INSERT INTO timers (execution_id, path, fire_at) SELECT ?, ?, ? "
-                        "WHERE EXISTS (SELECT 1 FROM executions WHERE id = ? AND data = ?)",
+                        f"INSERT INTO {self._n.timers} (execution_id, path, fire_at) SELECT ?, ?, ? "
+                        f"WHERE EXISTS (SELECT 1 FROM {self._n.executions} WHERE id = ? AND data = ?)",
                         exe.id,
                         op.path,
                         op.fire_at,
@@ -209,8 +204,8 @@ class AsyncRqliteStore:
         for child_id, root_path, context in spawns:
             statements.append(
                 [
-                    "INSERT INTO spawns (parent_id, child_id, root_path, context) SELECT ?, ?, ?, ? "
-                    "WHERE EXISTS (SELECT 1 FROM executions WHERE id = ? AND data = ?)",
+                    f"INSERT INTO {self._n.spawns} (parent_id, child_id, root_path, context) SELECT ?, ?, ?, ? "
+                    f"WHERE EXISTS (SELECT 1 FROM {self._n.executions} WHERE id = ? AND data = ?)",
                     exe.id,
                     child_id,
                     root_path,
@@ -222,9 +217,9 @@ class AsyncRqliteStore:
         if trace is not None:
             statements.append(
                 [
-                    "INSERT INTO trace (execution_id, idx, entry) "
-                    "SELECT ?, COALESCE((SELECT MAX(idx) FROM trace WHERE execution_id = ?), -1) + 1, ? "
-                    "WHERE EXISTS (SELECT 1 FROM executions WHERE id = ? AND data = ?)",
+                    f"INSERT INTO {self._n.trace} (execution_id, idx, entry) "
+                    f"SELECT ?, COALESCE((SELECT MAX(idx) FROM {self._n.trace} WHERE execution_id = ?), -1) + 1, ? "
+                    f"WHERE EXISTS (SELECT 1 FROM {self._n.executions} WHERE id = ? AND data = ?)",
                     exe.id,
                     exe.id,
                     json.dumps(trace),
@@ -235,9 +230,9 @@ class AsyncRqliteStore:
             if self.trace_max:
                 statements.append(
                     [
-                        "DELETE FROM trace WHERE execution_id = ? AND idx <= "
-                        "(SELECT MAX(idx) FROM trace WHERE execution_id = ?) - ? "
-                        "AND EXISTS (SELECT 1 FROM executions WHERE id = ? AND data = ?)",
+                        f"DELETE FROM {self._n.trace} WHERE execution_id = ? AND idx <= "
+                        f"(SELECT MAX(idx) FROM {self._n.trace} WHERE execution_id = ?) - ? "
+                        f"AND EXISTS (SELECT 1 FROM {self._n.executions} WHERE id = ? AND data = ?)",
                         exe.id,
                         exe.id,
                         self.trace_max,
@@ -248,14 +243,14 @@ class AsyncRqliteStore:
         results = await self._execute(statements, transaction=True)
         if results[0].get("rows_affected", 0) == 0:
             exe.version = old
-            found = await self._query("SELECT version FROM executions WHERE id = ?", (exe.id,))
+            found = await self._query(f"SELECT version FROM {self._n.executions} WHERE id = ?", (exe.id,))
             raise StoreConflict(exe.id, expected=old, found=found[0][0] if found else None)
         # success: exe.version is already `new`; the outbox inserts are statements 1..len(emits)
         return [int(r["last_insert_id"]) for r in results[1 : 1 + len(emits)]]
 
     async def is_processed(self, execution_id: str, event_id: str) -> bool:
         rows = await self._query(
-            "SELECT 1 FROM processed_events WHERE execution_id = ? AND event_id = ?",
+            f"SELECT 1 FROM {self._n.processed_events} WHERE execution_id = ? AND event_id = ?",
             (execution_id, event_id),
         )
         return bool(rows)
@@ -264,8 +259,8 @@ class AsyncRqliteStore:
         await self._execute(
             [
                 [
-                    "INSERT INTO trace (execution_id, idx, entry) "
-                    "SELECT ?, COALESCE((SELECT MAX(idx) FROM trace WHERE execution_id = ?), -1) + 1, ?",
+                    f"INSERT INTO {self._n.trace} (execution_id, idx, entry) "
+                    f"SELECT ?, COALESCE((SELECT MAX(idx) FROM {self._n.trace} WHERE execution_id = ?), -1) + 1, ?",
                     execution_id,
                     execution_id,
                     json.dumps(entry),
@@ -276,8 +271,8 @@ class AsyncRqliteStore:
             await self._execute(
                 [
                     [
-                        "DELETE FROM trace WHERE execution_id = ? AND idx <= "
-                        "(SELECT MAX(idx) FROM trace WHERE execution_id = ?) - ?",
+                        f"DELETE FROM {self._n.trace} WHERE execution_id = ? AND idx <= "
+                        f"(SELECT MAX(idx) FROM {self._n.trace} WHERE execution_id = ?) - ?",
                         execution_id,
                         execution_id,
                         self.trace_max,
@@ -287,29 +282,30 @@ class AsyncRqliteStore:
 
     async def read_trace(self, execution_id: str) -> list[dict]:
         rows = await self._query(
-            "SELECT idx, entry FROM trace WHERE execution_id = ? ORDER BY idx", (execution_id,)
+            f"SELECT idx, entry FROM {self._n.trace} WHERE execution_id = ? ORDER BY idx", (execution_id,)
         )
         return [{**json.loads(entry), "index": idx} for idx, entry in rows]
 
     async def pending_outbox(self) -> list[OutboxEntry]:
-        rows = await self._query("SELECT seq, target_id, event FROM outbox ORDER BY seq", ())
+        rows = await self._query(f"SELECT seq, target_id, event FROM {self._n.outbox} ORDER BY seq", ())
         return [OutboxEntry(seq, tid, Event.model_validate_json(ev)) for seq, tid, ev in rows]
 
     async def ack_outbox(self, seq: int) -> None:
-        await self._execute([["DELETE FROM outbox WHERE seq = ?", seq]])
+        await self._execute([[f"DELETE FROM {self._n.outbox} WHERE seq = ?", seq]])
 
     async def pending_spawns(self) -> list[SpawnEntry]:
         rows = await self._query(
-            "SELECT seq, parent_id, child_id, root_path, context FROM spawns ORDER BY seq", ()
+            f"SELECT seq, parent_id, child_id, root_path, context FROM {self._n.spawns} ORDER BY seq", ()
         )
         return [SpawnEntry(seq, pid, cid, rp, json.loads(ctx)) for seq, pid, cid, rp, ctx in rows]
 
     async def ack_spawn(self, seq: int) -> None:
-        await self._execute([["DELETE FROM spawns WHERE seq = ?", seq]])
+        await self._execute([[f"DELETE FROM {self._n.spawns} WHERE seq = ?", seq]])
 
     async def due_timers(self, now: float) -> list[tuple[str, str, float]]:
         rows = await self._query(
-            "SELECT execution_id, path, fire_at FROM timers WHERE fire_at <= ? ORDER BY fire_at", (now,)
+            f"SELECT execution_id, path, fire_at FROM {self._n.timers} WHERE fire_at <= ? ORDER BY fire_at",
+            (now,),
         )
         return [(eid, path, float(fa)) for eid, path, fa in rows]
 
@@ -317,7 +313,7 @@ class AsyncRqliteStore:
         await self._execute(
             [
                 [
-                    "DELETE FROM timers WHERE execution_id = ? AND path = ? AND fire_at = ?",
+                    f"DELETE FROM {self._n.timers} WHERE execution_id = ? AND path = ? AND fire_at = ?",
                     execution_id,
                     path,
                     fire_at,
@@ -326,10 +322,12 @@ class AsyncRqliteStore:
         )
 
     async def ids_with_prefix(self, prefix: str) -> list[str]:
-        return [r[0] for r in await self._query(_IDS_WITH_PREFIX_SQL, (_like_prefix(prefix),))]
+        return [r[0] for r in await self._query(self._n.sql(_IDS_WITH_PREFIX_SQL), (_like_prefix(prefix),))]
 
     async def purge(self, execution_id: str, expected_version: int) -> bool:
-        results = await self._execute(_purge_statements(execution_id, expected_version), transaction=True)
+        results = await self._execute(
+            _purge_statements(self._n, execution_id, expected_version), transaction=True
+        )
         return results[0].get("rows_affected", 0) == 1
 
     async def close(self) -> None:

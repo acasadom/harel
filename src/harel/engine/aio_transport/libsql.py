@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Optional
 
+from harel.engine.schema import DEFAULT_PREFIX
 from harel.engine.transport import Lease
 from harel.spec.states import Event
 
@@ -30,6 +31,8 @@ class AsyncLibsqlTransport:
         auth_token: str = "",
         sync_url: Optional[str] = None,
         sync_interval: Optional[float] = None,
+        prefix: str = DEFAULT_PREFIX,
+        create_schema: bool = True,
     ) -> "AsyncLibsqlTransport":
         from harel.engine.transport import LibsqlTransport
 
@@ -39,6 +42,8 @@ class AsyncLibsqlTransport:
             auth_token=auth_token,
             sync_url=sync_url,
             sync_interval=sync_interval,
+            prefix=prefix,
+            create_schema=create_schema,
         )
         return cls(sync)
 

@@ -8,6 +8,7 @@ from decimal import Decimal
 from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
+from harel.engine.schema import DEFAULT_PREFIX, Names
 from harel.engine.store._base import (
     DEFAULT_TRACE_MAX,
     OutboxEntry,
@@ -49,26 +50,33 @@ class DynamoDBStore:
     near-empty. `TransactWriteItems` caps a single commit at 100 items / 4MB, far
     above a normal commit (1 Execution + a handful of emits/spawns/timers)."""
 
-    def __init__(self, client: Any, prefix: str = "harel") -> None:
+    def __init__(self, client: Any, *, prefix: str = DEFAULT_PREFIX, create_schema: bool = True) -> None:
+        """`prefix` names its tables (`<prefix>_executions`, ...; see `harel.engine.schema`);
+        with `create_schema=False` they must already exist."""
         from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
         from botocore.exceptions import ClientError
 
         self._db = client
-        self._prefix = prefix
+        self._prefix = Names(prefix).prefix  # checked: the same rule as every backend's
         self._ser = TypeSerializer()
         self._deser = TypeDeserializer()
         self._ClientError = ClientError
         self.trace_max = DEFAULT_TRACE_MAX
-        self._ensure_tables()
+        if create_schema:
+            self._ensure_tables()
+        else:
+            self._db.describe_table(TableName=self._t("executions"))  # reachable, and there
 
     @classmethod
     def create(
         cls,
         endpoint_url: Optional[str] = None,
         region: str = "us-east-1",
-        prefix: str = "harel",
         connect_retries: int = 30,
         retry_delay: float = 1.0,
+        *,
+        prefix: str = DEFAULT_PREFIX,
+        create_schema: bool = True,
     ) -> "DynamoDBStore":
         """Build a boto3 client (LocalStack-friendly: dummy creds + injected
         `endpoint_url`; pass `endpoint_url=None` for real AWS) and ensure the
@@ -85,7 +93,7 @@ class DynamoDBStore:
         last: Exception | None = None
         for _ in range(connect_retries):
             try:
-                return cls(client, prefix)
+                return cls(client, prefix=prefix, create_schema=create_schema)
             except (BotoCoreError, ClientError) as exc:
                 last = exc
                 time.sleep(retry_delay)

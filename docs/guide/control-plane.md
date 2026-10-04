@@ -316,6 +316,6 @@ while any other error — an archiver's included — stops the run. Executions s
 `finished_at` existed have none, and are skipped unless `include_undated=True`. It reads
 candidates with the store's `list_executions`. For an async store, `harel.engine.aio.control`
 has the same `purge_finished` to await (its `archive` may be a coroutine function). The `harel
-purge` command ([CLI](cli.md)) wraps the sync one over the store configured by the `STM_STORE_*`
+purge` command ([CLI](cli.md)) wraps the sync one over the store configured by the `HAREL_STORE_*`
 environment.
 

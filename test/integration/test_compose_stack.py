@@ -32,17 +32,17 @@ _DEFS = Path(__file__).resolve().parents[2] / "deploy" / "definitions"
 
 @pytest.fixture
 def stack():
-    """Skip unless we're running inside the compose stack (STM_STACK=1, set by the
+    """Skip unless we're running inside the compose stack (HAREL_STACK=1, set by the
     `test` service). Backend-agnostic — the store/transport are built from the same
     env the workers use, so this covers any store×transport combination."""
-    if os.environ.get("STM_STACK") != "1":
+    if os.environ.get("HAREL_STACK") != "1":
         pytest.skip("not running in the docker-compose stack (see deploy/README.md)")
 
 
 def _runner(machine):
     defn = definition_from_dsl((_DEFS / f"{machine}.stm").read_text(), machine)
-    store = build_store()  # matches the workers' STM_STORE_BACKEND
-    transport = build_transport()  # matches the workers' STM_TRANSPORT_BACKEND
+    store = build_store()  # matches the workers' HAREL_STORE_BACKEND
+    transport = build_transport()  # matches the workers' HAREL_TRANSPORT_BACKEND
     return DistributedRunner(store, transport, {defn.id: defn}), store, defn
 
 

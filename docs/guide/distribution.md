@@ -96,7 +96,7 @@ without a separate scheduler.
 ### Async-native workers
 
 The worker is **async-native**. The bundled `python -m harel.worker` runs one `asyncio` event
-loop (via `anyio.run`) that drives up to `STM_CONCURRENCY` events in flight at once
+loop (via `anyio.run`) that drives up to `HAREL_CONCURRENCY` events in flight at once
 (`AsyncWorker.run`, default 256): while one execution's action awaits IO, the loop processes
 others — so one worker process overlaps many events' IO on a single event loop, with no thread
 per event.
@@ -115,7 +115,7 @@ a time regardless of how many are running.
 
 Two independent dials:
 
-- **Concurrency within a worker** (`STM_CONCURRENCY`): how many events one event loop keeps in
+- **Concurrency within a worker** (`HAREL_CONCURRENCY`): how many events one event loop keeps in
   flight. Raising it lifts throughput until either the backend's per-event round-trips (load →
   commit → claim → ack) **or** the event loop's own per-event CPU becomes the limit — which of
   the two binds depends on the backend's per-op latency on your host (a slow-I/O backend is

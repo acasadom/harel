@@ -8,21 +8,21 @@ and any running worker fleet — it's a read/observe client, not part of the eng
 
 ```bash
 pip install "harel[tui]"        # textual
-harel monitor                   # uses STM_STORE_BACKEND etc., like the worker
+harel monitor                   # uses HAREL_STORE_BACKEND etc., like the worker
 harel monitor --definitions-dir ./machines   # resolve the statechart diagram
 ```
 
 ## Connecting
 
 The monitor builds its store from the **same environment variables as the worker**
-(`STM_STORE_BACKEND` + the backend's URL/DSN/endpoint — see [Distribution](distribution.md)). Point
+(`HAREL_STORE_BACKEND` + the backend's URL/DSN/endpoint — see [Distribution](distribution.md)). Point
 it at the store your workers share and it lists what's there. No store of its own.
 
 To draw the **statechart tree** it also needs the machine's `Definition`, which the store doesn't
 persist — only `definition_id`. Give it the `.stm` files:
 
 ```bash
-harel monitor --definitions-dir ./machines   # or $STM_DEFINITIONS_DIR
+harel monitor --definitions-dir ./machines   # or $HAREL_DEFINITIONS_DIR
 ```
 
 Without them the monitor still runs **data-only**: every panel works (status, context, timers,
@@ -59,11 +59,11 @@ The destructive actions (`c`/`t`) ask for confirmation. All of these go through 
 boundary.
 
 > **The timeline is opt-in.** Recording it is **off by default** (the engine keeps a state snapshot,
-> not an event log, so the hot path pays nothing). Enable it with **`STM_TRACE=1`** (or
+> not an event log, so the hot path pays nothing). Enable it with **`HAREL_TRACE=1`** (or
 > `DurableRunner(..., trace=True)` / `DistributedRunner(..., trace=True)`): the Driver then records one
 > step per event — event in, transition from→to, the actions run, and the resulting context — **in the
 > same `commit` transaction** as the state advance (no extra round-trip, and `load` is unaffected). Kept
-> as a ring of the last `STM_TRACE_MAX` steps (default 200). Recorded by **every store backend** in its
+> as a ring of the last `HAREL_TRACE_MAX` steps (default 200). Recorded by **every store backend** in its
 > commit transaction / atomic write (SQL via an in-txn insert, Redis via a ring list in the MULTI, Mongo
 > via a `$push/$slice` array, DynamoDB via a Put+Delete in the `TransactWriteItems`). Without a trace the
 > timeline shows a placeholder; the tree, source, status, control plane and pending-work panels all work
@@ -72,13 +72,13 @@ boundary.
 ## Theming
 
 The palette comes from a built-in **Textual theme** (`nord` by default) — pick another with
-`--theme <name>` / `STM_TUI_THEME`, or preview them live in-app with **`Ctrl+P` → "theme"**
+`--theme <name>` / `HAREL_TUI_THEME`, or preview them live in-app with **`Ctrl+P` → "theme"**
 (`gruvbox`, `tokyo-night`, `dracula`, `textual-light`, …).
 
 ## How it refreshes
 
 There is no event stream, so the monitor **polls** the store on a timer (default 1s, `--interval`
-seconds or `STM_TUI_INTERVAL_MS`). Every store read runs on a worker thread, so a slow networked
+seconds or `HAREL_TUI_INTERVAL_MS`). Every store read runs on a worker thread, so a slow networked
 store never freezes the UI; a failed action surfaces as a toast and the next poll reconciles. On a
 busy store, raise `--interval` or pause with `p`.
 

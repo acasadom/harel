@@ -6,7 +6,9 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 
-from harel.engine.transport import _PG_ACK_FN, _PG_CLAIM_FN, Lease
+from harel.engine.schema import DEFAULT_PREFIX, Names, transport_schema
+from harel.engine.store._base import _PG_SCHEMA_LOCK
+from harel.engine.transport import Lease
 from harel.spec.states import Event
 
 
@@ -19,52 +21,49 @@ class AsyncPostgresTransport:
     Each method checks out a pool connection. Build with
     `await AsyncPostgresTransport.from_dsn(dsn, pool_size=N)`."""
 
-    def __init__(self, pool: Any, prefix: str = "stm", clock: Callable[[], float] = time.time) -> None:
+    def __init__(
+        self, pool: Any, clock: Callable[[], float] = time.time, *, prefix: str = DEFAULT_PREFIX
+    ) -> None:
+        self._n = Names(prefix)
         self._pool = pool
         self._clock = clock
 
     @classmethod
     async def from_dsn(
-        cls, dsn: str, prefix: str = "stm", clock: Callable[[], float] = time.time, pool_size: int = 10
+        cls,
+        dsn: str,
+        clock: Callable[[], float] = time.time,
+        pool_size: int = 10,
+        *,
+        prefix: str = DEFAULT_PREFIX,
+        create_schema: bool = True,
     ) -> "AsyncPostgresTransport":
+        """Open a pool on `dsn`; `prefix` names its tables and functions (see
+        `harel.engine.schema`), and with `create_schema=False` they must already exist."""
         from psycopg_pool import AsyncConnectionPool
 
         pool = AsyncConnectionPool(conninfo=dsn, min_size=1, max_size=pool_size, open=False)
         await pool.open()
-        async with pool.connection() as conn:
-            async with conn.cursor() as cur:
-                # serialize concurrent schema setup: `CREATE OR REPLACE FUNCTION` rewrites pg_proc
-                # and several workers opening at once would collide ("tuple concurrently updated")
-                await cur.execute("SELECT pg_advisory_xact_lock(7723019)")
-                await cur.execute(
-                    "CREATE TABLE IF NOT EXISTS transport_messages "
-                    "(seq BIGSERIAL PRIMARY KEY, group_id TEXT NOT NULL, event TEXT NOT NULL)"
-                )
-                await cur.execute(
-                    "CREATE INDEX IF NOT EXISTS transport_messages_group ON transport_messages (group_id, seq)"
-                )
-                await cur.execute(
-                    "CREATE TABLE IF NOT EXISTS transport_groups "
-                    "(group_id TEXT PRIMARY KEY, locked_by TEXT, lock_expiry DOUBLE PRECISION, "
-                    "priority INT NOT NULL DEFAULT 0)"
-                )
-                await cur.execute(
-                    "CREATE INDEX IF NOT EXISTS transport_groups_claimable ON transport_groups (lock_expiry)"
-                )
-                await cur.execute(_PG_CLAIM_FN)  # server-side claim (one round-trip)
-                await cur.execute(_PG_ACK_FN)  # server-side ack (one round-trip)
-            await conn.commit()
-        return cls(pool, prefix, clock)
+        if create_schema:
+            async with pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    # serialize concurrent schema setup: `CREATE OR REPLACE FUNCTION` rewrites
+                    # pg_proc and several workers opening at once would collide
+                    await cur.execute("SELECT pg_advisory_xact_lock(%s)", (_PG_SCHEMA_LOCK,))
+                    for sql in transport_schema("postgres", prefix):
+                        await cur.execute(sql)
+                await conn.commit()
+        return cls(pool, clock, prefix=prefix)
 
     async def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
         async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "INSERT INTO transport_messages (group_id, event) VALUES (%s, %s)",
+                    f"INSERT INTO {self._n.messages} (group_id, event) VALUES (%s, %s)",
                     (group_id, event.model_dump_json()),
                 )
                 await cur.execute(
-                    "INSERT INTO transport_groups (group_id, locked_by, lock_expiry, priority) "
+                    f"INSERT INTO {self._n.groups} (group_id, locked_by, lock_expiry, priority) "
                     "VALUES (%s, NULL, NULL, %s) ON CONFLICT (group_id) DO NOTHING",
                     (group_id, priority),
                 )
@@ -79,7 +78,7 @@ class AsyncPostgresTransport:
             try:
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        "SELECT group_id, seq, event FROM harel_claim(%s, %s, %s, %s)",
+                        f"SELECT group_id, seq, event FROM {self._n.claim}(%s, %s, %s, %s)",
                         (now, now + visibility, token, min_priority),
                     )
                     row = await cur.fetchone()
@@ -96,7 +95,7 @@ class AsyncPostgresTransport:
         async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT harel_ack(%s, %s, %s, %s)",
+                    f"SELECT {self._n.ack}(%s, %s, %s, %s)",
                     (lease.group_id, lease.seq, lease.token, self._clock()),
                 )
             await conn.commit()
@@ -106,12 +105,12 @@ class AsyncPostgresTransport:
             async with conn.cursor() as cur:
                 if delay > 0:
                     await cur.execute(
-                        "UPDATE transport_groups SET lock_expiry = %s WHERE group_id = %s AND locked_by = %s",
+                        f"UPDATE {self._n.groups} SET lock_expiry = %s WHERE group_id = %s AND locked_by = %s",
                         (self._clock() + delay, lease.group_id, lease.token),
                     )
                 else:
                     await cur.execute(
-                        "UPDATE transport_groups SET locked_by = NULL, lock_expiry = NULL "
+                        f"UPDATE {self._n.groups} SET locked_by = NULL, lock_expiry = NULL "
                         "WHERE group_id = %s AND locked_by = %s",
                         (lease.group_id, lease.token),
                     )

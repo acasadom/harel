@@ -1,7 +1,7 @@
 """MongoStore contract tests, run against the real MongoDB in the stack.
 
 mongomock is not faithfully atomic under concurrency, so these run against a real
-MongoDB as the compose `test` service when STM_STORE_BACKEND=mongo (skipped
+MongoDB as the compose `test` service when HAREL_STORE_BACKEND=mongo (skipped
 otherwise). They cover the store contract directly — version/CAS conflict (the
 single-document `update_one` CAS), transactional outbox, dedupe — which the
 pipeline test in test_compose_stack.py exercises only along the happy path.
@@ -21,14 +21,14 @@ pytestmark = pytest.mark.stack
 
 @pytest.fixture
 def store():
-    if os.environ.get("STM_STORE_BACKEND") != "mongo":
+    if os.environ.get("HAREL_STORE_BACKEND") != "mongo":
         pytest.skip("not the mongo backend")
-    url = os.environ.get("STM_MONGO_URL")
+    url = os.environ.get("HAREL_MONGO_URL")
     if not url:
-        pytest.skip("STM_MONGO_URL not set")
+        pytest.skip("HAREL_MONGO_URL not set")
     from harel.engine.store import MongoStore
 
-    s = MongoStore.from_url(url, os.environ.get("STM_MONGO_DB", "harel"))
+    s = MongoStore.from_url(url, os.environ.get("HAREL_MONGO_DB", "harel"))
     yield s
     s.close()
 

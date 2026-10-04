@@ -8,7 +8,7 @@ invoke transport, the Payload encoding, and `handler(fn)` in a genuine Lambda ru
 (the one transport a fake can't fully cover). Zip packaging because LocalStack
 community doesn't support image packaging (Pro only).
 
-Gated on STM_LAMBDA_ENDPOINT + STM_LAMBDA_ZIP (set by the compose `test` service);
+Gated on HAREL_LAMBDA_ENDPOINT + HAREL_LAMBDA_ZIP (set by the compose `test` service);
 skipped otherwise. Setup:
 
     docker build --platform=linux/amd64 -f deploy/Dockerfile.lambda \
@@ -40,10 +40,10 @@ class _Stm:
 
 @pytest.fixture(scope="module")
 def lambda_client():
-    endpoint = os.environ.get("STM_LAMBDA_ENDPOINT")
-    zip_path = os.environ.get("STM_LAMBDA_ZIP")
+    endpoint = os.environ.get("HAREL_LAMBDA_ENDPOINT")
+    zip_path = os.environ.get("HAREL_LAMBDA_ZIP")
     if not endpoint or not zip_path:
-        pytest.skip("STM_LAMBDA_ENDPOINT / STM_LAMBDA_ZIP not set (not the lambda stack)")
+        pytest.skip("HAREL_LAMBDA_ENDPOINT / HAREL_LAMBDA_ZIP not set (not the lambda stack)")
     if not Path(zip_path).exists():
         pytest.skip(f"{zip_path} missing — build it with the Dockerfile.lambda export target")
 
@@ -53,7 +53,7 @@ def lambda_client():
     client = boto3.client(
         "lambda",
         endpoint_url=endpoint,
-        region_name=os.environ.get("STM_AWS_REGION", "us-east-1"),
+        region_name=os.environ.get("HAREL_AWS_REGION", "us-east-1"),
         aws_access_key_id="test",
         aws_secret_access_key="test",
         # generous read timeout: a cold Lambda container can take a while to come up

@@ -1,7 +1,7 @@
 """Async Rqlite store + transport contract tests, run against a real rqlite in the stack.
 
 No in-process rqlite fake — these run as the compose `test` service when
-STM_STORE_BACKEND=rqlite (skipped otherwise). Mirrors test_rqlite_store.py but async:
+HAREL_STORE_BACKEND=rqlite (skipped otherwise). Mirrors test_rqlite_store.py but async:
 AsyncRqliteStore + AsyncRqliteTransport via httpx.AsyncClient. Also drives the full
 AsyncDistributedRunner pipeline end-to-end over the pure-rqlite backend.
 """
@@ -15,11 +15,11 @@ pytestmark = pytest.mark.stack
 
 @pytest.fixture
 async def store():
-    if os.environ.get("STM_STORE_BACKEND") != "rqlite":
+    if os.environ.get("HAREL_STORE_BACKEND") != "rqlite":
         pytest.skip("not the rqlite backend")
-    url = os.environ.get("STM_RQLITE_URL")
+    url = os.environ.get("HAREL_RQLITE_URL")
     if not url:
-        pytest.skip("STM_RQLITE_URL not set")
+        pytest.skip("HAREL_RQLITE_URL not set")
 
     from harel.engine.aio_store import AsyncRqliteStore
 
@@ -30,11 +30,11 @@ async def store():
 
 @pytest.fixture
 async def transport():
-    if os.environ.get("STM_STORE_BACKEND") != "rqlite":
+    if os.environ.get("HAREL_STORE_BACKEND") != "rqlite":
         pytest.skip("not the rqlite backend")
-    url = os.environ.get("STM_RQLITE_URL")
+    url = os.environ.get("HAREL_RQLITE_URL")
     if not url:
-        pytest.skip("STM_RQLITE_URL not set")
+        pytest.skip("HAREL_RQLITE_URL not set")
 
     from harel.engine.aio_transport import AsyncRqliteTransport
 
@@ -163,11 +163,11 @@ machine M {
 
 
 async def _rqlite_runner():
-    if os.environ.get("STM_STORE_BACKEND") != "rqlite":
+    if os.environ.get("HAREL_STORE_BACKEND") != "rqlite":
         pytest.skip("not the rqlite backend")
-    url = os.environ.get("STM_RQLITE_URL")
+    url = os.environ.get("HAREL_RQLITE_URL")
     if not url:
-        pytest.skip("STM_RQLITE_URL not set")
+        pytest.skip("HAREL_RQLITE_URL not set")
     from harel.engine.aio_store import AsyncRqliteStore
     from harel.engine.aio_transport import AsyncRqliteTransport
 

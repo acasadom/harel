@@ -1,7 +1,7 @@
 """RqliteStore contract tests, run against the real rqlite in the stack.
 
 No in-process rqlite fake, so these run as the compose `test` service when
-STM_STORE_BACKEND=rqlite (skipped otherwise). They cover the store contract
+HAREL_STORE_BACKEND=rqlite (skipped otherwise). They cover the store contract
 directly — version/CAS conflict (the guarded-upsert path that is unique to
 rqlite's non-interactive transactions), outbox, dedupe — which the pipeline test
 exercises only along the happy path. Unique (uuid) ids isolate runs.
@@ -20,11 +20,11 @@ pytestmark = pytest.mark.stack
 
 @pytest.fixture
 def store():
-    if os.environ.get("STM_STORE_BACKEND") != "rqlite":
+    if os.environ.get("HAREL_STORE_BACKEND") != "rqlite":
         pytest.skip("not the rqlite backend")
-    url = os.environ.get("STM_RQLITE_URL")
+    url = os.environ.get("HAREL_RQLITE_URL")
     if not url:
-        pytest.skip("STM_RQLITE_URL not set")
+        pytest.skip("HAREL_RQLITE_URL not set")
     from harel.engine.store import RqliteStore
 
     s = RqliteStore.from_url(url)

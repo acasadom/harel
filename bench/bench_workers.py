@@ -10,8 +10,8 @@ loop) was the limit; if it plateaus, the backend is.
 Configured from the same env vars as worker.py / bench_async.py.
 
 Usage:
-    STM_STORE_BACKEND=redis STM_TRANSPORT_BACKEND=redis \\
-    STM_REDIS_URL=redis://localhost:6379/0 \\
+    HAREL_STORE_BACKEND=redis HAREL_TRANSPORT_BACKEND=redis \\
+    HAREL_REDIS_URL=redis://localhost:6379/0 \\
         python bench/bench_workers.py --n-executions 3000 --workers 1,2,4 --concurrency 64
 
 Method: the parent pre-loads the whole backlog (create + start + send Finish for every
@@ -88,15 +88,15 @@ def _redis_pool(concurrency: int) -> int:
     return concurrency * 2 + 16
 
 
-_STORE_TABLES = ("executions", "outbox", "processed_events", "timers", "spawns")
+_STORE_TABLES = tuple(f"harel_{t}" for t in ("executions", "outbox", "processed_events", "timers", "spawns"))
 
 
 async def _flush(store: Any, transport: Any) -> None:
     """Empty the backend so each level starts clean — without this, executions and drained
     group rows accumulate across levels/runs and pollute the measurement. Covers every backend
     we worker-bench (redis, postgres, rqlite, mongo, sqlite)."""
-    sb = os.environ.get("STM_STORE_BACKEND", "redis")
-    tb = os.environ.get("STM_TRANSPORT_BACKEND", sb)
+    sb = os.environ.get("HAREL_STORE_BACKEND", "redis")
+    tb = os.environ.get("HAREL_TRANSPORT_BACKEND", sb)
     if sb == "redis":
         await store._r.flushdb()
     elif sb == "postgres":
@@ -109,21 +109,21 @@ async def _flush(store: Any, transport: Any) -> None:
     elif sb == "mongo":
         await store._db.client.drop_database(store._db.name)  # one DB holds store + transport
     elif sb == "sqlite":
-        for t in (*_STORE_TABLES, "trace"):
+        for t in (*_STORE_TABLES, "harel_trace"):
             await store._conn.execute(f"DELETE FROM {t}")
         await store._conn.commit()
 
     if tb == "postgres":
         async with transport._pool.connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("TRUNCATE transport_messages, transport_groups")
+                await cur.execute("TRUNCATE harel_transport_messages, harel_transport_groups")
             await conn.commit()
     elif tb == "redis" and transport is not store:
         await transport._r.flushdb()
     elif tb == "rqlite":
-        await transport._execute([["DELETE FROM messages"]])
+        await transport._execute([["DELETE FROM harel_transport_messages"]])
     elif tb == "sqlite":
-        for t in ("messages", "groups"):
+        for t in ("harel_transport_messages", "harel_transport_groups"):
             await transport._conn.execute(f"DELETE FROM {t}")
         await transport._conn.commit()
     # mongo transport shares the dropped database (handled above)
@@ -219,16 +219,16 @@ def _worker_proc(
 
 
 _BACKEND_ENV_KEYS = (
-    "STM_STORE_BACKEND",
-    "STM_TRANSPORT_BACKEND",
-    "STM_REDIS_URL",
-    "STM_STORE_REDIS_URL",
-    "STM_POSTGRES_DSN",
-    "STM_RQLITE_URL",
-    "STM_MONGO_URL",
-    "STM_MONGO_DB",
-    "STM_STORE_DB",
-    "STM_TRANSPORT_DB",
+    "HAREL_STORE_BACKEND",
+    "HAREL_TRANSPORT_BACKEND",
+    "HAREL_REDIS_URL",
+    "HAREL_STORE_REDIS_URL",
+    "HAREL_POSTGRES_DSN",
+    "HAREL_RQLITE_URL",
+    "HAREL_MONGO_URL",
+    "HAREL_MONGO_DB",
+    "HAREL_STORE_DB",
+    "HAREL_TRANSPORT_DB",
 )
 
 
@@ -295,8 +295,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    store = os.environ.get("STM_STORE_BACKEND", "redis")
-    transport = os.environ.get("STM_TRANSPORT_BACKEND", store)
+    store = os.environ.get("HAREL_STORE_BACKEND", "redis")
+    transport = os.environ.get("HAREL_TRANSPORT_BACKEND", store)
     print(
         f"store={store}  transport={transport}  backlog={args.n_executions} execs "
         f"({args.n_executions * EVENTS_PER_EXECUTION} events)  concurrency/worker={args.concurrency}  "

@@ -7,6 +7,7 @@ from contextlib import AsyncExitStack
 from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
+from harel.engine.schema import DEFAULT_PREFIX, Names
 from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
 from harel.engine.store._base import DEFAULT_TRACE_MAX, _decode_offset, _encode_offset, _matches
 from harel.engine.store.dynamodb import _PURGE_PARTITIONS
@@ -15,7 +16,7 @@ from harel.spec.states import Event
 
 class AsyncDynamoDBStore:
     """Native-async mirror of `DynamoDBStore` over **aioboto3/aiobotocore** — every call is
-    awaited on one long-lived aiohttp-backed client, so concurrent workers (`STM_CONCURRENCY`)
+    awaited on one long-lived aiohttp-backed client, so concurrent workers (`HAREL_CONCURRENCY`)
     issue real parallel DynamoDB requests (the aiohttp connection pool), not thread-pool-bounded
     ones. Same semantics as the sync store: conditional writes are the CAS
     (`attribute_not_exists(id)` to insert, `version = :ov` to update) and `TransactWriteItems`
@@ -33,12 +34,13 @@ class AsyncDynamoDBStore:
     (e.g. inside `anyio.run`), never share one client across loops. Tests mock in-process with
     `aiomoto` (plain `moto.mock_aws` cannot intercept aiobotocore's aiohttp transport)."""
 
-    def __init__(self, client: Any, prefix: str = "harel") -> None:
+    def __init__(self, client: Any, *, prefix: str = DEFAULT_PREFIX) -> None:
+        """`prefix` names its tables (`<prefix>_executions`, ...; see `harel.engine.schema`)."""
         from boto3.dynamodb.types import TypeDeserializer, TypeSerializer
         from botocore.exceptions import ClientError
 
         self._db = client
-        self._prefix = prefix
+        self._prefix = Names(prefix).prefix  # checked: the same rule as every backend's
         self._ser = TypeSerializer()
         self._deser = TypeDeserializer()
         self._ClientError = ClientError
@@ -50,9 +52,11 @@ class AsyncDynamoDBStore:
         cls,
         endpoint_url: Optional[str] = None,
         region: str = "us-east-1",
-        prefix: str = "harel",
         connect_retries: int = 30,
         retry_delay: float = 1.0,
+        *,
+        prefix: str = DEFAULT_PREFIX,
+        create_schema: bool = True,
     ) -> "AsyncDynamoDBStore":
         """Open an aioboto3 client (LocalStack-friendly: dummy creds + injected `endpoint_url`;
         pass `endpoint_url=None` for real AWS) and ensure the tables exist, retrying until the
@@ -67,12 +71,15 @@ class AsyncDynamoDBStore:
             kwargs.update(endpoint_url=endpoint_url, aws_access_key_id="test", aws_secret_access_key="test")
         stack = AsyncExitStack()
         client = await stack.enter_async_context(aioboto3.Session().client("dynamodb", **kwargs))
-        inst = cls(client, prefix)
+        inst = cls(client, prefix=prefix)
         inst._stack = stack
         last: Exception | None = None
         for _ in range(connect_retries):
             try:
-                await inst._ensure_tables()
+                if create_schema:
+                    await inst._ensure_tables()
+                else:  # reachable, and the tables are there
+                    await inst._db.describe_table(TableName=inst._t("executions"))
                 return inst
             except (BotoCoreError, ClientError) as exc:
                 last = exc

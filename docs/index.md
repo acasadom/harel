@@ -65,6 +65,7 @@ guide/monitor
 guide/architecture
 guide/dsl-reference
 guide/api-reference
+guide/upgrading
 ```
 
 ## Is a statechart the right tool?

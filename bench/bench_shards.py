@@ -66,9 +66,9 @@ async def _setup_shard(redis_url: str, n: int, concurrency: int) -> None:
 
 def _shard_env(redis_url: str) -> dict[str, str]:
     return {
-        "STM_STORE_BACKEND": "redis",
-        "STM_TRANSPORT_BACKEND": "redis",
-        "STM_REDIS_URL": redis_url,
+        "HAREL_STORE_BACKEND": "redis",
+        "HAREL_TRANSPORT_BACKEND": "redis",
+        "HAREL_REDIS_URL": redis_url,
     }
 
 

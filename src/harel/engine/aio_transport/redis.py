@@ -6,6 +6,7 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 
+from harel.engine.schema import DEFAULT_PREFIX, Names
 from harel.engine.transport import _ACK_LUA, _CLAIM_LUA, _PUBLISH_LUA, Lease
 from harel.spec.states import Event
 
@@ -21,19 +22,22 @@ class AsyncRedisTransport:
 
     _CANDIDATES = 8
 
-    def __init__(self, client: Any, prefix: str = "stm", clock: Callable[[], float] = time.time) -> None:
+    def __init__(
+        self, client: Any, clock: Callable[[], float] = time.time, *, prefix: str = DEFAULT_PREFIX
+    ) -> None:
+        """`prefix` namespaces its keys (`<prefix>:...`, see `harel.engine.schema`)."""
         self._r = client
-        self._prefix = prefix
+        self._prefix = Names(prefix).prefix  # checked: the same rule as every backend's
         self._clock = clock
         self._claim_script = client.register_script(_CLAIM_LUA)
         self._ack_script = client.register_script(_ACK_LUA)
         self._publish_script = client.register_script(_PUBLISH_LUA)
 
     @classmethod
-    def from_url(cls, url: str, prefix: str = "stm") -> "AsyncRedisTransport":
+    def from_url(cls, url: str, *, prefix: str = DEFAULT_PREFIX) -> "AsyncRedisTransport":
         import redis.asyncio as aioredis
 
-        return cls(aioredis.Redis.from_url(url), prefix)
+        return cls(aioredis.Redis.from_url(url), prefix=prefix)
 
     def _k_ready(self, priority: int) -> str:
         return f"{self._prefix}:ready:{priority}"

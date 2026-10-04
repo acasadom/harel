@@ -6,6 +6,7 @@ import json
 from typing import Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, Status
+from harel.engine.schema import DEFAULT_PREFIX, Names, store_schema
 from harel.engine.store._base import (
     _IDS_WITH_PREFIX_SQL,
     _PURGE_COMPANIONS_SQL,
@@ -33,32 +34,36 @@ class RqliteStore:
     the whole request a no-op, detected by the upsert's `rows_affected == 0`
     (→ `StoreConflict`). Reads use `level=strong` (linearizable, via the leader)."""
 
-    def __init__(self, base_url: str, timeout: float = 10.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        timeout: float = 10.0,
+        *,
+        prefix: str = DEFAULT_PREFIX,
+        create_schema: bool = True,
+    ) -> None:
+        """`prefix` names its tables (see `harel.engine.schema`); with `create_schema=False`
+        they must already exist."""
         import requests
 
+        self._n = Names(prefix)
         self._base = base_url.rstrip("/")
         self._timeout = timeout
         self._session = requests.Session()
-        self._execute(
-            [
-                "CREATE TABLE IF NOT EXISTS executions (id TEXT PRIMARY KEY, definition_id TEXT NOT NULL, "
-                "data TEXT NOT NULL, version INTEGER NOT NULL)",
-                "CREATE TABLE IF NOT EXISTS outbox (seq INTEGER PRIMARY KEY AUTOINCREMENT, target_id TEXT, "
-                "event TEXT NOT NULL)",
-                "CREATE TABLE IF NOT EXISTS processed_events (execution_id TEXT NOT NULL, event_id TEXT NOT NULL, "
-                "PRIMARY KEY (execution_id, event_id))",
-                "CREATE TABLE IF NOT EXISTS timers (execution_id TEXT NOT NULL, path TEXT NOT NULL, "
-                "fire_at REAL NOT NULL, PRIMARY KEY (execution_id, path))",
-                "CREATE TABLE IF NOT EXISTS spawns (seq INTEGER PRIMARY KEY AUTOINCREMENT, "
-                "parent_id TEXT NOT NULL, child_id TEXT NOT NULL, root_path TEXT NOT NULL, context TEXT NOT NULL)",
-                "CREATE TABLE IF NOT EXISTS trace (execution_id TEXT NOT NULL, idx INTEGER NOT NULL, "
-                "entry TEXT NOT NULL, PRIMARY KEY (execution_id, idx))",
-            ]
-        )
+        if create_schema:
+            self._execute(store_schema("sqlite", prefix))
         self.trace_max = DEFAULT_TRACE_MAX
 
     @classmethod
-    def from_url(cls, url: str, connect_retries: int = 30, retry_delay: float = 1.0) -> "RqliteStore":
+    def from_url(
+        cls,
+        url: str,
+        connect_retries: int = 30,
+        retry_delay: float = 1.0,
+        *,
+        prefix: str = DEFAULT_PREFIX,
+        create_schema: bool = True,
+    ) -> "RqliteStore":
         """Build a store, retrying until rqlite is up and has elected a leader (a
         worker starting alongside rqlite in compose waits rather than crashing)."""
         import time
@@ -68,7 +73,10 @@ class RqliteStore:
         last: Exception | None = None
         for _ in range(connect_retries):
             try:
-                return cls(url)
+                store = cls(url, prefix=prefix, create_schema=create_schema)
+                if not create_schema:
+                    store._query("SELECT 1", ())  # nothing created: still wait for a leader
+                return store
             except requests.exceptions.RequestException as exc:
                 last = exc
                 time.sleep(retry_delay)
@@ -97,7 +105,7 @@ class RqliteStore:
         return result.get("values") or []
 
     def load(self, execution_id: str) -> Optional[Execution]:
-        rows = self._query("SELECT data FROM executions WHERE id = ?", (execution_id,))
+        rows = self._query(f"SELECT data FROM {self._n.executions} WHERE id = ?", (execution_id,))
         return Execution.model_validate_json(rows[0][0]) if rows else None
 
     def list_executions(
@@ -111,7 +119,7 @@ class RqliteStore:
     ) -> ExecutionPage:
         # distributed SQLite: the same json_extract projection as SqliteStore, over _query
         off = _decode_offset(cursor)
-        sql, params = _listing_sql_sqlite(status, definition_id, roots_only, limit, off)
+        sql, params = _listing_sql_sqlite(self._n.executions, status, definition_id, roots_only, limit, off)
         return _listing_page(self._query(sql, params), limit, off)
 
     def save(self, exe: Execution) -> None:
@@ -136,7 +144,7 @@ class RqliteStore:
         # holding our `data`, so a CAS miss leaves the whole txn a no-op.
         statements: list = [
             [
-                "INSERT OR IGNORE INTO executions (id, definition_id, data, version) VALUES (?, ?, ?, ?)",
+                f"INSERT OR IGNORE INTO {self._n.executions} (id, definition_id, data, version) VALUES (?, ?, ?, ?)",
                 exe.id,
                 exe.definition_id,
                 data,
@@ -144,7 +152,7 @@ class RqliteStore:
             ]
             if old == 0
             else [
-                "UPDATE executions SET data = ?, version = ? WHERE id = ? AND version = ?",
+                f"UPDATE {self._n.executions} SET data = ?, version = ? WHERE id = ? AND version = ?",
                 data,
                 new,
                 exe.id,
@@ -158,8 +166,8 @@ class RqliteStore:
         for target_id, event in emits:
             statements.append(
                 [
-                    "INSERT INTO outbox (target_id, event) SELECT ?, ? "
-                    "WHERE EXISTS (SELECT 1 FROM executions WHERE id = ? AND data = ?)",
+                    f"INSERT INTO {self._n.outbox} (target_id, event) SELECT ?, ? "
+                    f"WHERE EXISTS (SELECT 1 FROM {self._n.executions} WHERE id = ? AND data = ?)",
                     target_id,
                     event.model_dump_json(),
                     exe.id,
@@ -169,8 +177,8 @@ class RqliteStore:
         if processed_event_id is not None:
             statements.append(
                 [
-                    "INSERT OR IGNORE INTO processed_events (execution_id, event_id) SELECT ?, ? "
-                    "WHERE EXISTS (SELECT 1 FROM executions WHERE id = ? AND data = ?)",
+                    f"INSERT OR IGNORE INTO {self._n.processed_events} (execution_id, event_id) SELECT ?, ? "
+                    f"WHERE EXISTS (SELECT 1 FROM {self._n.executions} WHERE id = ? AND data = ?)",
                     exe.id,
                     processed_event_id,
                     exe.id,
@@ -182,8 +190,8 @@ class RqliteStore:
         for op in timers:
             statements.append(
                 [
-                    "DELETE FROM timers WHERE execution_id = ? AND path = ? "
-                    "AND EXISTS (SELECT 1 FROM executions WHERE id = ? AND data = ?)",
+                    f"DELETE FROM {self._n.timers} WHERE execution_id = ? AND path = ? "
+                    f"AND EXISTS (SELECT 1 FROM {self._n.executions} WHERE id = ? AND data = ?)",
                     exe.id,
                     op.path,
                     exe.id,
@@ -193,8 +201,8 @@ class RqliteStore:
             if op.action == "schedule":
                 statements.append(
                     [
-                        "INSERT INTO timers (execution_id, path, fire_at) SELECT ?, ?, ? "
-                        "WHERE EXISTS (SELECT 1 FROM executions WHERE id = ? AND data = ?)",
+                        f"INSERT INTO {self._n.timers} (execution_id, path, fire_at) SELECT ?, ?, ? "
+                        f"WHERE EXISTS (SELECT 1 FROM {self._n.executions} WHERE id = ? AND data = ?)",
                         exe.id,
                         op.path,
                         op.fire_at,
@@ -206,8 +214,8 @@ class RqliteStore:
         for child_id, root_path, context in spawns:
             statements.append(
                 [
-                    "INSERT INTO spawns (parent_id, child_id, root_path, context) SELECT ?, ?, ?, ? "
-                    "WHERE EXISTS (SELECT 1 FROM executions WHERE id = ? AND data = ?)",
+                    f"INSERT INTO {self._n.spawns} (parent_id, child_id, root_path, context) SELECT ?, ?, ?, ? "
+                    f"WHERE EXISTS (SELECT 1 FROM {self._n.executions} WHERE id = ? AND data = ?)",
                     exe.id,
                     child_id,
                     root_path,
@@ -221,9 +229,9 @@ class RqliteStore:
         if trace is not None:
             statements.append(
                 [
-                    "INSERT INTO trace (execution_id, idx, entry) "
-                    "SELECT ?, COALESCE((SELECT MAX(idx) FROM trace WHERE execution_id = ?), -1) + 1, ? "
-                    "WHERE EXISTS (SELECT 1 FROM executions WHERE id = ? AND data = ?)",
+                    f"INSERT INTO {self._n.trace} (execution_id, idx, entry) "
+                    f"SELECT ?, COALESCE((SELECT MAX(idx) FROM {self._n.trace} WHERE execution_id = ?), -1) + 1, ? "
+                    f"WHERE EXISTS (SELECT 1 FROM {self._n.executions} WHERE id = ? AND data = ?)",
                     exe.id,
                     exe.id,
                     json.dumps(trace),
@@ -234,9 +242,9 @@ class RqliteStore:
             if self.trace_max:
                 statements.append(
                     [
-                        "DELETE FROM trace WHERE execution_id = ? AND idx <= "
-                        "(SELECT MAX(idx) FROM trace WHERE execution_id = ?) - ? "
-                        "AND EXISTS (SELECT 1 FROM executions WHERE id = ? AND data = ?)",
+                        f"DELETE FROM {self._n.trace} WHERE execution_id = ? AND idx <= "
+                        f"(SELECT MAX(idx) FROM {self._n.trace} WHERE execution_id = ?) - ? "
+                        f"AND EXISTS (SELECT 1 FROM {self._n.executions} WHERE id = ? AND data = ?)",
                         exe.id,
                         exe.id,
                         self.trace_max,
@@ -247,14 +255,14 @@ class RqliteStore:
         results = self._execute(statements, transaction=True)
         if results[0].get("rows_affected", 0) == 0:
             exe.version = old  # CAS missed: undo the in-memory bump (nothing was written)
-            found = self._query("SELECT version FROM executions WHERE id = ?", (exe.id,))
+            found = self._query(f"SELECT version FROM {self._n.executions} WHERE id = ?", (exe.id,))
             raise StoreConflict(exe.id, expected=old, found=found[0][0] if found else None)
         # success: exe.version is already `new`; the outbox inserts are statements 1..len(emits)
         return [int(r["last_insert_id"]) for r in results[1 : 1 + len(emits)]]
 
     def is_processed(self, execution_id: str, event_id: str) -> bool:
         rows = self._query(
-            "SELECT 1 FROM processed_events WHERE execution_id = ? AND event_id = ?",
+            f"SELECT 1 FROM {self._n.processed_events} WHERE execution_id = ? AND event_id = ?",
             (execution_id, event_id),
         )
         return bool(rows)
@@ -264,8 +272,8 @@ class RqliteStore:
         self._execute(
             [
                 [
-                    "INSERT INTO trace (execution_id, idx, entry) "
-                    "SELECT ?, COALESCE((SELECT MAX(idx) FROM trace WHERE execution_id = ?), -1) + 1, ?",
+                    f"INSERT INTO {self._n.trace} (execution_id, idx, entry) "
+                    f"SELECT ?, COALESCE((SELECT MAX(idx) FROM {self._n.trace} WHERE execution_id = ?), -1) + 1, ?",
                     execution_id,
                     execution_id,
                     json.dumps(entry),
@@ -276,8 +284,8 @@ class RqliteStore:
             self._execute(
                 [
                     [
-                        "DELETE FROM trace WHERE execution_id = ? AND idx <= "
-                        "(SELECT MAX(idx) FROM trace WHERE execution_id = ?) - ?",
+                        f"DELETE FROM {self._n.trace} WHERE execution_id = ? AND idx <= "
+                        f"(SELECT MAX(idx) FROM {self._n.trace} WHERE execution_id = ?) - ?",
                         execution_id,
                         execution_id,
                         self.trace_max,
@@ -287,29 +295,32 @@ class RqliteStore:
 
     def read_trace(self, execution_id: str) -> list[dict]:
         rows = self._query(
-            "SELECT idx, entry FROM trace WHERE execution_id = ? ORDER BY idx", (execution_id,)
+            f"SELECT idx, entry FROM {self._n.trace} WHERE execution_id = ? ORDER BY idx", (execution_id,)
         )
         return [{**json.loads(entry), "index": idx} for idx, entry in rows]
 
     def pending_outbox(self) -> list[OutboxEntry]:
-        rows = self._query("SELECT seq, target_id, event FROM outbox ORDER BY seq", ())
+        rows = self._query(f"SELECT seq, target_id, event FROM {self._n.outbox} ORDER BY seq", ())
         return [
             OutboxEntry(seq, target_id, Event.model_validate_json(event)) for seq, target_id, event in rows
         ]
 
     def ack_outbox(self, seq: int) -> None:
-        self._execute([["DELETE FROM outbox WHERE seq = ?", seq]])
+        self._execute([[f"DELETE FROM {self._n.outbox} WHERE seq = ?", seq]])
 
     def pending_spawns(self) -> list[SpawnEntry]:
-        rows = self._query("SELECT seq, parent_id, child_id, root_path, context FROM spawns ORDER BY seq", ())
+        rows = self._query(
+            f"SELECT seq, parent_id, child_id, root_path, context FROM {self._n.spawns} ORDER BY seq", ()
+        )
         return [SpawnEntry(seq, pid, cid, rp, json.loads(ctx)) for seq, pid, cid, rp, ctx in rows]
 
     def ack_spawn(self, seq: int) -> None:
-        self._execute([["DELETE FROM spawns WHERE seq = ?", seq]])
+        self._execute([[f"DELETE FROM {self._n.spawns} WHERE seq = ?", seq]])
 
     def due_timers(self, now: float) -> list[tuple[str, str, float]]:
         rows = self._query(
-            "SELECT execution_id, path, fire_at FROM timers WHERE fire_at <= ? ORDER BY fire_at", (now,)
+            f"SELECT execution_id, path, fire_at FROM {self._n.timers} WHERE fire_at <= ? ORDER BY fire_at",
+            (now,),
         )
         return [(eid, path, float(fa)) for eid, path, fa in rows]
 
@@ -317,7 +328,7 @@ class RqliteStore:
         self._execute(
             [
                 [
-                    "DELETE FROM timers WHERE execution_id = ? AND path = ? AND fire_at = ?",
+                    f"DELETE FROM {self._n.timers} WHERE execution_id = ? AND path = ? AND fire_at = ?",
                     execution_id,
                     path,
                     fire_at,
@@ -326,22 +337,22 @@ class RqliteStore:
         )
 
     def ids_with_prefix(self, prefix: str) -> list[str]:
-        return [r[0] for r in self._query(_IDS_WITH_PREFIX_SQL, (_like_prefix(prefix),))]
+        return [r[0] for r in self._query(self._n.sql(_IDS_WITH_PREFIX_SQL), (_like_prefix(prefix),))]
 
     def purge(self, execution_id: str, expected_version: int) -> bool:
-        results = self._execute(_purge_statements(execution_id, expected_version), transaction=True)
+        results = self._execute(_purge_statements(self._n, execution_id, expected_version), transaction=True)
         return results[0].get("rows_affected", 0) == 1
 
     def close(self) -> None:
         self._session.close()
 
 
-def _purge_statements(execution_id: str, expected_version: int) -> list:
+def _purge_statements(names: Names, execution_id: str, expected_version: int) -> list:
     """One transactional request (rqlite has no interactive transactions): the CAS delete,
     then every companion delete guarded on the Execution now being absent — so a version
     mismatch leaves the whole request a no-op, and an already-purged id is still swept."""
-    gone = " AND NOT EXISTS (SELECT 1 FROM executions WHERE id = ?)"
+    gone = f" AND NOT EXISTS (SELECT 1 FROM {names.executions} WHERE id = ?)"
     return [
-        ["DELETE FROM executions WHERE id = ? AND version = ?", execution_id, expected_version],
-        *[[sql + gone, execution_id, execution_id] for sql in _PURGE_COMPANIONS_SQL],
+        [f"DELETE FROM {names.executions} WHERE id = ? AND version = ?", execution_id, expected_version],
+        *[[sql + gone, execution_id, execution_id] for sql in map(names.sql, _PURGE_COMPANIONS_SQL)],
     ]

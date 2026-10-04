@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased
+
+### Breaking
+
+- **Every backend names what it creates with a `prefix`, default `"harel"`**: the SQL tables are
+  `harel_executions`, `harel_outbox`, …, `harel_transport_messages`, `harel_transport_groups`
+  (they had no prefix; the SQLite-family transport's were `messages` and `groups`), Redis keys
+  `harel:…` (were `stm:…`), Mongo collections `harel_executions`, `harel_counters`,
+  `harel_transport_*` (were `executions`, `counters`, `stm_*`), and the SQS transport's default
+  queue is `harel.fifo` (was `stm.fifo`). DynamoDB's tables are unchanged. A 0.7 backend on a
+  database from an earlier version starts empty beside the old data: [upgrading to
+  0.7](docs/guide/upgrading.md) renames it in place, backend by backend.
+- **The environment variables are `HAREL_*`** (were `STM_*`): `HAREL_STORE_BACKEND`,
+  `HAREL_POSTGRES_DSN`, `HAREL_CONCURRENCY`, … — the same names with the new prefix. A variable
+  still set under its old name is not read; each is logged with the name to use.
+- The backends that took `prefix` positionally take it by keyword (`RedisStore`,
+  `RedisTransport`, `PostgresTransport`, `MongoTransport`, `DynamoDBStore`, their async twins
+  and constructors); `PostgresTransport`'s `prefix`, accepted and ignored before, now names its
+  tables.
+
+### Added
+
+- **`prefix` on every persistent backend** — store and transport, sync and async — so several
+  deployments, or harel and other applications, share one database. `harel.engine.schema.Names`
+  gives the names under a prefix.
+- **`create_schema`** (default `True`) on every backend with a schema: with `False` it creates
+  no table, index or function, and expects them to exist — for a schema owned by a migration
+  tool or infrastructure-as-code.
+- **The SQL schema as data**: `harel.engine.schema.sql_schema(dialect, prefix)` (and
+  `store_schema` / `transport_schema`) returns the statements the SQL backends run, for a
+  migration tool to apply; `SCHEMA_VERSION` changes whenever the schema does.
+- The worker reads `HAREL_PREFIX` and `HAREL_CREATE_SCHEMA`.
+- **`shares_store_transaction`**, an optional attribute of a transport whose writes go into the
+  store's transaction (the caller's connection): `create()` then lets a failed publish of the
+  new execution's `Start` reach the caller instead of leaving it queued in the outbox.
+
 ## 0.6.1 — 2026-10-04
 
 ### Changed

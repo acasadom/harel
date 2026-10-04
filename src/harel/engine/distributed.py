@@ -198,7 +198,13 @@ class DistributedRunner:
         self._trace = trace
         self.execution = execution
         if execution == "inline":
-            self._inline: Optional[SenderLogic] = SenderLogic(definitions, clock, resolver, trace)
+            self._inline: Optional[SenderLogic] = SenderLogic(
+                definitions,
+                clock,
+                resolver,
+                trace,
+                shares_store_transaction=getattr(transport, "shares_store_transaction", False),
+            )
             self._ports = {"store": store, "transport": transport}
             return
         self._inline = None
