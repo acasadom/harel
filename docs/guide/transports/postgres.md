@@ -24,8 +24,13 @@ CREATE TABLE harel_transport_groups (
   locked_by   TEXT,                 -- lease token (worker_id:uuid) while in flight, else NULL
   lock_expiry DOUBLE PRECISION,     -- epoch when the lease/park ends (NULL = free; >now = in-flight/parked)
   priority    INT NOT NULL DEFAULT 0)  -- set on first publish (0–4); used for priority filtering
-CREATE INDEX harel_transport_groups_claimable ON harel_transport_groups (lock_expiry)
+CREATE INDEX harel_transport_groups_claim_order
+  ON harel_transport_groups ((COALESCE(lock_expiry, 0)), group_id)    -- claim's order
 ```
+
+The index is on exactly the order `claim` reads in — the least recently served first — so a
+claim walks it and stops at the first claimable group, whatever the number of groups. (An index
+on `lock_expiry` alone can't serve that order: each claim would sort every group.)
 
 The messages and the lease are **split**: `harel_transport_messages` is the queue; `harel_transport_groups`
 holds *exactly one row per active group* with its lease and priority. Claiming leases the **group

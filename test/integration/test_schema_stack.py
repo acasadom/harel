@@ -202,3 +202,35 @@ def test_postgres_upgrade_recipe():
     assert PostgresStore(connect()).load("order-1").version == 3
     lease = PostgresTransport(connect()).claim("worker", 30)
     assert lease is not None and lease.event.kind == "Paid"
+
+
+def test_postgres_claim_walks_its_index_instead_of_sorting():
+    """claim reads the groups least recently served first; the index on that order lets it stop
+    at the first claimable one. Without it, every claim sorts the whole groups table."""
+    import psycopg
+
+    from harel.engine.transport import PostgresTransport
+
+    dsn = _env("postgres", "HAREL_POSTGRES_DSN")
+    prefix = _fresh()
+    names = Names(prefix)
+    PostgresTransport(psycopg.connect(dsn), prefix=prefix)
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            f"INSERT INTO {names.groups} (group_id, priority) SELECT 'g' || i, 0 FROM generate_series(1, 20000) i"
+        )
+        conn.execute(f"ANALYZE {names.groups}")
+        plan = "\n".join(
+            row[0]
+            for row in conn.execute(
+                f"EXPLAIN SELECT s.group_id FROM {names.groups} s "
+                "WHERE (s.locked_by IS NULL OR s.lock_expiry < 1e12) AND s.priority >= 0 "
+                "ORDER BY COALESCE(s.lock_expiry, 0) ASC, s.group_id FOR UPDATE SKIP LOCKED LIMIT 1"
+            )
+        )
+        indexes = {
+            r[0]
+            for r in conn.execute("SELECT indexname FROM pg_indexes WHERE tablename = %s", (names.groups,))
+        }
+    assert f"{prefix}_transport_groups_claim_order" in plan and "Sort" not in plan, plan
+    assert f"{prefix}_transport_groups_claimable" not in indexes  # the index it replaced

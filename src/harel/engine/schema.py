@@ -21,7 +21,7 @@ import re
 from dataclasses import dataclass
 from functools import cached_property
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DEFAULT_PREFIX = "harel"
 
 # an SQL identifier; at most 30 characters, so the longest name built from it (an index) stays
@@ -143,7 +143,8 @@ def transport_schema(dialect: str, prefix: str = DEFAULT_PREFIX) -> list[str]:
 def sql_schema(dialect: str, prefix: str = DEFAULT_PREFIX) -> list[str]:
     """The whole SQL schema under `prefix` — the store's and the transport's — as the
     statements the backends run: what a migration tool applies when it owns the schema
-    (`create_schema=False`). Each is idempotent (`IF NOT EXISTS`, `CREATE OR REPLACE`)."""
+    (`create_schema=False`). Each is idempotent (`IF NOT EXISTS`, `CREATE OR REPLACE`, and
+    `DROP … IF EXISTS` for what an earlier `SCHEMA_VERSION` created and this one doesn't)."""
     return store_schema(dialect, prefix) + transport_schema(dialect, prefix)
 
 
@@ -224,7 +225,13 @@ _PG_TRANSPORT = (
     "CREATE TABLE IF NOT EXISTS {groups} "
     "(group_id TEXT PRIMARY KEY, locked_by TEXT, lock_expiry DOUBLE PRECISION, "
     "priority INT NOT NULL DEFAULT 0)",
-    "CREATE INDEX IF NOT EXISTS {prefix}_transport_groups_claimable ON {groups} (lock_expiry)",
+    # claim's order — the least recently served first — so it walks this index and stops at the
+    # first claimable group, instead of sorting every group on each claim
+    "CREATE INDEX IF NOT EXISTS {prefix}_transport_groups_claim_order ON {groups} "
+    "((COALESCE(lock_expiry, 0)), group_id)",
+    # the index before it, on lock_expiry alone: claim couldn't use it for that order, and every
+    # claim and ack paid to keep it up to date
+    "DROP INDEX IF EXISTS {prefix}_transport_groups_claimable",
     # `claim` and `ack` are PL/pgSQL functions, the Postgres analog of the Redis Lua scripts: the
     # transport is round-trip-bound, and each folds an operation's statements into one
     # server-side call. The lease itself is atomic either way (FOR UPDATE SKIP LOCKED).
