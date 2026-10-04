@@ -19,6 +19,11 @@ machine Name { … }          # a machine
 fragment Name(params) { … } # a parametrized, reusable piece
 ```
 
+A declared event is checked twice: by `harel validate`, which checks that guards and `set`s read
+fields the event declares, and when it comes in — `process()` and `send()` raise `EventError`
+for a required field missing or a value of the wrong type, before anything runs or queues.
+Undeclared fields are let through, as are undeclared events and the reserved ones.
+
 ## Inside a machine or state
 
 ```text

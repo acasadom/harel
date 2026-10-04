@@ -100,3 +100,19 @@ def check_context(schema: dict[str, FieldSpec], context: dict, *, check_required
     problems = schema_problems(schema, context, check_required=check_required)
     if problems:
         raise ContextError("context doesn't fit the machine's `context` schema: " + "; ".join(problems))
+
+
+class EventError(ValueError):
+    """An event whose data doesn't fit the event's declared fields."""
+
+
+def check_event(events: dict[str, EventType], kind: str, data: dict) -> None:
+    """Raise `EventError` if `data` doesn't fit the declaration of event `kind` in `events`
+    (see `schema_problems`). An undeclared kind, or one of the engine's own (`Timeout`,
+    `Cancel`, …), isn't checked."""
+    etype = events.get(kind) if kind not in RESERVED_EVENTS else None
+    if etype is None:
+        return
+    problems = schema_problems(etype.fields, data)
+    if problems:
+        raise EventError(f"event {kind!r} doesn't fit its declaration: " + "; ".join(problems))

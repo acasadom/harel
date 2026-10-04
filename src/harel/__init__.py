@@ -8,7 +8,7 @@ module layout.
 """
 
 from harel.archive import JsonlArchive
-from harel.definition.events import ContextError
+from harel.definition.events import ContextError, EventError
 from harel.definition.validate import Issue, ValidationError, validate, validate_or_raise
 from harel.dsl import DslError, definition_from_dsl, definition_from_dsl_file
 from harel.dsl.resolve import FileResolver, ModuleResolver, SourceResolver
@@ -37,6 +37,7 @@ __all__ = [
     "definition_from_dsl_file",
     "DslError",
     "ContextError",
+    "EventError",
     "ExpressionError",
     "StoreConflict",
     "PurgeRefused",

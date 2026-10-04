@@ -86,7 +86,7 @@ ALTER TABLE trace RENAME TO harel_trace;
 ALTER TABLE transport_messages RENAME TO harel_transport_messages;
 ALTER TABLE transport_groups RENAME TO harel_transport_groups;
 ALTER INDEX transport_messages_group RENAME TO harel_transport_messages_by_group;
-ALTER INDEX transport_groups_claimable RENAME TO harel_transport_groups_claimable;
+DROP INDEX IF EXISTS transport_groups_claimable;  -- replaced: the backend creates the index claim uses
 DROP FUNCTION IF EXISTS harel_ack(text, bigint, text);  -- an old signature, if it is still there
 COMMIT;
 ```

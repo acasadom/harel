@@ -151,12 +151,12 @@ tool, infrastructure-as-code. For the SQL backends the schema is data:
 from harel.engine.schema import SCHEMA_VERSION, sql_schema
 
 statements = sql_schema("postgres", prefix="harel")  # or "sqlite" (SQLite, libSQL, rqlite)
-assert all(s.startswith("CREATE") for s in statements)
+assert any("CREATE TABLE IF NOT EXISTS harel_executions" in s for s in statements)
 ```
 
 `sql_schema` returns the statements the backends run themselves — the store's and the
 transport's (`store_schema` / `transport_schema` for one of them) — each idempotent (`IF NOT
-EXISTS`, `CREATE OR REPLACE`). Hand them to the migration tool, and build the backends with
+EXISTS`, `CREATE OR REPLACE`, and `DROP … IF EXISTS` for what an earlier version created). Hand them to the migration tool, and build the backends with
 `create_schema=False`. `SCHEMA_VERSION` changes whenever the schema does, and the CHANGELOG says
 how to move from one version to the next. The worker reads both settings from `HAREL_PREFIX` and
 `HAREL_CREATE_SCHEMA` (`"0"`/`"false"` to turn it off).

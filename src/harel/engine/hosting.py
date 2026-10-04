@@ -20,7 +20,7 @@ import time
 from typing import Any, Callable, Optional
 
 from harel import engine
-from harel.definition.events import check_context, with_defaults
+from harel.definition.events import check_context, check_event, with_defaults
 from harel.definition.model import Definition
 from harel.engine import control
 from harel.engine.driving import DriverLogic, FailOnActionError, TransportDriverLogic, store, transport
@@ -167,7 +167,9 @@ class DurableLogic:
         exe = yield from store("load", execution_id)
         if exe is None:
             raise KeyError(execution_id)
-        yield from self._driver_logic(exe.definition_id).inject_flow(exe, event)
+        driver = self._driver_logic(exe.definition_id)
+        check_event(driver.defn.events, event.kind, event.data)  # before anything runs
+        yield from driver.inject_flow(exe, event)
         return (yield from self._loaded_flow(execution_id))
 
     def recover_flow(self, definition_id: str) -> Flow:
@@ -348,6 +350,8 @@ class SenderLogic:
                 "begin an execution (optionally with its parameters)"
             )
         exe = yield from store("load", execution_id)
+        if exe is not None:  # checked in the caller's stack: a malformed event never queues
+            check_event(_defn_for(self.definitions, self.resolver, exe).events, event.kind, event.data)
         priority = exe.priority if exe is not None else 0
         yield from transport("publish", execution_id, event, priority=priority)
 

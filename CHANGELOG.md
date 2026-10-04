@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.8.0 — 2026-10-04
+
+### Fixed
+
+- **The Postgres transport's `claim` no longer sorts every group.** Its query reads the groups in
+  `(COALESCE(lock_expiry, 0), group_id)` order, which the index on `lock_expiry` couldn't serve,
+  so each claim sorted the whole table — on disk past a few tens of thousands of groups (154 ms
+  at 100,000 groups). An index on that order lets it stop at the first claimable group (0.03 ms).
+  The old index is dropped. `SCHEMA_VERSION` is 3: a backend built with `create_schema=True`
+  updates its schema when it starts; where a migration tool owns it, apply
+  `sql_schema("postgres", prefix)` again.
+
+### Changed
+
+- **A declared event is checked when it comes in**: `process()` and `send()` (sync and async)
+  raise `EventError`, a `ValueError` exported from `harel`, for an event whose data lacks a
+  required field or has a value of the wrong type — in the caller's stack, before anything runs,
+  commits or queues. Until now only `harel validate` checked events, statically: an incomplete
+  event was accepted. Undeclared fields and events, and the engine's own (`Timeout`, `Cancel`,
+  …), pass as before.
+
 ## 0.7.1 — 2026-10-04
 
 ### Fixed
