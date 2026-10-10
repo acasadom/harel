@@ -13,7 +13,7 @@ from harel.definition.validate import Issue, ValidationError, validate, validate
 from harel.dsl import DslError, definition_from_dsl, definition_from_dsl_file
 from harel.dsl.resolve import FileResolver, ModuleResolver, SourceResolver
 from harel.engine.control import PurgeRefused
-from harel.engine.core import ExpressionError
+from harel.engine.core import DefinitionChanged, ExpressionError
 from harel.engine.durable import DurableRunner
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary
 from harel.engine.observe import AsyncObservedStore, ObservedStore
@@ -46,6 +46,7 @@ __all__ = [
     "DslError",
     "ContextError",
     "EventError",
+    "DefinitionChanged",
     "ExpressionError",
     "StoreConflict",
     "PurgeRefused",

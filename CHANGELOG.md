@@ -11,6 +11,13 @@
 
 ### Fixed
 
+- **A machine changed under a running execution** — a state it is parked in renamed or removed —
+  no longer sends the engine looking for a node that isn't there (a `KeyError`, which a worker
+  logged and retried for ever). The runner checks first and fails the execution with a clear
+  `DefinitionChanged` error naming the missing state (`process()` raises it under
+  `on_action_error="raise"`); `redrive` brings it back to a state the new machine has, and
+  `cancel` terminates it. A finished or suspended execution is left alone. See *Changing a machine
+  with executions in flight* in the durability guide. harel has no versions of a definition yet.
 - A Mermaid diagram drew a top-level state that has a description (`on enter: …`, `outcome: …`)
   without its name: every described state is now declared with it.
 - A Mermaid diagram drew a state outside a composite inside it when a transition led to it from
