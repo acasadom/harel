@@ -36,10 +36,14 @@ Done --> [*]
 ---
 stateDiagram-v2
 [*] --> Cart
-Done : outcome: success
+state "Done" as Done
+Done : outcome#58; success
 Cart --> Done : Finish
 Done --> [*]
 ```
+
+(`#58;` is Mermaid's entity for a colon, drawn as `:` — a bare one inside a state's description is
+a syntax error in Mermaid 11.)
 
 PlantUML is good for docs and review; Mermaid (`stateDiagram-v2`) renders directly in a browser
 — which is what the live preview below uses. Both walk the tree by reference and handle the full
@@ -48,6 +52,21 @@ a transition's guard is written out under its event — `and`/`or`/`not` and nam
 included (`Pay<br/>[(tier == 'gold' or spend > 1000) and region == 'eu']` in Mermaid) — followed
 by its `set` as a UML effect (`/ context.n = context.n + 1`), and a `choose` is drawn as a choice
 node with each branch's guard (`[context.attempts >= 3]`) and its `else`.
+
+### Highlighting states
+
+`mermaid.render(defn, active=[...])` highlights the states it is given, by full path — an
+execution's `active_path`, and its regions' for an orthogonal state:
+
+```python
+exe_paths = ["Cart"]  # e.g. [exe.active_path] for a running execution
+diagram = mermaid.render(defn, active=exe_paths)
+assert diagram.splitlines()[-1] == "class Cart active"
+```
+
+It appends a `classDef active …` and a `class … active` line; `active_style=` sets the style (a
+Mermaid `classDef` body), and a path the machine doesn't have raises `ValueError`. For classes or
+styles of your own, `mermaid.node_id(defn, path)` gives the id the diagram uses for a state.
 
 ## The language server
 

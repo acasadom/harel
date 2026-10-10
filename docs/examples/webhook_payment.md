@@ -21,15 +21,22 @@ python -m examples.webhook_payment.simulate dedup     # the same webhook deliver
 ```{mermaid}
 stateDiagram-v2
 [*] --> Initializing
+state "Initializing" as Initializing
 Initializing : on enter#58; setup_order
+state "AwaitingPayment" as AwaitingPayment
 AwaitingPayment : timeout#58; 15
+state "Fulfilling" as Fulfilling
 Fulfilling : on enter#58; start_fulfillment
+state "Done" as Done
 Done : on enter#58; on_done
 Done : outcome#58; success
+state "Failed" as Failed
 Failed : on enter#58; on_failed
 Failed : outcome#58; failed
+state "Abandoned" as Abandoned
 Abandoned : on enter#58; on_abandoned
 Abandoned : outcome#58; abandoned
+state "SvcError" as SvcError
 SvcError : on enter#58; on_svc_error
 SvcError : outcome#58; failed
 Initializing --> AwaitingPayment

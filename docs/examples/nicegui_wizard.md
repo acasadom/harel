@@ -14,7 +14,9 @@ typed code matches the one it sent.
 ```{mermaid}
 stateDiagram-v2
 [*] --> Account
+state "Verify" as Verify
 Verify : on enter#58; send_code
+state "Done" as Done
 Done : outcome#58; success
 Account --> Profile : Next<br/>[email != '']<br/>/ context.email = event.email
 Profile --> Account : Back

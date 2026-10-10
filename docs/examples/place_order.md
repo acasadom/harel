@@ -27,9 +27,13 @@ prints every step:
 ```{mermaid}
 stateDiagram-v2
 [*] --> Cart
+state "Cart" as Cart
 Cart : on enter#58; on_cart
+state "AwaitingPayment" as AwaitingPayment
 AwaitingPayment : on enter#58; request_payment
+state "Retrying" as Retrying
 Retrying : on enter#58; on_retry
+state "Paid" as Paid
 Paid : on enter#58; capture_payment
 state "Fulfilling<br/>on enter: start_fulfilment" as Fulfilling {
   [*] --> Fulfilling_Picking
@@ -46,16 +50,19 @@ state "Fulfilling<br/>on enter: start_fulfilment" as Fulfilling {
   Fulfilling_Packing --> Fulfilling_Packing__choose_carrier : Packed
   Fulfilling_Packing__choose_carrier --> Fulfilling_Express : choose_carrier=express
   Fulfilling_Packing__choose_carrier --> Fulfilling_Standard : choose_carrier=standard
-  Fulfilling_Express --> Shipped : Dispatched
-  Fulfilling_Standard --> Shipped : Dispatched
 }
+state "Shipped" as Shipped
 Shipped : on enter#58; ship
+state "Delivered" as Delivered
 Delivered : on enter#58; deliver
 Delivered : outcome#58; success
+state "Cancelled" as Cancelled
 Cancelled : on enter#58; cancel_order
 Cancelled : outcome#58; cancelled
+state "PaymentError" as PaymentError
 PaymentError : on enter#58; on_payment_error
 PaymentError : outcome#58; failed
+state "FulfilmentError" as FulfilmentError
 FulfilmentError : on enter#58; on_fulfilment_error
 FulfilmentError : outcome#58; failed
 Cart --> AwaitingPayment : PlaceOrder
@@ -74,6 +81,8 @@ Delivered --> [*]
 Cancelled --> [*]
 PaymentError --> [*]
 FulfilmentError --> [*]
+Fulfilling_Express --> Shipped : Dispatched
+Fulfilling_Standard --> Shipped : Dispatched
 ```
 
 What it shows:
