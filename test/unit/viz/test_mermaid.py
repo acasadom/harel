@@ -7,6 +7,8 @@ checked separately by the editor probe; here we pin the *shape* of the text.
 
 from pathlib import Path
 
+import pytest
+
 from harel.dsl import definition_from_dsl, definition_from_dsl_file, parse
 from harel.viz.mermaid import render
 
@@ -200,3 +202,54 @@ machine M {
     for line in render(defn).splitlines():
         if " : " in line:
             assert ":" not in line.split(" : ", 1)[1], line
+
+
+_NESTED = """
+event Go {}
+event Done {}
+machine M {
+  initial F
+  state F {
+    initial A
+    state A {}
+    state B {}
+    from A to B on Go
+    from B to S on Done
+  }
+  state S { on enter pkg.mod.ship }
+}
+"""
+
+
+def test_active_states_are_highlighted():
+    from harel.viz.mermaid import ACTIVE_STYLE, node_id
+
+    defn = definition_from_dsl(_NESTED, "M")
+    lines = render(defn, active=["F", "F.B", "F.B"]).splitlines()
+    assert lines[-2:] == [f"classDef active {ACTIVE_STYLE}", "class F,F_B active"]
+    assert node_id(defn, "F.B") == "F_B"
+    assert "classDef" not in render(defn)  # nothing active, nothing styled
+    assert render(defn, active=["S"], active_style="fill:red").endswith(
+        "classDef active fill:red\nclass S active"
+    )
+
+
+def test_an_unknown_active_state_is_an_error():
+    defn = definition_from_dsl(_NESTED, "M")
+    with pytest.raises(ValueError, match="no state 'F.X'"):
+        render(defn, active=["F.X"])
+
+
+def test_a_described_state_is_declared_with_its_name():
+    # Mermaid draws a described state's description alone unless it is declared by name
+    lines = render(definition_from_dsl(_NESTED, "M")).splitlines()
+    assert lines.index('state "S" as S') < lines.index("S : on enter#58; ship")
+
+
+def test_an_edge_out_of_a_composite_is_written_outside_its_block():
+    # Mermaid draws a state inside the block where it is first referenced: F's edge B --> S
+    # written inside F's block would pull S into F
+    lines = render(definition_from_dsl(_NESTED, "M")).splitlines()
+    edge = lines.index("F_B --> S : Done")  # at the top level, unindented
+    close = max(i for i, line in enumerate(lines) if line == "}")
+    assert edge > close

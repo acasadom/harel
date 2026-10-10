@@ -18,7 +18,7 @@ Mermaid constraints that shape the output (verified against mermaid v11):
 from __future__ import annotations
 
 import re
-from typing import Callable, Optional, Union
+from typing import Callable, Iterable, Optional, Union
 
 from harel.definition.model import (
     ActionRef,
@@ -27,6 +27,7 @@ from harel.definition.model import (
     Node,
     NodeKind,
     Transition,
+    is_descendant,
     resolve_relative,
 )
 from harel.viz._guards import branch_text, effect_text, guard_text
@@ -103,7 +104,20 @@ def _edge_suffix(ef: Optional[EventFilter], assignments: tuple = ()) -> str:
     return f" : {parts[0]}" if parts else ""
 
 
-def _emit_choice(source: Node, t: Transition, pad: str, out: list[str]) -> None:
+def _edge(comp: Node, target: Node, line: str, pad: str, out: list[str], escaping: list[str]) -> None:
+    """Emit an edge into `target` from inside `comp`'s block — or, when `target` lies outside
+    `comp`, at the top level (`escaping`): Mermaid draws a state inside the block where it is
+    first referenced, so an edge out of a composite written inside it would pull its target in.
+    State ids are global, so a top-level edge reaches a nested source."""
+    if comp.parent is None or (target is not comp and is_descendant(target, comp)):
+        out.append(pad + line)
+    else:
+        escaping.append(line)
+
+
+def _emit_choice(
+    comp: Node, source: Node, t: Transition, pad: str, out: list[str], escaping: list[str]
+) -> None:
     choice = t.choice
     assert choice is not None
     src = _nid(source)
@@ -112,13 +126,11 @@ def _emit_choice(source: Node, t: Transition, pad: str, out: list[str]) -> None:
     out.append(f"{pad}{src} --> {node}{_edge_suffix(t.event_filter, t.assignments)}")
     for i, (guard, target) in enumerate(choice.branches):
         assigns = choice.branch_assignments[i] if i < len(choice.branch_assignments) else ()
-        out.append(
-            f"{pad}{node} --> {_nid(target)} : [{_text(branch_text(guard))}]" + _branch_effect(assigns)
-        )
+        label = f"[{_text(branch_text(guard))}]" + _branch_effect(assigns)
+        _edge(comp, target, f"{node} --> {_nid(target)} : {label}", pad, out, escaping)
     if choice.default is not None:
-        out.append(
-            f"{pad}{node} --> {_nid(choice.default)} : else" + _branch_effect(choice.default_assignments)
-        )
+        label = "else" + _branch_effect(choice.default_assignments)
+        _edge(comp, choice.default, f"{node} --> {_nid(choice.default)} : {label}", pad, out, escaping)
 
 
 def _branch_effect(assignments: tuple) -> str:
@@ -127,7 +139,9 @@ def _branch_effect(assignments: tuple) -> str:
     return "<br/>/ " + _text(effect) if effect else ""
 
 
-def _emit_selector(comp: Node, source: Node, t: Transition, pad: str, out: list[str]) -> None:
+def _emit_selector(
+    comp: Node, source: Node, t: Transition, pad: str, out: list[str], escaping: list[str]
+) -> None:
     selector = t.selector
     assert selector is not None
     fn = _short_name(selector.action.function)
@@ -138,31 +152,33 @@ def _emit_selector(comp: Node, source: Node, t: Transition, pad: str, out: list[
     for value, target_name in selector.mapper.items():
         target = resolve_relative(comp, target_name)
         assert target is not None, f"selector target {target_name!r} unresolved in {comp.full_path!r}"
-        out.append(f"{pad}{choice} --> {_nid(target)} : {fn}={_text(str(value))}")
+        _edge(comp, target, f"{choice} --> {_nid(target)} : {fn}={_text(str(value))}", pad, out, escaping)
     if selector.default is not None:
         target = resolve_relative(comp, selector.default)
         assert target is not None, f"selector else {selector.default!r} unresolved in {comp.full_path!r}"
-        out.append(f"{pad}{choice} --> {_nid(target)} : else")
+        _edge(comp, target, f"{choice} --> {_nid(target)} : else", pad, out, escaping)
 
 
-def _emit_transitions(comp: Node, pad: str, out: list[str]) -> None:
+def _emit_transitions(comp: Node, pad: str, out: list[str], escaping: list[str]) -> None:
     for child in comp.children:
         for t in (t for t in comp.transitions if t.source is child):
             if t.target is not None:
-                out.append(
-                    f"{pad}{_nid(child)} --> {_nid(t.target)}{_edge_suffix(t.event_filter, t.assignments)}"
-                )
+                line = f"{_nid(child)} --> {_nid(t.target)}{_edge_suffix(t.event_filter, t.assignments)}"
+                _edge(comp, t.target, line, pad, out, escaping)
             elif t.selector is not None:
-                _emit_selector(comp, child, t, pad, out)
+                _emit_selector(comp, child, t, pad, out, escaping)
             elif t.choice is not None:
-                _emit_choice(child, t, pad, out)
+                _emit_choice(comp, child, t, pad, out, escaping)
 
 
 def _emit_leaf(node: Node, pad: str, out: list[str]) -> None:
     nid = _nid(node)
-    if node.name != nid:
+    parts = _desc_parts(node)
+    # declared with its name whenever it has a description: Mermaid draws a described state's
+    # description alone, without its name, unless the state is declared `state "Name" as id`
+    if node.name != nid or parts:
         out.append(f'{pad}state "{node.name}" as {nid}')
-    for part in _desc_parts(node):
+    for part in parts:
         out.append(f"{pad}{nid} : {_text(part)}")
 
 
@@ -173,7 +189,7 @@ def _composite_title(node: Node) -> str:
     return node.name + "<br/>" + "<br/>".join(parts) if parts else node.name
 
 
-def _emit_composite(node: Node, indent: int, out: list[str]) -> None:
+def _emit_composite(node: Node, indent: int, out: list[str], escaping: list[str]) -> None:
     pad = _INDENT * indent
     nid = _nid(node)
     title = _composite_title(node)
@@ -183,13 +199,13 @@ def _emit_composite(node: Node, indent: int, out: list[str]) -> None:
         for i, region in enumerate(node.children):
             if i:
                 out.append(f"{_INDENT * (indent + 1)}--")
-            _emit_composite(region, indent + 1, out)
+            _emit_composite(region, indent + 1, out, escaping)
     else:
-        _emit_body(node, indent + 1, out)
+        _emit_body(node, indent + 1, out, escaping)
     out.append(f"{pad}}}")
 
 
-def _emit_body(comp: Node, indent: int, out: list[str]) -> None:
+def _emit_body(comp: Node, indent: int, out: list[str], escaping: list[str]) -> None:
     pad = _INDENT * indent
     if comp.start_state is not None:
         start = comp.child(comp.start_state)
@@ -197,10 +213,10 @@ def _emit_body(comp: Node, indent: int, out: list[str]) -> None:
         out.append(f"{pad}[*] --> {_nid(start)}")
     for child in comp.children:
         if child.is_composite:
-            _emit_composite(child, indent, out)
+            _emit_composite(child, indent, out, escaping)
         else:
             _emit_leaf(child, pad, out)
-    _emit_transitions(comp, pad, out)
+    _emit_transitions(comp, pad, out, escaping)
     # a leaf with no outgoing transition in this scope is a sink → final pseudostate
     for child in comp.children:
         if not child.is_composite and not any(t.source is child for t in comp.transitions):
@@ -209,7 +225,29 @@ def _emit_body(comp: Node, indent: int, out: list[str]) -> None:
                 out.append(line)
 
 
-def render(definition: Definition) -> str:
+ACTIVE_STYLE = "fill:#fde68a,stroke:#b45309,stroke-width:2px"
+
+
+def node_id(definition: Definition, path: str) -> str:
+    """The Mermaid id `render` gives the state at `path` (its full path, e.g. `Shipping.Packing`)
+    — for a `class` or `style` line of your own. Raises `ValueError` for a path the machine
+    doesn't have."""
+    node = definition.index.get(path) if path else None
+    if node is None:
+        raise ValueError(f"no state {path!r} in machine {definition.id!r}")
+    return _nid(node)
+
+
+def render(definition: Definition, *, active: Iterable[str] = (), active_style: str = ACTIVE_STYLE) -> str:
+    """`definition` as a Mermaid `stateDiagram-v2`. `active` lists the states to highlight, by
+    full path — an execution's `active_path`, its regions' — styled with `active_style` (a Mermaid
+    `classDef` body). A path the machine doesn't have raises `ValueError`."""
     out: list[str] = ["stateDiagram-v2"]
-    _emit_body(definition.root, 0, out)
+    escaping: list[str] = []  # edges out of a composite, written at the top level
+    _emit_body(definition.root, 0, out, escaping)
+    out.extend(escaping)
+    ids = list(dict.fromkeys(node_id(definition, path) for path in active))
+    if ids:
+        out.append(f"classDef active {active_style}")
+        out.append(f"class {','.join(ids)} active")
     return "\n".join(out)

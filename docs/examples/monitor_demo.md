@@ -29,15 +29,16 @@ state "Checkout<br/>on enter: reserve_inventory" as Checkout {
   state "Confirm" as Checkout_Confirm
   Checkout_Confirm : on enter#58; charge_card
   Checkout_Payment --> Checkout_Confirm : Paid<br/>/ context.charge_id = event.charge_id
-  Checkout_Payment --> Cart : Timeout
   Checkout_Confirm --> [*]
 }
+state "Delivered" as Delivered
 Delivered : on enter#58; notify_customer
 Delivered : outcome#58; success
 Cart --> Checkout : Checkout
 Checkout --> Shipped : Ship<br/>/ context.tracking = event.tracking
 Shipped --> Delivered : Deliver
 Delivered --> [*]
+Checkout_Payment --> Cart : Timeout
 ```
 
 A fulfilment, picking and billing in parallel regions, with `cancel_on_failure`:
@@ -69,7 +70,9 @@ state Fork {
     Fork_Billing_B2 --> [*]
   }
 }
+state "Done" as Done
 Done : outcome#58; success
+state "Failed" as Failed
 Failed : outcome#58; failed
 state Fork__join_success <<choice>>
 Fork --> Fork__join_success

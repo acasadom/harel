@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`mermaid.render(definition, active=[...])`** highlights the given states — by full path, an
+  execution's `active_path` and its regions' — with a `classDef`/`class` pair (`active_style=` sets
+  the style). **`mermaid.node_id(definition, path)`** gives the id the diagram uses for a state,
+  for classes or styles of your own.
+
+### Fixed
+
+- A Mermaid diagram drew a top-level state that has a description (`on enter: …`, `outcome: …`)
+  without its name: every described state is now declared with it.
+- A Mermaid diagram drew a state outside a composite inside it when a transition led to it from
+  the composite (`Shipped` inside `Fulfilling`): an edge out of a composite is written outside its
+  block.
+
 ## 0.9.0 — 2026-10-04
 
 ### Breaking
