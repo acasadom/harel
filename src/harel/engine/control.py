@@ -217,7 +217,11 @@ def cancel_flow(
         if exe.status in _TERMINAL:
             return
         cancel_event = Event(kind="Cancel", data=dict(reason or {}))
-        if exe.status is Status.FAILED or not engine.has_cancel_handler(defn, exe, cancel_event):
+        if (
+            exe.status is Status.FAILED
+            or engine.definition_problem(defn, exe) is not None  # its state is gone: no cleanup to run
+            or not engine.has_cancel_handler(defn, exe, cancel_event)
+        ):
             yield from _terminate_flow(execution_id, clock=clock, command="cancel")
             return
         from_status = exe.status

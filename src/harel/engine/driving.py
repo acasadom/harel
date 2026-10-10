@@ -80,7 +80,17 @@ class DriverLogic:
         the relay round-trips when there is nothing to deliver."""
         from_path, from_status = exe.active_path, exe.status
         keys = _ActionKeys(exe.id, event_id if event_id is not None else "start")
-        emits, timer_ops, spawns, actions, assigned = yield from self._drive_flow(exe, gen, keys=keys)
+        problem = engine.definition_problem(self._definition_for(exe), exe)
+        if problem is not None:
+            # the definition changed under the execution: its state isn't there to drive. The
+            # runner's policy decides — the bare driver raises, a hosted one fails the execution
+            # (the event is consumed with it: the dead letter is the record, and `redrive` the way
+            # back) — rather than the engine hitting a missing node
+            gen.close()
+            self._on_action_error(exe, engine.DefinitionChanged(problem))
+            emits, timer_ops, spawns, actions, assigned = [], [], [], [], {}
+        else:
+            emits, timer_ops, spawns, actions, assigned = yield from self._drive_flow(exe, gen, keys=keys)
         step = (
             _trace_step(event, from_path, exe, actions, self._clock(), assigned)
             if self._trace_enabled
@@ -402,7 +412,7 @@ class FailOnActionError:
     and the persisted FAILED record is the dead letter."""
 
     def _on_action_error(self, exe: Execution, exc: Exception) -> None:
-        logger.exception("unhandled action error; failing execution %s", exe.id)
+        logger.error("unhandled error; failing execution %s", exe.id, exc_info=exc)
         exe.status = Status.FAILED
         exe.error = _error_message(exc)
 

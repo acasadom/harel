@@ -122,6 +122,27 @@ selector still routes the same way). Residual window: true exactly-once needs th
 claim to be atomic (an idempotency-key-native service); the helper narrows the window, it doesn't
 abolish it.
 
+## Changing a machine with executions in flight
+
+An execution stores only its `definition_id`, the machine's name — and the state it is in. It is
+driven by whatever definition the runner has under that name when the next event arrives. So a
+deploy that changes a machine changes the machine of every execution parked in it, and harel has
+no versions of a definition yet.
+
+- **Compatible changes are safe**: a state, a transition or an action added; an action's body
+  changed. A running execution carries on under the new definition.
+- **A state an execution is parked in, renamed or removed, is not.** The runner checks before it
+  drives the execution and fails it terminally (`FAILED`) with a `DefinitionChanged` error that
+  names the missing state — `process()` raises it instead under `on_action_error="raise"`. The
+  event that found it is consumed with the dead letter. Nothing retries for ever, and nothing is
+  lost: [`redrive`](control-plane.md#redrive--repairing-a-dead-letter) the execution to a state the
+  new machine has, and send the event again. `cancel` and `terminate` work on it as ever.
+- A finished or suspended execution is not touched: the check applies to one the engine would
+  drive (`RUNNING`, or `CANCELLING` on its way to a `Cancel`).
+
+To rename or remove a state safely, drain first — let the executions in it move on — or redrive
+the stragglers afterwards.
+
 ## Retry & backoff is a composite, not a feature
 
 Because timers are durable and the model decides what a `Timeout` does, retry-with-backoff is
