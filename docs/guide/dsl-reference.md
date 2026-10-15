@@ -15,7 +15,8 @@ guard name = <predicate>    # a reusable, composable predicate atom
 
 bind { handler = pkg.mod.fn }   # map handler names to implementations
 
-machine Name { … }          # a machine
+machine Name { … }          # a machine (version 1)
+machine Name version 2 { … }   # a later version of it (the store keeps the earlier ones)
 fragment Name(params) { … } # a parametrized, reusable piece
 ```
 
@@ -23,6 +24,10 @@ A declared event is checked twice: by `harel validate`, which checks that guards
 fields the event declares, and when it comes in — `process()` and `send()` raise `EventError`
 for a required field missing or a value of the wrong type, before anything runs or queues.
 Undeclared fields are let through, as are undeclared events and the reserved ones.
+
+A machine's version is a positive integer. A changed machine is a new version, with the old one
+kept loaded while executions run on it — see
+[Changing a machine with executions in flight](durability.md#changing-a-machine-with-executions-in-flight).
 
 ## Inside a machine or state
 

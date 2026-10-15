@@ -450,6 +450,21 @@ Any error rolls it back. It returns True if the Execution was deleted. If no row
 every other call.
 
 `ids_with_prefix(prefix)` is the same escaped `LIKE` query as `SqliteStore`'s.
+## Published definitions
+
+The published machine versions (see [published versions](../durability.md#changing-a-machine-with-executions-in-flight))
+live in their own table, written outside any execution's commit:
+
+```sql
+CREATE TABLE IF NOT EXISTS harel_definitions
+  (definition_id TEXT NOT NULL, version INTEGER NOT NULL, digest TEXT NOT NULL,
+   source TEXT NOT NULL, published_at REAL, PRIMARY KEY (definition_id, version))
+```
+
+`publish_definition` is `INSERT OR IGNORE` — the primary key keeps the version stored first —
+and then reads back what is stored; `load_definition` is a primary-key lookup. `source` is the
+record's JSON (the machine's file and the files it imports).
+
 ## Async twin — `AsyncLibsqlStore`
 
 `harel/engine/aio_store/libsql.py` is the async-facing store the async worker talks to — but it is

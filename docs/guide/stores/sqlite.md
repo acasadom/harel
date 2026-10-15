@@ -454,6 +454,21 @@ The async twin runs the same transaction under its connection lock.
 
 `ids_with_prefix(prefix)` — `SELECT id FROM harel_executions WHERE id LIKE ? ESCAPE '\'`, with
 `%`, `_` and `\` in the prefix escaped — is how the control plane finds a tree's descendants.
+## Published definitions
+
+The published machine versions (see [published versions](../durability.md#changing-a-machine-with-executions-in-flight))
+live in their own table, written outside any execution's commit:
+
+```sql
+CREATE TABLE IF NOT EXISTS harel_definitions
+  (definition_id TEXT NOT NULL, version INTEGER NOT NULL, digest TEXT NOT NULL,
+   source TEXT NOT NULL, published_at REAL, PRIMARY KEY (definition_id, version))
+```
+
+`publish_definition` is `INSERT OR IGNORE` — the primary key keeps the version stored first —
+and then reads back what is stored; `load_definition` is a primary-key lookup. `source` is the
+record's JSON (the machine's file and the files it imports).
+
 ## Async twin (`aio_store/sqlite.py`)
 
 `AsyncSqliteStore` is a faithful mirror of `SqliteStore` over **`aiosqlite`** — same schema,

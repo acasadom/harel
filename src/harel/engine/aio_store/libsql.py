@@ -7,7 +7,7 @@ from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, Status
 from harel.engine.schema import DEFAULT_PREFIX
-from harel.engine.store import OutboxEntry, SpawnEntry, TimerOp
+from harel.engine.store import DefinitionRecord, OutboxEntry, SpawnEntry, TimerOp
 from harel.engine.store._base import Step
 from harel.spec.states import Event
 
@@ -156,6 +156,14 @@ class AsyncLibsqlStore:
     async def purge(self, execution_id: str, expected_version: int) -> bool:
         async with self._lock:
             return await asyncio.to_thread(self._s.purge, execution_id, expected_version)
+
+    async def publish_definition(self, record: DefinitionRecord) -> DefinitionRecord:
+        async with self._lock:
+            return await asyncio.to_thread(self._s.publish_definition, record)
+
+    async def load_definition(self, definition_id: str, version: int) -> Optional[DefinitionRecord]:
+        async with self._lock:
+            return await asyncio.to_thread(self._s.load_definition, definition_id, version)
 
     async def close(self) -> None:
         async with self._lock:

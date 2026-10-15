@@ -17,7 +17,10 @@ service scaled to N replicas (each replica is one `Worker` loop):
     HAREL_SQS_QUEUE        SQS FIFO queue name (default harel.fifo)
     HAREL_DYNAMODB_ENDPOINT DynamoDB endpoint URL (e.g. LocalStack); unset = real AWS (dynamodb store)
     HAREL_AWS_REGION       AWS region for the dynamodb store (default us-east-1)
-    HAREL_DEFINITIONS_DIR  directory of *.stm machine files = the Definition registry
+    HAREL_DEFINITIONS_DIR  directory of *.stm machine files = the Definition registry, published to
+                         the store at startup (a version published with other content stops it)
+    HAREL_ACTION_MODULES   comma-separated modules a machine version read from the store may call,
+                         besides those the worker's own machines call
     HAREL_WORKER_ID        worker id (defaults to the hostname)
     HAREL_VISIBILITY       lease seconds while a message is in flight (default 30)
     HAREL_CONCURRENCY      max events in flight on the loop at once (default 256)
@@ -54,6 +57,7 @@ from harel.definition.validate import ValidationError
 from harel.dsl import definition_from_dsl_file, parse
 from harel.dsl.parser import DslError
 from harel.engine.aio.distributed import AsyncWorker
+from harel.engine.resolve import definition_registry
 from harel.engine.store import (
     DynamoDBStore,
     ExecutionStore,
@@ -74,22 +78,29 @@ from harel.engine.transport import (
     SqsTransport,
     Transport,
 )
+from harel.published import apublish_definitions, read_definitions
 
 
 def load_definitions(definitions_dir: str) -> dict[str, Definition]:
     """Build a registry from every machine in every ``*.stm`` under the dir,
     **validating each** so the worker fails fast (with the offending file/machine
     named) instead of loading a structurally broken machine that only misbehaves at
-    run time. A Definition's id is its machine name, so it matches what creators store."""
-    registry: dict[str, Definition] = {}
+    run time. A Definition's id is its machine name, so it matches what creators store.
+
+    Several versions of a machine are loaded side by side (each in its own file, e.g.
+    ``order.v1.stm`` and ``order.v2.stm``): new executions get the highest, existing ones
+    keep theirs. The same name and version in two files with different content is refused."""
+    defns: list[Definition] = []
     for path in sorted(Path(definitions_dir).glob("*.stm")):
         for name in parse(path.read_text()).machines:
             try:
-                defn = definition_from_dsl_file(path, name, validate=True)
+                defns.append(definition_from_dsl_file(path, name, validate=True))
             except (DslError, ValidationError) as e:
                 raise RuntimeError(f"invalid machine {name!r} in {path}: {e}") from e
-            registry[defn.id] = defn
-    return registry
+    try:
+        return definition_registry(defns)
+    except ValueError as e:
+        raise RuntimeError(f"{e} (in {definitions_dir})") from e
 
 
 def build_store(cfg: Optional[Config] = None) -> ExecutionStore:
@@ -247,7 +258,11 @@ async def amain() -> None:
     transport = await build_transport_async(cfg)
     if cfg.trace and hasattr(store, "trace_max"):
         store.trace_max = cfg.trace_max  # ring size for the opt-in execution timeline
-    definitions = load_definitions(require(cfg.definitions_dir, "HAREL_DEFINITIONS_DIR"))  # one-time
+    definitions_dir = require(cfg.definitions_dir, "HAREL_DEFINITIONS_DIR")
+    definitions = load_definitions(definitions_dir)  # one-time
+    # publish them: a machine changed without a new version stops the deploy here, before any
+    # execution meets it; the other workers read from the store the versions they don't have
+    await apublish_definitions(store, read_definitions(definitions_dir))
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

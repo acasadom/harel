@@ -6,6 +6,7 @@ decoupled from the internal module layout:
 ```text
 from harel import (
     definition_from_dsl, definition_from_dsl_file, DslError,   # compile the DSL
+    machine_version, definition_registry,                       # machine versions (+ harel.published)
     validate, validate_or_raise, Issue, ValidationError,       # static checks
     render,                                                     # PlantUML (mermaid: harel.viz.mermaid.render)
     Event, Execution,                                           # runtime data
@@ -13,6 +14,7 @@ from harel import (
     ExecutionStore, DictStore, SqliteStore,                     # stores (durable extras: RedisStore, …)
     ObservedStore, AsyncObservedStore, Step,                    # observing every commit
     ContextError, EventError, ExpressionError, StoreConflict, PurgeRefused,   # errors to catch
+    DefinitionChanged, DefinitionNotLoaded,
     MachineResolver, DictResolver, FileResolver, ModuleResolver, SourceResolver, ResolveError,
 )
 ```
@@ -33,6 +35,24 @@ definition_from_dsl_file(path, name=None, *, ...) -> Definition
 - `validate=True` raises `ValidationError` on any error-severity issue at build time.
 - `base_path` is the directory `import`s resolve against (defaults to the file's directory for
   `_from_dsl_file`).
+- The Definition carries the machine's `version` (1 when it declares none) and the `digest` of its
+  source.
+
+```text
+machine_version(text, name, *, base_path=None) -> (version, digest)   # what `harel hash` prints
+definition_registry([defn, ...]) -> dict[str, Definition]           # every version, for a runner
+```
+
+`definition_registry` keys each Definition by `id@version`, and by `id` for the highest version:
+a new execution gets that one, an existing one the version it was created with. The same version
+twice with different content raises `ValueError`. See
+[Changing a machine with executions in flight](durability.md#changing-a-machine-with-executions-in-flight).
+
+```text
+from harel.published import read_definitions, publish_definitions, apublish_definitions
+publish_definitions(store, read_definitions("definitions/"))   # what a worker does when it starts
+# raises DefinitionConflict for a version published with other content
+```
 
 ## Validating
 
@@ -47,8 +67,9 @@ See [static validation](../tutorial/14-validation).
 
 ```text
 DurableRunner(store, definitions, clock=time.time, resolver=None, trace=False,
-              *, execution="background", on_action_error="fail")
-    .create(definition_id, context=None, execution_id=None, priority=0) -> Execution
+              *, execution="background", on_action_error="fail",
+              action_modules=(), actions=None, guards=None)
+    .create(definition_id, context=None, execution_id=None, priority=0, *, version=None) -> Execution
     .process(execution_id, event) -> Execution
     .fire_due_timers() -> int
     .cancel(execution_id, *, reason=None) -> Execution
@@ -64,8 +85,12 @@ purge_finished(store, *, older_than, statuses=(DONE, CANCELLED), archive=None,
 # async stores: harel.engine.aio.control.purge_finished, same arguments, awaited
 ```
 
-- `definitions` is a `{definition_id: Definition}` registry; inline `invoke` targets register
-  automatically.
+- `definitions` is a `{definition_id: Definition}` registry, or `definition_registry(...)`'s with
+  several versions of a machine; inline `invoke` targets register automatically. `create`'s
+  `version` picks a loaded version other than the highest. A version an execution needs and
+  `definitions` lacks is read from the store's published versions, binding its handlers and
+  guards with `actions` and `guards` (as `definition_from_dsl` does); `action_modules` are the
+  modules such a version may call besides those `definitions` and `actions` call.
 - `clock` is injectable so [durable timers](../tutorial/07-timers) fire deterministically.
 - `resolver` resolves submachine `invoke` FQNs not already in `definitions`.
 - `trace=True` records the opt-in execution timeline in each commit (env `HAREL_TRACE`); off by
@@ -82,8 +107,9 @@ from harel.engine.distributed import DistributedRunner
 from harel.engine.transport import InMemoryTransport   # + Sqlite/Libsql/Redis/Postgres/Rqlite/Mongo/Sqs
 
 DistributedRunner(store, transport, definitions, clock=time.time, resolver=None, trace=False,
-                  *, execution="background")
-    .create(definition_id, context=None, execution_id=None, priority=0, start_on_create=True) -> Execution
+                  *, execution="background", action_modules=(), actions=None, guards=None)
+    .create(definition_id, context=None, execution_id=None, priority=0, start_on_create=True,
+            *, version=None) -> Execution
     .start(execution_id, data=None) -> None  # publishes Start; a worker runs it, not the caller.
                                    # create()'s start_on_create=True already does this;
                                    # data seeds the context — the only way to attach one to Start

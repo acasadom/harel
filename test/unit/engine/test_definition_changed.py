@@ -1,7 +1,7 @@
-"""A machine changed under a running execution — a state it is parked in was renamed or
-removed. The engine would hit a node that isn't there; the runner checks first and, by its
-policy, fails the execution with `DefinitionChanged` (a hosted runner) or raises it (the bare
-driver, `on_action_error="raise"`). Before, the engine raised a `KeyError`, which a worker
+"""A machine changed under a running execution without a new version — a state it is parked
+in was renamed or removed, or anything else in its source changed. The runner checks first
+and, by its policy, fails the execution with `DefinitionChanged` (a hosted runner) or raises
+it (the bare driver, `on_action_error="raise"`). Before, the engine raised a `KeyError`, which a worker
 logged and retried for ever. The event is consumed with the dead letter; `redrive` brings the
 execution back to a state the new definition has."""
 
@@ -121,10 +121,19 @@ def test_a_worker_fails_it_once_instead_of_retrying_for_ever():
     assert stored.status is Status.FAILED and stored.error.startswith("DefinitionChanged: ")
 
 
-def test_a_compatible_change_leaves_a_running_execution_alone():
+def test_any_change_without_a_new_version_fails_it():
     store = DictStore()
     exe_id = _parked_in_review(store)
     v2 = V1.replace("state Draft {}", "state Draft {}\n  state Spare {}")  # a state added, none removed
+    exe = DurableRunner(store, _defs(v2)).process(exe_id, Event(kind="Ok"))
+    assert exe.status is Status.FAILED
+    assert exe.error.startswith("DefinitionChanged: ") and "needs a new version" in exe.error
+
+
+def test_a_change_in_layout_or_comments_is_no_change():
+    store = DictStore()
+    exe_id = _parked_in_review(store)
+    v2 = "# reformatted\n" + V1.replace("  ", "    ").replace("Review {}", "Review {  }  // waits")
     exe = DurableRunner(store, _defs(v2)).process(exe_id, Event(kind="Ok"))
     assert (exe.status, exe.outcome) == (Status.DONE, "success")
 

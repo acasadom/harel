@@ -233,6 +233,12 @@ The result: `_trace[id]` is a bounded window of the most recent steps, but the s
 `index` values reflect the true monotonic position in the full timeline (older indices are
 simply no longer present once trimmed). Default window: 200 steps.
 
+## Published definitions
+
+`publish_definition` / `load_definition` keep the published machine versions in
+`self._definitions`, a dict keyed by `(definition_id, version)`: `setdefault` stores a version
+once and returns the one stored. Like everything here, they live as long as the process.
+
 ## Async twin
 
 `harel/engine/aio_store/dict.py` defines `AsyncDictStore`, a faithful mirror of `DictStore`:

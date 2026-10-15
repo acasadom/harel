@@ -189,4 +189,4 @@ orthogonal Checks {
 Nothing else is copied, so a region's guards see exactly what it was given, and a key it reports
 back with `carry` is one it produced (or was given). See [orthogonal regions](08-orthogonal).
 
-Next: [validation](14-validation) covers every rule above in one place.
+Next: [validation](14-validation) covers every rule above in one place, and [versions](18-versions) how a machine changes while executions run on it.

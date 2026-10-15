@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from harel.definition.model import Definition
 from harel.engine.execution import Execution
@@ -34,7 +34,6 @@ from harel.engine.flow import Flow, run_inline
 from harel.engine.hosting import (  # noqa: F401 (re-exported)
     SenderLogic,
     WorkerLogic,
-    _defn_for,
     _register_submachines,
     _resolve_machine,
     check_execution,
@@ -65,6 +64,9 @@ class Worker:
         trace: bool = False,
         *,
         execution: str = "background",
+        action_modules: Iterable[str] = (),
+        actions: Optional[dict] = None,
+        guards: Optional[dict] = None,
     ) -> None:
         check_execution(execution, ("store", store), ("transport", transport))
         self.store = store
@@ -83,6 +85,9 @@ class Worker:
                 trace=trace,
                 high_ratio=high_ratio,
                 priority_threshold=priority_threshold,
+                action_modules=action_modules,
+                actions=actions,
+                guards=guards,
             )
             self._ports = {"store": store, "transport": transport}
             return
@@ -100,6 +105,9 @@ class Worker:
             high_ratio,
             priority_threshold,
             trace,
+            tuple(action_modules),
+            actions,
+            guards,
         )
 
     @staticmethod
@@ -116,6 +124,9 @@ class Worker:
         high_ratio=0.0,
         priority_threshold=1,
         trace=False,
+        action_modules=(),
+        actions=None,
+        guards=None,
     ):
         from harel.engine.aio import facade
 
@@ -135,6 +146,9 @@ class Worker:
                 trace=trace,
                 high_ratio=high_ratio,
                 priority_threshold=priority_threshold,
+                action_modules=action_modules,
+                actions=actions,
+                guards=guards,
             )
 
         return facade.run(build)
@@ -183,6 +197,9 @@ class DistributedRunner:
         trace: bool = False,
         *,
         execution: str = "background",
+        action_modules: Iterable[str] = (),
+        actions: Optional[dict] = None,
+        guards: Optional[dict] = None,
     ) -> None:
         """`execution` is `"background"` (the shared background event loop, the default)
         or `"inline"` (the caller's own thread, no event loop: create/start/send and the
@@ -197,6 +214,8 @@ class DistributedRunner:
         self._clock = clock
         self._trace = trace
         self.execution = execution
+        self.action_modules = tuple(action_modules)
+        self.actions, self.guards = actions, guards
         if execution == "inline":
             self._inline: Optional[SenderLogic] = SenderLogic(
                 definitions,
@@ -204,14 +223,29 @@ class DistributedRunner:
                 resolver,
                 trace,
                 shares_store_transaction=getattr(transport, "shares_store_transaction", False),
+                action_modules=self.action_modules,
+                actions=self.actions,
+                guards=self.guards,
             )
             self._ports = {"store": store, "transport": transport}
             return
         self._inline = None
-        self._async = self._portal_build(store, transport, definitions, clock, resolver, trace)
+        self._async = self._portal_build(
+            store, transport, definitions, clock, resolver, trace, self.action_modules, actions, guards
+        )
 
     @staticmethod
-    def _portal_build(store, transport, definitions, clock, resolver, trace=False):
+    def _portal_build(
+        store,
+        transport,
+        definitions,
+        clock,
+        resolver,
+        trace=False,
+        action_modules=(),
+        actions=None,
+        guards=None,
+    ):
         from harel.engine.aio import facade
 
         async def build():
@@ -224,6 +258,9 @@ class DistributedRunner:
                 clock,
                 resolver,
                 trace=trace,
+                action_modules=action_modules,
+                actions=actions,
+                guards=guards,
             )
 
         return facade.run(build)
@@ -245,12 +282,17 @@ class DistributedRunner:
         execution_id: Optional[str] = None,
         priority: int = 0,
         start_on_create: bool = True,
+        *,
+        version: Optional[int] = None,
     ) -> Execution:
         """Create an Execution — never runs its actions on this caller (see
         `AsyncDistributedRunner.create`). By default (`start_on_create=True`) this
         also publishes `Start`, so a worker picks it up right away; pass `False`
-        to defer that and call `start(execution_id)` yourself later."""
-        return self._do("create", definition_id, context, execution_id, priority, start_on_create)
+        to defer that and call `start(execution_id)` yourself later. `version` runs that
+        version of the machine (it must be loaded) instead of the highest."""
+        return self._do(
+            "create", definition_id, context, execution_id, priority, start_on_create, version=version
+        )
 
     def start(self, execution_id: str, data: Optional[dict] = None) -> None:
         """Publish a `Start` for `execution_id` — a worker runs it, not this caller.
@@ -290,6 +332,9 @@ class DistributedRunner:
             priority_threshold=priority_threshold,
             trace=self._trace,
             execution=self.execution,
+            action_modules=self.action_modules,
+            actions=self.actions,
+            guards=self.guards,
         )
 
     # --- control plane (lifecycle commands; bypass the event queue) ---------

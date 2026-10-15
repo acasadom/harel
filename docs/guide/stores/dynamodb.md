@@ -465,6 +465,14 @@ recreated.
 `ids_with_prefix(prefix)` has no key range to query on a hash key, so it is a `Scan` of
 `executions` with `begins_with(id, :prefix)` — a full-table read per purged tree. Fine for a
 periodic retention job; worth knowing on a very large table.
+## Published definitions
+
+The published machine versions live in their own table, `harel_definitions` —
+`definition_id` (S, HASH), `version` (N, RANGE), and the record's JSON in `record`.
+`publish_definition` is a `PutItem` conditioned on `attribute_not_exists(definition_id)`, so a
+version is stored once (a `ConditionalCheckFailedException` means "stored before"), then a
+strongly consistent `GetItem` reads back what is stored; `load_definition` is that `GetItem`.
+
 ## Async twin
 
 [`aio_store/dynamodb.py`](https://github.com/acasadom/harel/blob/main/src/harel/engine/aio_store/dynamodb.py) is `AsyncDynamoDBStore` —

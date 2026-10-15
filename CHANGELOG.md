@@ -2,8 +2,50 @@
 
 ## Unreleased
 
+### Breaking
+
+- **A store backend outside harel implements two more methods**, `publish_definition` and
+  `load_definition` (see *Added*); `harel.testing.assert_definitions_contract` checks them.
+- **The schema has a `definitions` table, collection, key or DynamoDB table** (`SCHEMA_VERSION`
+  4), which a worker writes when it starts. A backend built with `create_schema=True` creates it;
+  where a migration tool owns the schema (`create_schema=False`), apply `sql_schema(dialect,
+  prefix)` again before the new workers start, or they fail at startup.
+- **Any change to a machine needs a new version**, a compatible one included (a state or a
+  transition added): an execution whose machine's source changed under the same version fails
+  with `DefinitionChanged`, and a worker whose file differs from the version published refuses to
+  start. Before, only a change to a state an execution was parked in failed it.
+- **A file declaring a machine twice is an error** (`DslError`); before, the last one won.
+
 ### Added
 
+- **Machine versions.** `machine order version 2 { … }` declares a machine's version (1 when it
+  declares none), and several versions run side by side: a new execution gets the highest loaded —
+  or the one `create(..., version=1)` asks for — and an existing one keeps the version it was
+  created with to the end, along with its regions, fan-out instances and inline `invoke`s. Each
+  execution records its version's source digest — the machine, what its file shares with it and
+  the files it imports, without comments or layout — so a machine edited without a new version
+  can't drive the executions that started on another source: they fail with `DefinitionChanged`.
+  An execution from before versions runs as version 1.
+- **The store keeps every published machine version.** A worker publishes the machines of its
+  definitions directory when it starts — each with the files it imports — and refuses to start
+  when a version is published already with other content, so a machine changed without a new
+  version stops the deploy, not the executions. **`harel publish DIR`** does the same from a
+  deploy pipeline. A runner reads from the store a version it hasn't loaded — the old file needn't
+  be kept anywhere — or the published one when its own copy differs from the one an execution
+  started on. Such a version binds the handlers and guards the code binds with the runner's
+  `actions=` / `guards=`, and may call only the action modules the runner's own machines call,
+  plus `action_modules=` / `HAREL_ACTION_MODULES`, and whose actions it can import. A version
+  no runner nor the store has, or one this runner can't use, raises `DefinitionNotLoaded`: a
+  worker logs it and retries the message, for a worker that can run it — during a rolling deploy,
+  an older worker leaves a newer version's executions to the newer workers.
+  New store methods `publish_definition` / `load_definition` (`DefinitionRecord`), checked by
+  `harel.testing.assert_definitions_contract`; `harel.published` publishes and reads them.
+  `SCHEMA_VERSION` is 4 (a `definitions` table, collection, key or DynamoDB table): a backend
+  built with `create_schema=True` creates it when it starts; where a migration tool owns the
+  schema, apply `sql_schema(dialect, prefix)` again.
+- `definition_registry([...])` builds a registry with several versions of a machine,
+  `machine_version()` and **`harel hash FILE`** give a machine's version and digest, and the
+  monitor shows each execution its own version, from the store when it has no file for it.
 - **`mermaid.render(definition, active=[...])`** highlights the given states — by full path, an
   execution's `active_path` and its regions' — with a `classDef`/`class` pair (`active_style=` sets
   the style). **`mermaid.node_id(definition, path)`** gives the id the diagram uses for a state,
@@ -17,7 +59,7 @@
   `DefinitionChanged` error naming the missing state (`process()` raises it under
   `on_action_error="raise"`); `redrive` brings it back to a state the new machine has, and
   `cancel` terminates it. A finished or suspended execution is left alone. See *Changing a machine
-  with executions in flight* in the durability guide. harel has no versions of a definition yet.
+  with executions in flight* in the durability guide.
 - A Mermaid diagram drew a top-level state that has a description (`on enter: …`, `outcome: …`)
   without its name: every described state is now declared with it.
 - A Mermaid diagram drew a state outside a composite inside it when a transition led to it from

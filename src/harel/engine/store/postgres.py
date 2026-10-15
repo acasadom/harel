@@ -8,16 +8,20 @@ from typing import Any, Iterable, Optional
 from harel.engine.execution import Execution, ExecutionPage, Status
 from harel.engine.schema import DEFAULT_PREFIX, Names, store_schema
 from harel.engine.store._base import (
+    _DEFINITION_COLUMNS,
     _IDS_WITH_PREFIX_SQL,
     _PG_SCHEMA_LOCK,
     _PURGE_COMPANIONS_SQL,
     DEFAULT_TRACE_MAX,
+    DefinitionRecord,
     OutboxEntry,
     SpawnEntry,
     Step,
     StoreConflict,
     TimerOp,
     _decode_offset,
+    _definition_params,
+    _definition_row,
     _like_prefix,
     _listing_page,
     _listing_sql_pg,
@@ -315,6 +319,29 @@ class PostgresStore:
         except BaseException:
             self._conn.rollback()
             raise
+
+    def publish_definition(self, record: DefinitionRecord) -> DefinitionRecord:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO {self._n.definitions} ({_DEFINITION_COLUMNS}) VALUES (%s, %s, %s, %s, %s) "
+                "ON CONFLICT DO NOTHING",
+                _definition_params(record),
+            )
+        self._conn.commit()
+        stored = self.load_definition(record.definition_id, record.version)
+        assert stored is not None  # just stored, or stored before
+        return stored
+
+    def load_definition(self, definition_id: str, version: int) -> Optional[DefinitionRecord]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"SELECT {_DEFINITION_COLUMNS} FROM {self._n.definitions} "
+                "WHERE definition_id = %s AND version = %s",
+                (definition_id, version),
+            )
+            row = cur.fetchone()
+        self._conn.commit()
+        return _definition_row(row) if row is not None else None
 
     def close(self) -> None:
         self._conn.close()

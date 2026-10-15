@@ -203,6 +203,12 @@ Two things to note:
 A machine's [`ttl`](../tutorial/07-timers) never ends a dead letter; `redrive` restarts its
 inactivity budget from the moment of the redrive.
 
+An execution failed with `DefinitionChanged` — its machine's source changed without a new version,
+or a state it was in is gone (see [changing a machine](durability.md#changing-a-machine-with-executions-in-flight))
+— is redriven like any other: the target must be a state of the Definition the runner now has
+for the execution's version, and from the redrive on the execution runs on that source (its
+`definition_digest` is updated), so the change no longer fails it.
+
 A dead letter you will *not* redrive is closed with `terminate()`: `FAILED → CANCELLED`, with
 `error` kept as the record of why it died (and any live regions terminated along with it).
 `cancel()` on a `FAILED` execution does the same — it never takes the cooperative path, even if

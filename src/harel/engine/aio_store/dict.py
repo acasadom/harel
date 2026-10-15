@@ -6,7 +6,7 @@ import copy
 from typing import Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
-from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
+from harel.engine.store import DefinitionRecord, OutboxEntry, SpawnEntry, StoreConflict, TimerOp
 from harel.engine.store._base import DEFAULT_TRACE_MAX, Step, _decode_offset, _encode_offset, _matches
 from harel.spec.states import Event
 
@@ -30,6 +30,7 @@ class AsyncDictStore:
         self._seq = 0
         self._spawn_seq = 0
         self._purged: set[str] = set()  # see DictStore._purged
+        self._definitions: dict[tuple[str, int], DefinitionRecord] = {}
 
     def _record_trace(self, execution_id: str, entry: dict) -> None:
         idx = self._trace_idx.get(execution_id, 0)
@@ -149,6 +150,12 @@ class AsyncDictStore:
         self._trace.pop(execution_id, None)
         self._trace_idx.pop(execution_id, None)
         return exe is not None
+
+    async def publish_definition(self, record: DefinitionRecord) -> DefinitionRecord:
+        return self._definitions.setdefault((record.definition_id, record.version), record)
+
+    async def load_definition(self, definition_id: str, version: int) -> Optional[DefinitionRecord]:
+        return self._definitions.get((definition_id, version))
 
     async def close(self) -> None:
         pass

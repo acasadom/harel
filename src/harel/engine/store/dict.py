@@ -8,6 +8,7 @@ from typing import Iterable, Optional
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.store._base import (
     DEFAULT_TRACE_MAX,
+    DefinitionRecord,
     OutboxEntry,
     SpawnEntry,
     Step,
@@ -39,6 +40,7 @@ class DictStore:
         # ids purged while a caller may still hold the (shared, mutable) object: a later save
         # of that stale object must conflict instead of silently re-inserting it
         self._purged: set[str] = set()
+        self._definitions: dict[tuple[str, int], DefinitionRecord] = {}
 
     # --- execution trace -------------------------------------------------------------
     # The opt-in execution timeline: the Driver passes one step per event to `commit`,
@@ -163,6 +165,12 @@ class DictStore:
         self._trace.pop(execution_id, None)
         self._trace_idx.pop(execution_id, None)
         return exe is not None
+
+    def publish_definition(self, record: DefinitionRecord) -> DefinitionRecord:
+        return self._definitions.setdefault((record.definition_id, record.version), record)
+
+    def load_definition(self, definition_id: str, version: int) -> Optional[DefinitionRecord]:
+        return self._definitions.get((definition_id, version))
 
     def close(self) -> None:
         pass  # nothing to release; the dict lives with the process

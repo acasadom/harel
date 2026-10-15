@@ -25,6 +25,7 @@ from harel.engine.transport import SqliteTransport
 from harel.testing import (
     assert_async_listing_contract,
     assert_async_transport_contract,
+    assert_definitions_contract,
     assert_listing_contract,
     assert_outbox_contract,
     assert_purge_contract,
@@ -95,6 +96,7 @@ def test_sqlite_contracts_under_a_prefix(tmp_path):
         assert_listing_contract(store, ordered=True)
         assert_purge_contract(store)
         assert_outbox_contract(store)
+        assert_definitions_contract(store)
     finally:
         store.close()
     n = iter(range(100))  # a fresh file per check: the contract wants an empty transport each time
@@ -126,6 +128,7 @@ def test_libsql_contracts_under_a_prefix(tmp_path):
     assert_listing_contract(store, ordered=True)
     assert_purge_contract(store)
     assert_outbox_contract(store)
+    assert_definitions_contract(store)
     n = iter(range(100))
     assert_transport_contract(
         lambda clock: LibsqlTransport(str(tmp_path / f"t{next(n)}.db"), clock=clock, prefix=PREFIX)
@@ -141,6 +144,7 @@ def test_redis_contracts_under_a_prefix():
     assert_listing_contract(store, ordered=False)
     assert_purge_contract(store)
     assert_outbox_contract(store)
+    assert_definitions_contract(store)
     assert_transport_contract(
         lambda clock: RedisTransport(fakeredis.FakeStrictRedis(), clock=clock, prefix=PREFIX), timing=False
     )
@@ -155,6 +159,7 @@ def test_mongo_contracts_under_a_prefix():
     assert_listing_contract(store, ordered=True)
     assert_purge_contract(store)
     assert_outbox_contract(store)
+    assert_definitions_contract(store)
     assert_transport_contract(
         lambda clock: MongoTransport(mongomock.MongoClient(), clock=clock, prefix=PREFIX)
     )
@@ -247,6 +252,7 @@ def test_without_create_schema_it_runs_on_the_schema_a_migration_applied(tmp_pat
     _migrated(tmp_path / "migrated.db")
     store = SqliteStore(tmp_path / "migrated.db", prefix=PREFIX, create_schema=False)
     assert_outbox_contract(store)
+    assert_definitions_contract(store)
     store.close()
     n = iter(range(100))
 

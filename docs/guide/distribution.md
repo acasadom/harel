@@ -123,6 +123,36 @@ step's **actions ran on the first attempt and run again** on the next — at-lea
 failure involved. Each attempt hands an action the same `stm.idempotency_key`, so a side effect
 deduped on it happens once (see [durability](durability.md#at-least-once-actions--idempotency)).
 
+### Deploying a new version of a machine
+
+The workers share one definition of record: the store. When `python -m harel.worker` starts it
+loads every `*.stm` at the top of `HAREL_DEFINITIONS_DIR` and **publishes** them — each machine
+version, with the files it imports. A version published already with the same source is left as
+it is; one published with other content (a machine changed without a new version) stops the
+worker before it claims anything, so the deploy fails, not the executions.
+
+From then on a worker runs any execution, whatever version it is on:
+
+- a version it has loaded runs from its own files;
+- a version it hasn't — an older one whose file is gone, or a newer one a newer worker published
+  — is read from the store and kept (a published version never changes);
+- a version it can't use is left for another worker: the message goes back to the queue
+  (`DefinitionNotLoaded` in the log) and comes back after `suspend_recheck`. That is a version
+  nobody published, one calling an action module the worker doesn't allow, or one calling an
+  action the worker's code can't import — an older worker meeting a version a newer deploy
+  published, during a rolling deploy.
+
+A rolling deploy of `order` version 2 therefore needs nothing special: the new workers publish
+version 2 and start creating its executions' children and timers; the old ones keep running
+version 1's executions, and leave version 2's that call code they don't have to the new ones. Run
+`harel publish DIR` in the pipeline to stop a bad deploy before any worker rolls out.
+
+A version read from the store may call only the action modules the worker's own machines call,
+plus those in `HAREL_ACTION_MODULES` (comma-separated; a module allows the modules under it). A
+runner of your own takes the same as `action_modules=`, and `actions=` / `guards=` for what your
+code binds instead of a `bind` in the DSL. See
+[changing a machine](durability.md#changing-a-machine-with-executions-in-flight).
+
 ## Scaling & throughput
 
 Two independent dials:

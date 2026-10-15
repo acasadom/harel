@@ -14,13 +14,60 @@ source-building resolvers (file / module / arbitrary source loader) live in
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Iterable, Optional, Protocol, runtime_checkable
 
 from harel.definition.model import Definition
 
 
 class ResolveError(Exception):
     """Raised when a submachine FQN cannot be resolved to a `Definition`."""
+
+
+class DefinitionNotLoaded(KeyError):
+    """An execution runs a machine version this runner hasn't loaded. Not the execution's
+    fault — during a rolling deploy another worker may have it — so a worker retries the
+    message rather than failing the execution."""
+
+    def __str__(self) -> str:
+        return str(self.args[0]) if self.args else ""
+
+
+# A registry maps a machine's name to its highest version, and `name@version` to each version.
+
+
+def register_definition(definitions: dict[str, Definition], defn: Definition) -> None:
+    """Add `defn` to a registry under `id@version`, and under `id` when it is the highest
+    version there."""
+    definitions[f"{defn.id}@{defn.version}"] = defn
+    current = definitions.get(defn.id)
+    if current is None or current.version < defn.version:
+        definitions[defn.id] = defn
+
+
+def definition_registry(definitions: Iterable[Definition]) -> dict[str, Definition]:
+    """The registry a runner takes, from every version of every machine to run: a new
+    execution gets a machine's highest version, an existing one keeps its own. The same
+    version of a machine twice with different content (digest) is refused."""
+    out: dict[str, Definition] = {}
+    for defn in definitions:
+        prev = out.get(f"{defn.id}@{defn.version}")
+        if prev is not None and prev is not defn and prev.digest != defn.digest:
+            raise ValueError(
+                f"machine {defn.id!r} version {defn.version} is loaded twice with different "
+                f"content: give the changed one a new version"
+            )
+        register_definition(out, defn)
+    return out
+
+
+def find_definition(definitions: dict[str, Definition], name: str, version: int) -> Optional[Definition]:
+    """Version `version` of machine `name` in a registry, or None."""
+    defn = definitions.get(f"{name}@{version}")
+    if defn is None:
+        defn = definitions.get(name)
+        if defn is not None and defn.version != version:
+            return None
+    return defn
 
 
 @runtime_checkable

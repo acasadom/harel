@@ -7,6 +7,8 @@ an in-memory `run`, and the existing formatter / language server. Built on the s
     harel validate FILE [NAME]
     harel render   FILE [NAME] [--mermaid]
     harel list     FILE
+    harel hash     FILE [NAME]
+    harel publish  DIR
     harel run      FILE [NAME] [-e KIND[:JSON] ...] [--seed JSON] [--validate]
     harel fmt      FILES... [--check|--diff]
     harel lsp
@@ -117,6 +119,41 @@ def _cmd_list(args: argparse.Namespace) -> int:
     print("machines:  " + (", ".join(prog.machines) or "—"))
     print("fragments: " + (", ".join(prog.fragments) or "—"))
     print("events:    " + (", ".join(prog.events) or "—"))
+    return 0
+
+
+def _cmd_hash(args: argparse.Namespace) -> int:
+    from harel.dsl import machine_version
+    from harel.dsl.parser import parse
+
+    path = Path(args.file)
+    text = path.read_text()
+    names = [args.name] if args.name else list(parse(text).machines)
+    for name in names:
+        version, digest = machine_version(text, name, base_path=path.parent)
+        print(f"{name}  version {version}  digest {digest}")
+    return 0
+
+
+def _cmd_publish(args: argparse.Namespace) -> int:
+    from harel.published import DefinitionConflict, publish_definitions, read_definitions
+    from harel.worker import build_store
+
+    records = read_definitions(args.dir)
+    try:
+        store = build_store()
+    except ValueError as exc:  # a backend setting missing from the HAREL_STORE_* environment
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    try:
+        publish_definitions(store, records)
+    except DefinitionConflict as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        store.close()
+    for r in records:
+        print(f"{r.definition_id}  version {r.version}  digest {r.digest}")
     return 0
 
 
@@ -263,6 +300,21 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("list", help="list the machines, fragments and events a file declares")
     p.add_argument("file")
     p.set_defaults(func=_cmd_list)
+
+    p = sub.add_parser(
+        "hash",
+        help="print each machine's version and source digest (a changed digest needs a new version)",
+    )
+    p.add_argument("file")
+    p.add_argument("name", nargs="?", help="machine to select (default: every machine in the file)")
+    p.set_defaults(func=_cmd_hash)
+
+    p = sub.add_parser(
+        "publish",
+        help="publish the machines of a directory's *.stm to the store (HAREL_STORE_* settings)",
+    )
+    p.add_argument("dir")
+    p.set_defaults(func=_cmd_publish)
 
     p = sub.add_parser("run", help="drive a machine with events over an in-memory store")
     p.add_argument("file")

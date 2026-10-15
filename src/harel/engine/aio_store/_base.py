@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Iterable, Optional, Protocol, runtime_checkable
 
 from harel.engine.execution import Execution, ExecutionPage, Status
-from harel.engine.store import OutboxEntry, SpawnEntry, Step, TimerOp
+from harel.engine.store import DefinitionRecord, OutboxEntry, SpawnEntry, Step, TimerOp
 from harel.spec.states import Event
 
 
@@ -60,5 +60,9 @@ class AsyncExecutionStore(Protocol):
     async def ids_with_prefix(self, prefix: str) -> list[str]: ...
 
     async def purge(self, execution_id: str, expected_version: int) -> bool: ...
+
+    async def publish_definition(self, record: DefinitionRecord) -> DefinitionRecord: ...
+
+    async def load_definition(self, definition_id: str, version: int) -> Optional[DefinitionRecord]: ...
 
     async def close(self) -> None: ...

@@ -8,6 +8,8 @@ harel new      FILE [NAME] [--force]        # scaffold a starter .stm (validates
 harel validate FILE [NAME]                 # parse + validate; exit 1 on errors
 harel render   FILE [NAME] [--mermaid]      # PlantUML (default) or Mermaid
 harel list     FILE                         # machines / fragments / events in a file
+harel hash     FILE [NAME]                  # each machine's version and source digest
+harel publish  DIR                          # publish a directory's machines to the store
 harel run      FILE [NAME] [-e KIND[:JSON]] # drive a machine with events (in-memory)
 harel fmt      FILES... [--check|--diff]    # format .stm files
 harel lsp                                   # start the DSL language server (stdio)
@@ -72,6 +74,37 @@ paths like `pkg.mod.fn`, run it from your project root) and from the `.stm` file
 directory. Seed the initial context with `--seed '{"items": [...]}'`, and add `--validate` to
 check the machine before running.
 
+## Versions: `hash` and `publish`
+
+A machine changed while executions run on it is a new version (`machine order version 2`), and
+the store keeps every version that was published — see
+[changing a machine](durability.md#changing-a-machine-with-executions-in-flight) and the
+[tutorial](../tutorial/18-versions).
+
+`harel hash` prints each machine's version and the digest of its source — its block, its file's
+events, guards, bindings and fragments, and the files it imports; not comments or layout. A
+digest that changed under the same version is a change that needs a bump:
+
+```text
+$ harel hash definitions/order.stm
+order  version 2  digest f8dfd89d190503cc
+```
+
+`harel publish DIR` publishes the machines of every `*.stm` at the top of `DIR` — each with the
+files it imports — to the store the `HAREL_STORE_*` environment names, as a worker does when it
+starts. A version stored already with the same source is left as it is; one stored with other
+content is an error, and the exit code is 1:
+
+```text
+$ harel publish definitions/
+order  version 2  digest f8dfd89d190503cc
+$ harel publish definitions/              # after editing order.stm without a bump
+error: machine 'order' version 2 is published with other content (digest f8dfd89d190503cc, here 452adb0e5ef64291): give the changed machine a new version
+```
+
+Run it in the deploy pipeline before the new workers roll out: a conflict stops the deploy there.
+The workers publish the same way when they start, so the step is a safeguard, not a requirement.
+
 ## Purging finished executions
 
 `harel purge` permanently deletes the finished execution trees (root, regions, invokes and all
@@ -110,4 +143,5 @@ from harel.cli import main
 assert main(["list", "test/data/order.stm"]) == 0
 assert main(["validate", "test/data/order.stm", "order"]) == 0
 assert main(["render", "test/data/order.stm", "order", "--mermaid"]) == 0
+assert main(["hash", "test/data/order.stm"]) == 0
 ```

@@ -157,6 +157,12 @@ class _AsyncStoreAdapter:
     async def purge(self, execution_id, expected_version):
         return self._s.purge(execution_id, expected_version)
 
+    async def publish_definition(self, record):
+        return self._s.publish_definition(record)
+
+    async def load_definition(self, definition_id, version):
+        return self._s.load_definition(definition_id, version)
+
     async def close(self):
         return self._s.close()
 

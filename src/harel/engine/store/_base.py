@@ -9,8 +9,9 @@ keeps working unchanged.
 from __future__ import annotations
 
 import base64
+import json
 from dataclasses import dataclass
-from typing import Iterable, Optional, Protocol, runtime_checkable
+from typing import Any, Iterable, Optional, Protocol, runtime_checkable
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.spec.states import Event
@@ -229,6 +230,65 @@ class Step:
     command: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class DefinitionRecord:
+    """A published machine version, as the store keeps it: never changed once stored.
+    `source` is what builds it — `{"main": <file>, "files": {<path>: <text>}}`, the machine's
+    `.stm` file and every file it imports, by their paths relative to one another — and
+    `digest` is its source digest (`harel.dsl.machine_version`)."""
+
+    definition_id: str
+    version: int
+    digest: str
+    source: dict
+    published_at: Optional[float] = None
+
+    def to_dict(self) -> dict:
+        return {
+            "definition_id": self.definition_id,
+            "version": self.version,
+            "digest": self.digest,
+            "source": self.source,
+            "published_at": self.published_at,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> "DefinitionRecord":
+        return cls(
+            definition_id=raw["definition_id"],
+            version=int(raw["version"]),
+            digest=raw["digest"],
+            source=raw["source"],
+            published_at=raw.get("published_at"),
+        )
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict())
+
+    @classmethod
+    def from_json(cls, raw: str) -> "DefinitionRecord":
+        return cls.from_dict(json.loads(raw))
+
+
+# the definitions table's columns, in the order `_definition_params`/`_definition_row` use
+_DEFINITION_COLUMNS = "definition_id, version, digest, source, published_at"
+
+
+def _definition_params(record: DefinitionRecord) -> tuple:
+    return (
+        record.definition_id,
+        record.version,
+        record.digest,
+        json.dumps(record.source),
+        record.published_at,
+    )
+
+
+def _definition_row(row: Any) -> DefinitionRecord:
+    definition_id, version, digest, source, published_at = row
+    return DefinitionRecord(definition_id, int(version), digest, json.loads(source), published_at)
+
+
 @dataclass
 class TimerOp:
     """A durable-timer mutation applied atomically with a `commit`: `schedule`
@@ -378,6 +438,17 @@ class ExecutionStore(Protocol):
         returned. After a purge, a commit of a stale copy of the Execution raises
         `StoreConflict` rather than recreating it; only a brand-new Execution (version
         0) may reuse the id."""
+        ...
+
+    def publish_definition(self, record: DefinitionRecord) -> DefinitionRecord:
+        """Store `record` unless a machine version with its `definition_id` and `version` is
+        stored already — atomically, so of two publishers of one version only one stores it.
+        Returns what is stored: `record`, or the one stored before (whose `digest` may differ:
+        the caller decides what a different content means)."""
+        ...
+
+    def load_definition(self, definition_id: str, version: int) -> Optional[DefinitionRecord]:
+        """The published `version` of machine `definition_id`, or None."""
         ...
 
     def close(self) -> None:

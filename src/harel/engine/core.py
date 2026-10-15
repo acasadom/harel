@@ -123,25 +123,33 @@ class Assigned:
 
 
 class DefinitionChanged(RuntimeError):
-    """An execution is in a state its machine's definition no longer has: the definition
-    changed under a running execution (a state renamed or removed). The runner fails the
-    execution with this as its `error` — or raises it, under `on_action_error="raise"`."""
+    """The definition changed under a running execution: its machine's source differs from
+    the one the execution started on while the version stayed the same, or the execution is
+    in a state the definition no longer has. The runner fails the execution with this as its
+    `error` — or raises it, under `on_action_error="raise"`."""
 
 
 def definition_problem(defn: Definition, exe: Execution) -> Optional[str]:
-    """Why `defn` can't drive `exe` — a state it is in that the definition lacks — or None.
-    Only an execution the engine acts on (`RUNNING`, or `CANCELLING` for its `Cancel`) and
-    that has started is checked; a finished or suspended one is left as it is."""
+    """Why `defn` can't drive `exe` — a state the execution is in is gone, or the source
+    changed without a new version — or None. Only an execution the engine acts on (`RUNNING`,
+    or `CANCELLING` for its `Cancel`) and that has started is checked; a finished or
+    suspended one is left as it is."""
     if exe.active_path is None or exe.status not in (Status.RUNNING, Status.CANCELLING):
         return None
     missing = [p for p in (exe.root_path, exe.active_path) if p and p not in defn.index]
-    if not missing:
-        return None
-    states = " and ".join(repr(p) for p in missing)
-    return (
-        f"execution {exe.id!r} is in {states}, which machine {defn.id!r} no longer has: the "
-        f"definition changed under a running execution (redrive it to a state the machine has)"
-    )
+    if missing:
+        states = " and ".join(repr(p) for p in missing)
+        return (
+            f"execution {exe.id!r} is in {states}, which machine {defn.id!r} no longer has: the "
+            f"definition changed under a running execution (redrive it to a state the machine has)"
+        )
+    if exe.definition_digest is not None and defn.digest is not None and exe.definition_digest != defn.digest:
+        return (
+            f"machine {defn.id!r} version {defn.version} changed under execution {exe.id!r} "
+            f"(source digest {exe.definition_digest}, now {defn.digest}): a changed machine needs "
+            f"a new version, with the old one kept loaded for the executions running on it"
+        )
+    return None
 
 
 class ExpressionError(Exception):

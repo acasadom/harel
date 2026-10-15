@@ -7,12 +7,15 @@ from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, Status
 from harel.engine.schema import DEFAULT_PREFIX, Names, store_schema
-from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
+from harel.engine.store import DefinitionRecord, OutboxEntry, SpawnEntry, StoreConflict, TimerOp
 from harel.engine.store._base import (
+    _DEFINITION_COLUMNS,
     _IDS_WITH_PREFIX_SQL,
     DEFAULT_TRACE_MAX,
     Step,
     _decode_offset,
+    _definition_params,
+    _definition_row,
     _like_prefix,
     _listing_page,
     _listing_sql_sqlite,
@@ -331,6 +334,26 @@ class AsyncRqliteStore:
             _purge_statements(self._n, execution_id, expected_version), transaction=True
         )
         return results[0].get("rows_affected", 0) == 1
+
+    async def publish_definition(self, record: DefinitionRecord) -> DefinitionRecord:
+        await self._execute(
+            [
+                [
+                    f"INSERT OR IGNORE INTO {self._n.definitions} ({_DEFINITION_COLUMNS}) VALUES (?, ?, ?, ?, ?)",
+                    *_definition_params(record),
+                ]
+            ]
+        )
+        stored = await self.load_definition(record.definition_id, record.version)
+        assert stored is not None  # just stored, or stored before
+        return stored
+
+    async def load_definition(self, definition_id: str, version: int) -> Optional[DefinitionRecord]:
+        rows = await self._query(
+            f"SELECT {_DEFINITION_COLUMNS} FROM {self._n.definitions} WHERE definition_id = ? AND version = ?",
+            (definition_id, version),
+        )
+        return _definition_row(rows[0]) if rows else None
 
     async def close(self) -> None:
         await self._client.aclose()

@@ -19,7 +19,7 @@ from harel.definition.events import with_defaults
 from harel.definition.model import Definition
 from harel.engine.execution import Execution, Status, stamp
 from harel.engine.flow import CallAction, Flow, call, parallel, run_inline
-from harel.engine.resolve import ResolveError
+from harel.engine.resolve import DefinitionNotLoaded, ResolveError, find_definition
 from harel.engine.runtime import _CONTROL, _action_name, _ActionKeys, _Proxy, _resolve, _trace_step
 from harel.engine.store import Step, TimerOp
 from harel.spec.states import Event
@@ -35,6 +35,25 @@ def store(method: str, *args: Any, **kwargs: Any) -> Flow:
 def transport(method: str, *args: Any, **kwargs: Any) -> Flow:
     """`yield from transport("publish", gid, ev)`: a call on the transport, from a flow."""
     return (yield from call("transport", method, *args, **kwargs))
+
+
+def definition_for(
+    defn: Definition, definitions: Optional[dict[str, Definition]], exe: Execution
+) -> Definition:
+    """The Definition to drive `exe` with: its own version from `definitions` (a submachine
+    child runs a different machine than the driver's `defn`), else `defn` when it is that
+    version. Raises `DefinitionNotLoaded` when neither is."""
+    version = exe.definition_version or 1
+    if definitions is not None:
+        found = find_definition(definitions, exe.definition_id, version)
+        if found is not None:
+            return found
+    if defn.version == version and (definitions is None or exe.definition_id not in definitions):
+        return defn
+    raise DefinitionNotLoaded(
+        f"execution {exe.id!r} runs machine {exe.definition_id!r} version {version}, which this "
+        f"runner hasn't loaded"
+    )
 
 
 class DriverLogic:
@@ -56,11 +75,19 @@ class DriverLogic:
         self.resolve_machine = resolve_machine
         self._trace_enabled = trace  # opt-in execution timeline (off => no per-event step)
 
+    # how a hosting runner finds the Definition of an execution this driver doesn't hold (the
+    # published versions, in its store): set on the driver it builds
+    definition_flow: Optional[Callable[[Execution], Flow]] = None
+
     # --- hooks -------------------------------------------------------------
     def _definition_for(self, exe: Execution) -> Definition:
-        if self._definitions is not None:
-            return self._definitions.get(exe.definition_id, self.defn)
-        return self.defn
+        return definition_for(self.defn, self._definitions, exe)
+
+    def _definition_flow(self, exe: Execution) -> Flow:
+        """The Definition to drive `exe` with: the runner's lookup, when it gave one."""
+        if self.definition_flow is not None:
+            return (yield from self.definition_flow(exe))
+        return self._definition_for(exe)
 
     def _proxy(self, exe: Execution) -> Any:
         return _Proxy(exe.context)
@@ -80,7 +107,12 @@ class DriverLogic:
         the relay round-trips when there is nothing to deliver."""
         from_path, from_status = exe.active_path, exe.status
         keys = _ActionKeys(exe.id, event_id if event_id is not None else "start")
-        problem = engine.definition_problem(self._definition_for(exe), exe)
+        defn = yield from self._definition_flow(exe)
+        if exe.definition_digest is None or exe.active_path is None:
+            # one that hasn't run yet, or was written before versions existed, runs on the
+            # source it starts (or resumes) with
+            exe.definition_version, exe.definition_digest = defn.version, defn.digest
+        problem = engine.definition_problem(defn, exe)
         if problem is not None:
             # the definition changed under the execution: its state isn't there to drive. The
             # runner's policy decides — the bare driver raises, a hosted one fails the execution
@@ -129,7 +161,7 @@ class DriverLogic:
             exc.__cause__ = original_exc
             self._on_action_error(exe, exc)
             return [], [], [], [], {}
-        defn = self._definition_for(exe)
+        defn = yield from self._definition_flow(exe)
         ev = engine.error_event(exc)
         if engine.has_error_handler(defn, exe, ev):
             exe.context["_error"] = dict(ev.data)
@@ -193,7 +225,7 @@ class DriverLogic:
                         # route to it (exception in context._error + the error event data);
                         # else fall back to the runner's policy (fail the exe / re-raise).
                         # Partial effects are dropped either way.
-                        defn = self._definition_for(exe)
+                        defn = yield from self._definition_flow(exe)
                         ev = engine.error_event(exc)
                         if engine.has_error_handler(defn, exe, ev):
                             exe.context["_error"] = dict(ev.data)
@@ -248,9 +280,14 @@ class DriverLogic:
         context = dict(entry.context)
         fqn = context.pop("__invoke_fqn__", None)
         if fqn is not None:
-            if self.resolve_machine is None:
+            # an inline target (or one its file imports) is the spawning version's own
+            own = self.defn.submachines.get(fqn)
+            if own is not None:
+                child_defn = own
+            elif self.resolve_machine is None:
                 raise ResolveError(f"invoke {fqn!r} but this runner has no machine resolver")
-            child_defn = self.resolve_machine(fqn)
+            else:
+                child_defn = self.resolve_machine(fqn)
             # an invoked machine starts with its own context defaults; a region (the same
             # machine) starts with only what the fork passes down
             context = with_defaults(child_defn.context_schema, context)
@@ -263,6 +300,8 @@ class DriverLogic:
         child = Execution(
             id=entry.child_id,
             definition_id=child_defn.id,
+            definition_version=child_defn.version,
+            definition_digest=child_defn.digest,
             definition_fqn=fqn,  # persisted so any worker can (re)resolve a submachine child
             root_path=entry.root_path,
             context=context,
@@ -291,7 +330,7 @@ class DriverLogic:
                 if target is not None and not (yield from store("is_processed", target.id, entry.event.id)):
                     yield from self._run_flow(
                         target,
-                        engine.process(self._definition_for(target), target, entry.event),
+                        engine.process((yield from self._definition_flow(target)), target, entry.event),
                         event_id=entry.event.id,
                         event=entry.event,
                     )
@@ -304,7 +343,7 @@ class DriverLogic:
         if target is not None and not (yield from store("is_processed", target.id, event.id)):
             yield from self._run_flow(
                 target,
-                engine.process(self._definition_for(target), target, event),
+                engine.process((yield from self._definition_flow(target)), target, event),
                 event_id=event.id,
                 event=event,
             )
@@ -350,7 +389,7 @@ class DriverLogic:
                 return  # dedupe: at-least-once delivery may re-deliver an event
             yield from self._run_flow(
                 target,
-                engine.process(self._definition_for(target), target, event),
+                engine.process((yield from self._definition_flow(target)), target, event),
                 event_id=event.id,
                 event=event,
             )
@@ -364,7 +403,7 @@ class DriverLogic:
     def _rearm_ttl_flow(self, exe: Execution, event: Event) -> Flow:
         """A domain event broadcast to `exe`'s live regions never runs `process` on `exe`
         itself, but it is still activity for `exe`'s `ttl`: restart the budget."""
-        delay = engine.ttl_delay(self._definition_for(exe), exe)
+        delay = engine.ttl_delay((yield from self._definition_flow(exe)), exe)
         if delay is None or (yield from store("is_processed", exe.id, event.id)):
             return
         exe.expires_at = self._clock() + delay
