@@ -64,10 +64,13 @@ class Worker:
         trace: bool = False,
         *,
         execution: str = "background",
+        machines: Optional[Iterable[str]] = None,
         action_modules: Iterable[str] = (),
         actions: Optional[dict] = None,
         guards: Optional[dict] = None,
     ) -> None:
+        """`machines`, when given, are the only machines this worker claims work for (see
+        `WorkerLogic`)."""
         check_execution(execution, ("store", store), ("transport", transport))
         self.store = store
         self.transport = transport
@@ -85,6 +88,7 @@ class Worker:
                 trace=trace,
                 high_ratio=high_ratio,
                 priority_threshold=priority_threshold,
+                machines=machines,
                 action_modules=action_modules,
                 actions=actions,
                 guards=guards,
@@ -108,6 +112,7 @@ class Worker:
             tuple(action_modules),
             actions,
             guards,
+            machines,
         )
 
     @staticmethod
@@ -127,6 +132,7 @@ class Worker:
         action_modules=(),
         actions=None,
         guards=None,
+        machines=None,
     ):
         from harel.engine.aio import facade
 
@@ -146,6 +152,7 @@ class Worker:
                 trace=trace,
                 high_ratio=high_ratio,
                 priority_threshold=priority_threshold,
+                machines=machines,
                 action_modules=action_modules,
                 actions=actions,
                 guards=guards,
@@ -317,6 +324,8 @@ class DistributedRunner:
         concurrency: int = 256,
         high_ratio: float = 0.0,
         priority_threshold: int = 1,
+        *,
+        machines: Optional[Iterable[str]] = None,
     ) -> Worker:
         return Worker(
             self.store,
@@ -332,6 +341,7 @@ class DistributedRunner:
             priority_threshold=priority_threshold,
             trace=self._trace,
             execution=self.execution,
+            machines=machines,
             action_modules=self.action_modules,
             actions=self.actions,
             guards=self.guards,

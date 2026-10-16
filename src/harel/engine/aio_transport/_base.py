@@ -15,9 +15,17 @@ class AsyncTransport(Protocol):
     """Async mirror of `Transport`: identical per-group-exclusivity semantics, awaited IO —
     including the optional `shares_store_transaction` attribute."""
 
-    async def publish(self, group_id: str, event: Event, priority: int = 0) -> None: ...
+    async def publish(
+        self, group_id: str, event: Event, priority: int = 0, routing_key: Optional[str] = None
+    ) -> None: ...
 
-    async def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]: ...
+    async def claim(
+        self,
+        worker_id: str,
+        visibility: float,
+        min_priority: int = 0,
+        routing_keys: Optional[frozenset[str]] = None,
+    ) -> Optional[Lease]: ...
 
     async def ack(self, lease: Lease) -> None: ...
 

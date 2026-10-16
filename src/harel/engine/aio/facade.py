@@ -177,11 +177,13 @@ class _AsyncTransportAdapter:
     def shares_store_transaction(self) -> bool:
         return getattr(self._t, "shares_store_transaction", False)
 
-    async def publish(self, group_id, event, priority=0):
-        return self._t.publish(group_id, event, priority)
+    async def publish(self, group_id, event, priority=0, routing_key=None):
+        return self._t.publish(group_id, event, priority, routing_key=routing_key)
 
-    async def claim(self, worker_id, visibility, min_priority=0):
-        return self._t.claim(worker_id, visibility, min_priority)
+    async def claim(self, worker_id, visibility, min_priority=0, routing_keys=None):
+        if routing_keys is None:  # as the worker asks: a transport without routing still serves it
+            return self._t.claim(worker_id, visibility, min_priority)
+        return self._t.claim(worker_id, visibility, min_priority, routing_keys=routing_keys)
 
     async def ack(self, lease):
         return self._t.ack(lease)

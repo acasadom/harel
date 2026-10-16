@@ -19,6 +19,8 @@ service scaled to N replicas (each replica is one `Worker` loop):
     HAREL_AWS_REGION       AWS region for the dynamodb store (default us-east-1)
     HAREL_DEFINITIONS_DIR  directory of *.stm machine files = the Definition registry, published to
                          the store at startup (a version published with other content stops it)
+    HAREL_MACHINES         comma-separated machines: this worker claims only the work of the executions
+                         started from them (their whole tree); unset = every machine
     HAREL_ACTION_MODULES   comma-separated modules a machine version read from the store may call,
                          besides those the worker's own machines call
     HAREL_WORKER_ID        worker id (defaults to the hostname)
@@ -46,6 +48,7 @@ containers) coordinating by events, which is the whole point of the model.
 from __future__ import annotations
 
 import asyncio
+import logging
 import signal
 import socket
 from pathlib import Path
@@ -79,6 +82,8 @@ from harel.engine.transport import (
     Transport,
 )
 from harel.published import apublish_definitions, read_definitions
+
+logger = logging.getLogger(__name__)
 
 
 def load_definitions(definitions_dir: str) -> dict[str, Definition]:
@@ -277,7 +282,16 @@ async def amain() -> None:
         visibility=cfg.visibility,
         concurrency=cfg.concurrency,
         trace=cfg.trace,
+        machines=cfg.machines,
     )
+    if cfg.machines is not None:
+        # nothing else says which machines this worker leaves to the others
+        logger.info(
+            "worker %s claims only the work of: %s", worker.worker_id, ", ".join(sorted(cfg.machines))
+        )
+        missing = sorted(cfg.machines - {d.id for d in definitions.values()})
+        if missing:
+            logger.warning("HAREL_MACHINES names machines with no file here: %s", ", ".join(missing))
     try:
         await worker.run(stop)
     finally:

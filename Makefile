@@ -42,6 +42,8 @@ test-stack: ## Run each backend's tests directly against the real stack (needs D
 	    "test/integration/test_store_definitions.py::test_postgres_definitions" \
 	    "test/integration/test_store_outbox.py::test_async_postgres_outbox" \
 	    "test/integration/test_store_definitions.py::test_async_postgres_definitions" \
+	    "test/integration/test_transport_routing.py::test_postgres_machine_routing" \
+	    "test/integration/test_transport_routing.py::test_async_postgres_machine_routing" \
 	    "test/integration/test_transport_contract.py::test_postgres_transport_contract" \
 	    test/integration/test_schema_stack.py \
 	    test/integration/test_transport_race.py -v || EXIT=1; \
@@ -58,6 +60,8 @@ test-stack: ## Run each backend's tests directly against the real stack (needs D
 	    "test/integration/test_store_definitions.py::test_rqlite_definitions" \
 	    "test/integration/test_store_outbox.py::test_async_rqlite_outbox" \
 	    "test/integration/test_store_definitions.py::test_async_rqlite_definitions" \
+	    "test/integration/test_transport_routing.py::test_rqlite_machine_routing" \
+	    "test/integration/test_transport_routing.py::test_async_rqlite_machine_routing" \
 	    "test/integration/test_transport_contract.py::test_rqlite_transport_contract" \
 	    test/integration/test_schema_stack.py -v || EXIT=1; \
 	echo "=== mongo ===" && \
@@ -73,6 +77,8 @@ test-stack: ## Run each backend's tests directly against the real stack (needs D
 	    "test/integration/test_store_definitions.py::test_mongo_definitions" \
 	    "test/integration/test_store_outbox.py::test_async_mongo_outbox" \
 	    "test/integration/test_store_definitions.py::test_async_mongo_definitions" \
+	    "test/integration/test_transport_routing.py::test_mongo_machine_routing" \
+	    "test/integration/test_transport_routing.py::test_async_mongo_machine_routing" \
 	    "test/integration/test_transport_contract.py::test_mongo_transport_contract" -v || EXIT=1; \
 	echo "=== dynamodb+sqs ===" && \
 	$$DC -e HAREL_STORE_BACKEND=dynamodb -e HAREL_TRANSPORT_BACKEND=sqs \
@@ -86,6 +92,7 @@ test-stack: ## Run each backend's tests directly against the real stack (needs D
 	    "test/integration/test_store_definitions.py::test_dynamodb_definitions" \
 	    "test/integration/test_store_outbox.py::test_async_dynamodb_outbox" \
 	    "test/integration/test_store_definitions.py::test_async_dynamodb_definitions" \
+	    "test/integration/test_transport_routing.py::test_sqs_refuses_machine_routing" \
 	    "test/integration/test_transport_contract.py::test_sqs_transport_contract" -v || EXIT=1; \
 	docker compose -f deploy/docker-compose.yml down -v; \
 	exit $$EXIT

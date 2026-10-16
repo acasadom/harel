@@ -129,6 +129,16 @@ another worker has taken.
 
 `ORDER BY seq` within a group, one consumer per group at a time → per-group order preserved.
 
+## Routing by machine
+
+`harel_transport_groups` has a `routing_key TEXT` column (`ALTER TABLE … ADD COLUMN IF NOT
+EXISTS` brings an older table up to date), set by the publish that creates the group. The `claim`
+function takes a fifth argument, `p_routing_keys text[]` (default `NULL`): given, it adds
+`AND s.routing_key = ANY(p_routing_keys)` to its search, which the index
+`harel_transport_groups_by_routing_key (routing_key, COALESCE(lock_expiry, 0), group_id)` serves.
+The four-argument function of `SCHEMA_VERSION` 4 is dropped first, so a call is never ambiguous
+between the two.
+
 ## Async twin
 
 `AsyncPostgresTransport` mirrors this over an async `psycopg` connection — same per-group row +

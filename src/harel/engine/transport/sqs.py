@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Any, Optional
 
-from harel.engine.transport._base import Lease
+from harel.engine.transport._base import Lease, _refuse_routing
 from harel.spec.states import Event
 
 # SQS FIFO has no per-group priority and receive() can't filter by it, so priority /
@@ -72,7 +72,9 @@ class SqsTransport:
                 _time.sleep(retry_delay)
         raise last if last is not None else RuntimeError("sqs connect failed")
 
-    def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
+    def publish(
+        self, group_id: str, event: Event, priority: int = 0, routing_key: Optional[str] = None
+    ) -> None:
         if priority:
             raise ValueError(_NO_PRIORITY)
         self._sqs.send_message(
@@ -82,7 +84,14 @@ class SqsTransport:
             MessageDeduplicationId=uuid.uuid4().hex,  # unique per send (fan-out reuses event ids)
         )
 
-    def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
+    def claim(
+        self,
+        worker_id: str,
+        visibility: float,
+        min_priority: int = 0,
+        routing_keys: Optional[frozenset[str]] = None,
+    ) -> Optional[Lease]:
+        _refuse_routing("SqsTransport", routing_keys)
         if min_priority:
             raise ValueError(_NO_MIN_PRIORITY)
         resp = self._sqs.receive_message(

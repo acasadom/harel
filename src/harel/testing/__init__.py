@@ -15,6 +15,7 @@ def test_my_store_meets_the_protocol():
 
 def test_my_transport_meets_the_protocol():
     assert_transport_contract(lambda clock: MyTransport(clock=clock))
+    assert_machine_routing_contract(lambda clock: MyTransport(clock=clock))  # or ..._refuses_...
 ```
 
 Each has an `assert_async_*` twin for an async backend. The store contracts take a `ns`
@@ -27,9 +28,19 @@ from harel.testing.definitions import assert_async_definitions_contract, assert_
 from harel.testing.listing import assert_async_listing_contract, assert_listing_contract
 from harel.testing.outbox import assert_async_outbox_contract, assert_outbox_contract
 from harel.testing.purge import assert_async_purge_contract, assert_purge_contract
+from harel.testing.routing import (
+    assert_async_machine_routing_contract,
+    assert_async_refuses_machine_routing,
+    assert_machine_routing_contract,
+    assert_refuses_machine_routing,
+)
 from harel.testing.transport import assert_async_transport_contract, assert_transport_contract
 
 __all__ = [
+    "assert_async_machine_routing_contract",
+    "assert_async_refuses_machine_routing",
+    "assert_machine_routing_contract",
+    "assert_refuses_machine_routing",
     "assert_async_definitions_contract",
     "assert_definitions_contract",
     "assert_async_listing_contract",

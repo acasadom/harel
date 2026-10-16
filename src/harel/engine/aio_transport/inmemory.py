@@ -18,10 +18,12 @@ class AsyncInMemoryTransport:
     def __init__(self, clock: Callable[[], float] = time.time) -> None:
         self._messages: list[dict] = []
         self._seq = 0
-        self._groups: dict[str, dict] = {}  # group_id → {last_claimed_at, priority}
+        self._groups: dict[str, dict] = {}  # group_id → {last_claimed_at, priority, routing_key}
         self._clock = clock
 
-    async def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
+    async def publish(
+        self, group_id: str, event: Event, priority: int = 0, routing_key: Optional[str] = None
+    ) -> None:
         self._seq += 1
         self._messages.append(
             {
@@ -32,9 +34,17 @@ class AsyncInMemoryTransport:
                 "lock_expiry": 0.0,
             }
         )
-        self._groups.setdefault(group_id, {"last_claimed_at": 0.0, "priority": priority})
+        self._groups.setdefault(
+            group_id, {"last_claimed_at": 0.0, "priority": priority, "routing_key": routing_key}
+        )
 
-    async def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
+    async def claim(
+        self,
+        worker_id: str,
+        visibility: float,
+        min_priority: int = 0,
+        routing_keys: Optional[frozenset[str]] = None,
+    ) -> Optional[Lease]:
         now = self._clock()
         in_flight = {
             m["group_id"] for m in self._messages if m["locked_by"] is not None and m["lock_expiry"] >= now
@@ -46,7 +56,10 @@ class AsyncInMemoryTransport:
             available = m["locked_by"] is None or m["lock_expiry"] < now
             if not available or m["group_id"] in in_flight:
                 continue
-            if self._groups.get(m["group_id"], {}).get("priority", 0) < min_priority:
+            group = self._groups.get(m["group_id"], {})
+            if group.get("priority", 0) < min_priority:
+                continue
+            if routing_keys is not None and group.get("routing_key") not in routing_keys:
                 continue
             m["locked_by"] = worker_id
             m["lock_expiry"] = now + visibility

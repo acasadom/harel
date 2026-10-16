@@ -122,6 +122,13 @@ closes the lock-expires-mid-ack window. `nack(delay>0)` **parks**: pushes the sc
 Within a group, `q:{G}` is a list consumed head-first and only one worker holds the lock at a
 time, so order is preserved.
 
+## Routing by machine
+
+Not supported. The ready sets are kept per priority level, and a claim can't pick a machine's
+groups out of them without scanning; a claim given `routing_keys` raises `NotImplementedError`,
+rather than claim every machine's messages for a worker meant to run only some. A publish takes a
+`routing_key` and ignores it. Run dedicated workers on a transport that routes.
+
 ## Async twin
 
 `AsyncRedisTransport` mirrors this over `redis.asyncio` (awaited; the same atomic `_PUBLISH_LUA` /

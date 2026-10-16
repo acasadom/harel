@@ -6,9 +6,9 @@ import asyncio
 import time
 from typing import Any, Callable, Optional
 
-from harel.engine.schema import DEFAULT_PREFIX, Names, transport_schema
+from harel.engine.schema import DEFAULT_PREFIX, Names, sqlite_transport_upgrade, transport_schema
 from harel.engine.transport import _PARKED, Lease
-from harel.engine.transport._base import _SQLITE_CLAIM_SQL
+from harel.engine.transport._base import _sqlite_claim
 from harel.spec.states import Event
 
 
@@ -48,32 +48,47 @@ class AsyncSqliteTransport:
         await conn.execute("PRAGMA busy_timeout=5000")
         if create_schema:
             for sql in transport_schema("sqlite", prefix):
+                if not sql.startswith("CREATE TABLE"):
+                    continue
                 await conn.execute(sql)
+            cur = await conn.execute(f"PRAGMA table_info({Names(prefix).groups})")
+            for sql in sqlite_transport_upgrade([row[1] for row in await cur.fetchall()], prefix):
+                await conn.execute(sql)
+            for sql in transport_schema("sqlite", prefix):
+                if not sql.startswith("CREATE TABLE"):
+                    await conn.execute(sql)
         return cls(conn, clock, prefix=prefix)
 
-    async def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
+    async def publish(
+        self, group_id: str, event: Event, priority: int = 0, routing_key: Optional[str] = None
+    ) -> None:
         async with self._lock:
             await self._conn.execute(
                 f"INSERT INTO {self._n.messages} (group_id, event) VALUES (?, ?)",
                 (group_id, event.model_dump_json()),
             )
             await self._conn.execute(
-                f"INSERT OR IGNORE INTO {self._n.groups} (group_id, priority) VALUES (?, ?)",
-                (group_id, priority),
+                f"INSERT OR IGNORE INTO {self._n.groups} (group_id, priority, routing_key) VALUES (?, ?, ?)",
+                (group_id, priority, routing_key),
             )
 
-    async def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
+    async def claim(
+        self,
+        worker_id: str,
+        visibility: float,
+        min_priority: int = 0,
+        routing_keys: Optional[frozenset[str]] = None,
+    ) -> Optional[Lease]:
         async with self._lock:
-            return await self._claim_locked(worker_id, visibility, min_priority)
+            return await self._claim_locked(worker_id, visibility, min_priority, routing_keys)
 
-    async def _claim_locked(self, worker_id: str, visibility: float, min_priority: int) -> Optional[Lease]:
+    async def _claim_locked(
+        self, worker_id: str, visibility: float, min_priority: int, routing_keys: Optional[frozenset[str]]
+    ) -> Optional[Lease]:
         now = self._clock()
         await self._conn.execute("BEGIN IMMEDIATE")
         try:
-            cur = await self._conn.execute(
-                self._n.sql(_SQLITE_CLAIM_SQL),
-                (min_priority, now),
-            )
+            cur = await self._conn.execute(*_sqlite_claim(self._n, min_priority, now, routing_keys))
             row = await cur.fetchone()
             if row is None:
                 await self._conn.execute("COMMIT")

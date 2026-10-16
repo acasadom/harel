@@ -264,6 +264,43 @@ equally. A worker configured with `high_ratio=1.0` always attempts high-priority
 and falls back to any priority, effectively draining high-priority executions before touching
 normal ones whenever both are available.
 
+### Dedicating workers to machines
+
+A worker can be given capacity for some machines only — so a busy machine gets workers of its own,
+and doesn't take them from the others:
+
+```python
+from harel import DictStore, definition_from_dsl
+from harel.engine.distributed import DistributedRunner
+from harel.engine.transport import InMemoryTransport
+
+ORDERS = """
+event Go {}
+machine fulfilment { initial Packing state Packing {} final Shipped success from Packing to Shipped on Go }
+"""
+fulfilment = definition_from_dsl(ORDERS, "fulfilment")
+runner = DistributedRunner(DictStore(), InMemoryTransport(), {fulfilment.id: fulfilment})
+
+dedicated = runner.worker("fulfilment-1", machines={"fulfilment"})  # only fulfilment's work
+anyone = runner.worker("general-1")                                 # everything, fulfilment included
+```
+
+`python -m harel.worker` takes the same as `HAREL_MACHINES=fulfilment,publishing`, and logs at
+start which machines it claims for.
+
+- **A tree travels with its root.** An execution's `routing_key` is the machine its tree started
+  from: its orthogonal regions, fan-out instances and invoked submachines carry the root's, so a
+  worker given `fulfilment` runs its `parcels.parcel` children too. Name only root machines.
+- **Dedicated capacity, not exclusivity.** A worker given no `machines` claims everything, the
+  dedicated machines' work included: it is the safety net when the dedicated workers are down or
+  busy. To keep a machine's work off the general workers, give every worker its `machines`.
+- **Nothing claims a machine no worker covers** when every worker is given `machines`: its
+  executions wait. A worker warns at start about a machine it is given but has no file for.
+- **Transports.** The in-memory, SQLite, libSQL, rqlite, Postgres and Mongo transports route
+  claims; Redis and SQS can't, and a worker given `machines` on them fails at its first claim
+  (`NotImplementedError`) rather than claim every machine's work. See
+  [transports](transports.md#the-contract-every-backend-implements).
+
 ## Orthogonal & fan-out, distributed
 
 The same machinery carries [orthogonal regions](../tutorial/08-orthogonal) and

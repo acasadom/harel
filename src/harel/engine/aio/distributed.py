@@ -53,8 +53,8 @@ class AsyncTransportDriver(TransportDriverLogic, _AsyncRuntimeDriver):
     def _ports(self) -> dict[str, Any]:
         return {"store": self.store, "transport": self.transport}
 
-    async def _flush(self, primary_priority: Optional[dict[str, int]] = None) -> None:
-        await self._serve(self._flush_flow(primary_priority))
+    async def _flush(self, primary: Optional[dict[str, Execution]] = None) -> None:
+        await self._serve(self._flush_flow(primary))
 
     async def route(self, exe: Execution, event: Event) -> None:
         await self._serve(self.route_flow(exe, event))
@@ -80,6 +80,7 @@ class AsyncWorker(WorkerLogic):
         high_ratio: float = 0.0,
         priority_threshold: int = 1,
         *,
+        machines: Optional[Iterable[str]] = None,
         action_modules: Iterable[str] = (),
         actions: Optional[dict] = None,
         guards: Optional[dict] = None,
@@ -94,6 +95,7 @@ class AsyncWorker(WorkerLogic):
             trace=trace,
             high_ratio=high_ratio,
             priority_threshold=priority_threshold,
+            machines=machines,
             action_modules=action_modules,
             actions=actions,
             guards=guards,
@@ -291,6 +293,8 @@ class AsyncDistributedRunner(SenderLogic):
         concurrency: int = 256,
         high_ratio: float = 0.0,
         priority_threshold: int = 1,
+        *,
+        machines: Optional[Iterable[str]] = None,
     ) -> AsyncWorker:
         return AsyncWorker(
             self.store,
@@ -305,6 +309,7 @@ class AsyncDistributedRunner(SenderLogic):
             trace=self._trace,
             high_ratio=high_ratio,
             priority_threshold=priority_threshold,
+            machines=machines,
             action_modules=self.action_modules,
             actions=self.actions,
             guards=self.guards,

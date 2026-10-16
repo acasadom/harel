@@ -24,7 +24,7 @@ from harel.definition.events import check_context, check_event, with_defaults
 from harel.definition.model import Definition
 from harel.engine import control
 from harel.engine.driving import DriverLogic, FailOnActionError, TransportDriverLogic, store, transport
-from harel.engine.execution import Execution, Status, stamp
+from harel.engine.execution import Execution, Status, routing_key, stamp
 from harel.engine.flow import Flow, parallel
 from harel.engine.resolve import (
     DefinitionNotLoaded,
@@ -266,6 +266,7 @@ class DurableLogic(_DefinitionLookup):
             definition_id=definition_id,
             definition_version=driver.defn.version,
             definition_digest=driver.defn.digest,
+            routing_key=definition_id,
             context=context,
             priority=priority,
             **({"id": execution_id} if execution_id is not None else {}),
@@ -405,6 +406,7 @@ class SenderLogic(_DefinitionLookup):
             definition_id=definition_id,
             definition_version=defn.version,
             definition_digest=defn.digest,
+            routing_key=definition_id,
             context=context,
             priority=priority,
             **({"id": execution_id} if execution_id is not None else {}),
@@ -434,13 +436,14 @@ class SenderLogic(_DefinitionLookup):
             event_id=event.id,
         )
         seqs = yield from store("commit", exe, [(exe.id, event)], step=step)
+        key = routing_key(exe)
         if self._shares_store_transaction:
-            yield from transport("publish", exe.id, event, priority=exe.priority)
+            yield from transport("publish", exe.id, event, priority=exe.priority, routing_key=key)
             for seq in seqs:
                 yield from store("ack_outbox", seq)
             return
         try:
-            yield from transport("publish", exe.id, event, priority=exe.priority)
+            yield from transport("publish", exe.id, event, priority=exe.priority, routing_key=key)
         except Exception:
             logger.warning(
                 "could not immediately publish the Start for execution %s; it is "
@@ -486,7 +489,7 @@ class SenderLogic(_DefinitionLookup):
         if exe is not None:  # checked in the caller's stack: a malformed event never queues
             check_event((yield from self._defn_flow(exe)).events, event.kind, event.data)
         priority = exe.priority if exe is not None else 0
-        yield from transport("publish", execution_id, event, priority=priority)
+        yield from transport("publish", execution_id, event, priority=priority, routing_key=routing_key(exe))
 
     # --- control plane ------------------------------------------------------
     def _logic_for_flow(self, execution_id: str) -> Flow:
@@ -498,7 +501,7 @@ class SenderLogic(_DefinitionLookup):
     def cancel_flow(self, execution_id: str, reason: Optional[dict] = None) -> Flow:
         logic, exe = yield from self._logic_for_flow(execution_id)
         yield from control.cancel_flow(logic.defn, execution_id, reason=reason, clock=self._clock)
-        yield from logic._flush_flow(primary_priority={execution_id: exe.priority})
+        yield from logic._flush_flow(primary={execution_id: exe})
 
     def terminate_flow(self, execution_id: str) -> Flow:
         yield from control.terminate_flow(execution_id, clock=self._clock)
@@ -534,11 +537,17 @@ class WorkerLogic(_DefinitionLookup):
         high_ratio: float = 0.0,
         priority_threshold: int = 1,
         *,
+        machines: Optional[Iterable[str]] = None,
         action_modules: Iterable[str] = (),
         actions: Optional[dict] = None,
         guards: Optional[dict] = None,
     ) -> None:
+        """`machines`, when given, are the only machines this worker claims work for — the
+        executions whose tree started from one of them (their `routing_key`); None claims all."""
         self.definitions = definitions
+        self.machines = frozenset(machines) if machines is not None else None
+        if self.machines is not None and not self.machines:
+            raise ValueError("machines names no machine: pass None to claim them all")
         self.action_modules = tuple(action_modules)
         self.actions, self.guards = actions, guards
         _register_submachines(self.definitions)
@@ -613,12 +622,17 @@ class WorkerLogic(_DefinitionLookup):
     def claim_flow(self) -> Flow:
         """Claim one message, applying the high_ratio/priority_threshold policy: with
         high_ratio>0, try priority>=threshold first, falling back to any priority so the
-        worker isn't idle when no high-priority work is available."""
+        worker isn't idle when no high-priority work is available. A worker given `machines`
+        claims only their messages."""
+        # an unfiltered worker claims as before, so a transport without routing still serves it
+        routed = {"routing_keys": self.machines} if self.machines is not None else {}
         if self.high_ratio > 0 and random.random() < self.high_ratio:
-            lease = yield from transport("claim", self.worker_id, self.visibility, self.priority_threshold)
+            lease = yield from transport(
+                "claim", self.worker_id, self.visibility, self.priority_threshold, **routed
+            )
             if lease is not None:
                 return lease
-        return (yield from transport("claim", self.worker_id, self.visibility))
+        return (yield from transport("claim", self.worker_id, self.visibility, **routed))
 
     def step_flow(self, combined_load: bool) -> Flow:
         """Process at most one message. Returns False if nothing was claimable."""
@@ -639,7 +653,9 @@ class WorkerLogic(_DefinitionLookup):
             exe = yield from store("load", execution_id)
             priority = exe.priority if exe is not None else 0
             event = engine.timeout_event(execution_id, path, fire_at)
-            yield from transport("publish", execution_id, event, priority=priority)
+            yield from transport(
+                "publish", execution_id, event, priority=priority, routing_key=routing_key(exe)
+            )
             yield from store("delete_timer", execution_id, path, fire_at)
 
         # each only publishes (the CAS happens later, when a worker routes the Timeout)

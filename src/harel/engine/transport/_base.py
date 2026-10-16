@@ -5,8 +5,9 @@ the `_PARKED` sentinel. Concrete backends live in sibling modules; the package
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Iterable, Optional, Protocol, runtime_checkable
 
+from harel.engine.schema import Names, sqlite_transport_upgrade, transport_schema
 from harel.spec.states import Event
 
 # sentinel `locked_by` for a message parked by `nack(delay>0)`: non-null (so the
@@ -18,11 +19,12 @@ _PARKED = "__parked__"
 # by arrival) with nothing in flight, and its head — its oldest message. It walks `groups` in
 # that order and stops at the first eligible one, so its cost doesn't grow with the backlog.
 # A group with nothing in flight has a free head: unlocked, or its lease or park ended.
-# Params: (min_priority, now). A template (`schema.Names.sql`).
+# Params: (min_priority, *routing_keys, now) — `{routing}` is `_routing_filter`'s. A template
+# (`schema.Names.sql`, then `_sqlite_claim`).
 _SQLITE_CLAIM_SQL = (
     "SELECT m.seq, m.group_id, m.event FROM {groups} g "
     "JOIN {messages} m ON m.seq = (SELECT MIN(seq) FROM {messages} WHERE group_id = g.group_id) "
-    "WHERE g.priority >= ? AND NOT EXISTS ("
+    "WHERE g.priority >= ?{routing} AND NOT EXISTS ("
     "  SELECT 1 FROM {messages} x WHERE x.group_id = g.group_id "
     "  AND x.locked_by IS NOT NULL AND x.lock_expiry >= ?"
     ") ORDER BY g.last_claimed_at, g.rowid LIMIT 1"
@@ -132,6 +134,53 @@ return 1
 """
 
 
+def _routing_filter(routing_keys: Optional[Iterable[str]], column: str) -> tuple[str, tuple]:
+    """The SQL condition (`AND ...`) and its params restricting a claim to `routing_keys`'
+    groups — none when None."""
+    if routing_keys is None:
+        return "", ()
+    keys = tuple(sorted(routing_keys))
+    if not keys:
+        return " AND 1 = 0", ()
+    return f" AND {column} IN ({', '.join('?' * len(keys))})", keys
+
+
+def _sqlite_claim(
+    names: Names, min_priority: int, now: float, routing_keys: Optional[Iterable[str]]
+) -> tuple[str, tuple]:
+    """The SQLite-dialect claim statement and its params."""
+    routing, keys = _routing_filter(routing_keys, "g.routing_key")
+    sql = names.sql(_SQLITE_CLAIM_SQL.replace("{routing}", "{{routing}}")).replace("{routing}", routing)
+    return sql, (min_priority, *keys, now)
+
+
+def _sqlite_create_schema(
+    prefix: str, execute: Callable[[str], Any], columns: Callable[[], list[str]]
+) -> None:
+    """Create a SQLite-dialect transport's schema: its tables, the columns a table created by an
+    earlier schema lacks (`columns()` lists the groups table's), then its indexes."""
+    statements = transport_schema("sqlite", prefix)
+    for sql in statements:
+        if sql.startswith("CREATE TABLE"):
+            execute(sql)
+    for sql in sqlite_transport_upgrade(columns(), prefix):
+        execute(sql)
+    for sql in statements:
+        if not sql.startswith("CREATE TABLE"):
+            execute(sql)
+
+
+def _refuse_routing(transport: str, routing_keys: Optional[Iterable[str]]) -> None:
+    """A transport that can't route claims by machine refuses a worker given `machines`,
+    rather than claiming every machine's messages for it."""
+    if routing_keys is not None:
+        raise NotImplementedError(
+            f"{transport} can't restrict a claim to some machines: run this worker without "
+            f"`machines`, or on a transport that routes them (in-memory, SQLite, libSQL, "
+            f"rqlite, Postgres, Mongo)"
+        )
+
+
 @dataclass
 class Lease:
     """A claimed message: the `group_id` it belongs to and the `event`, plus the
@@ -156,15 +205,27 @@ class Transport(Protocol):
     relay to deliver. Otherwise the `Start` committed to the outbox stays queued, and a later
     flush delivers it."""
 
-    def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
-        """Enqueue `event` in `group_id`'s FIFO. `priority` is stored on first publish only
-        (INSERT OR IGNORE / HSETNX semantics); subsequent publishes to the same group ignore it."""
+    def publish(
+        self, group_id: str, event: Event, priority: int = 0, routing_key: Optional[str] = None
+    ) -> None:
+        """Enqueue `event` in `group_id`'s FIFO. `priority` and `routing_key` (the machine the
+        execution's tree started from) are stored when the publish creates the group (INSERT OR
+        IGNORE / HSETNX semantics); publishes to a group that exists leave them as they are. A
+        group is deleted once drained, so every publish passes the execution's own."""
         ...
 
-    def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
+    def claim(
+        self,
+        worker_id: str,
+        visibility: float,
+        min_priority: int = 0,
+        routing_keys: Optional[frozenset[str]] = None,
+    ) -> Optional[Lease]:
         """Lease the oldest message of some group that has nothing in-flight, for
         `visibility` seconds; None if there is nothing deliverable right now.
-        Only considers groups whose `priority >= min_priority`."""
+        Only considers groups whose `priority >= min_priority` and, when `routing_keys` is
+        given, whose `routing_key` is one of them. A transport that can't restrict a claim
+        that way raises `NotImplementedError` when given `routing_keys`."""
         ...
 
     def ack(self, lease: Lease) -> None:

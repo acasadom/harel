@@ -7,8 +7,8 @@ import time
 from pathlib import Path
 from typing import Callable, Optional, Union
 
-from harel.engine.schema import DEFAULT_PREFIX, Names, transport_schema
-from harel.engine.transport._base import _PARKED, _SQLITE_CLAIM_SQL, Lease
+from harel.engine.schema import DEFAULT_PREFIX, Names
+from harel.engine.transport._base import _PARKED, Lease, _sqlite_claim, _sqlite_create_schema
 from harel.spec.states import Event
 
 
@@ -39,27 +39,35 @@ class SqliteTransport:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")  # wait for the write-lock instead of erroring
         if create_schema:
-            for sql in transport_schema("sqlite", prefix):
-                self._conn.execute(sql)
+            _sqlite_create_schema(prefix, self._conn.execute, self._group_columns)
         self._clock = clock
 
-    def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
+    def _group_columns(self) -> list[str]:
+        return [row[1] for row in self._conn.execute(f"PRAGMA table_info({self._n.groups})").fetchall()]
+
+    def publish(
+        self, group_id: str, event: Event, priority: int = 0, routing_key: Optional[str] = None
+    ) -> None:
         self._conn.execute(
             f"INSERT INTO {self._n.messages} (group_id, event) VALUES (?, ?)",
             (group_id, event.model_dump_json()),
         )
         self._conn.execute(
-            f"INSERT OR IGNORE INTO {self._n.groups} (group_id, priority) VALUES (?, ?)", (group_id, priority)
+            f"INSERT OR IGNORE INTO {self._n.groups} (group_id, priority, routing_key) VALUES (?, ?, ?)",
+            (group_id, priority, routing_key),
         )
 
-    def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
+    def claim(
+        self,
+        worker_id: str,
+        visibility: float,
+        min_priority: int = 0,
+        routing_keys: Optional[frozenset[str]] = None,
+    ) -> Optional[Lease]:
         now = self._clock()
         self._conn.execute("BEGIN IMMEDIATE")
         try:
-            row = self._conn.execute(
-                self._n.sql(_SQLITE_CLAIM_SQL),
-                (min_priority, now),
-            ).fetchone()
+            row = self._conn.execute(*_sqlite_claim(self._n, min_priority, now, routing_keys)).fetchone()
             if row is None:
                 self._conn.execute("COMMIT")
                 return None

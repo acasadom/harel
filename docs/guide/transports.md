@@ -28,8 +28,8 @@ each backend is a sibling module under `harel/engine/transport/`, with a twin un
 
 | Method | Purpose |
 | --- | --- |
-| `publish(group_id, event, priority=0)` | enqueue `event` in `group_id`'s FIFO; sets the group's priority on first publish |
-| `claim(worker_id, visibility, min_priority=0)` | lease the oldest message of some group with **nothing in flight**, for `visibility` seconds, considering only groups with `priority >= min_priority`; `None` if nothing deliverable |
+| `publish(group_id, event, priority=0, routing_key=None)` | enqueue `event` in `group_id`'s FIFO; the publish that creates the group sets its priority and its routing key (the machine its execution's tree started from) |
+| `claim(worker_id, visibility, min_priority=0, routing_keys=None)` | lease the oldest message of some group with **nothing in flight**, for `visibility` seconds, considering only groups with `priority >= min_priority` and, given `routing_keys`, a routing key among them; `None` if nothing deliverable |
 | `ack(lease)` | the message was handled — remove it, freeing its group |
 | `nack(lease, delay=0)` | return it to the queue: `delay=0` re-claimable now (retry); `delay>0` **parks** it (and blocks its group) until `delay` passes |
 | `close()` | release the connection/client |
@@ -58,6 +58,14 @@ Three mechanisms recur across the backends, which each per-backend page then spe
   this with **one ready set per priority level**). **SQS is the exception:** FIFO has no per-group
   priority, so `SqsTransport` **rejects** `priority>0` / `min_priority>0` (fail-fast) rather than
   silently ignoring them; its cross-`MessageGroupId` delivery still gives round-robin fairness.
+- **Routing by machine (`routing_keys`).** Every publish carries the routing key of the execution
+  it is for — its tree's root machine — and the publish that creates a group stores it with the
+  group (a group is deleted once drained, so the next publish creates it again). A worker given
+  `machines` claims only groups with one of them (see
+  [dedicated workers](distribution.md#dedicating-workers-to-machines)). The in-memory, SQLite,
+  libSQL, rqlite, Postgres and Mongo transports route; **Redis and SQS can't**, and raise
+  `NotImplementedError` for a claim given `routing_keys` rather than claim every machine's
+  messages for a worker meant to have only some. A claim without it works on all of them.
 
 Backends differ only in *how* they enforce per-group exclusivity: a database that has a cheap
 serialization primitive (SQLite's write-lock, Postgres's row-lock, SQS's native `MessageGroupId`)
@@ -69,15 +77,18 @@ A transport outside harel builds on `harel.engine.transport.base` (`Transport`,
 `harel.testing`:
 
 ```text
-from harel.testing import assert_transport_contract
+from harel.testing import assert_machine_routing_contract, assert_transport_contract
 
 def test_my_transport():
     assert_transport_contract(lambda clock: MyTransport(clock=clock))
+    assert_machine_routing_contract(lambda clock: MyTransport(clock=clock))
 ```
 
 `make(clock)` returns a fresh, empty transport for each check. Pass `timing=False` if it keeps
 its deadlines elsewhere than the injected clock (server-side TTLs, a queue service's visibility)
-and `priorities=False` if it has none.
+and `priorities=False` if it has none. A transport that can't route by machine checks its refusal
+with `assert_refuses_machine_routing` instead; either way it accepts `routing_key` on `publish`
+and `routing_keys` on `claim`, which the workers pass.
 
 A transport whose writes go into the store's transaction — a table on the caller's own
 connection, next to the store's — sets `shares_store_transaction = True`. `create()` then lets a

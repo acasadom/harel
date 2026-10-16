@@ -52,6 +52,12 @@ close():              the boto3 client
   (`high_ratio>0`) would otherwise be a no-op on SQS. Round-robin fairness across groups is still
   provided natively by `MessageGroupId` delivery. Use another transport for priority routing.
 
+## Routing by machine
+
+Not supported: `receive_message` can't select messages by anything but the queue. A claim given
+`routing_keys` raises `NotImplementedError`, as one given a priority floor does; a publish takes a
+`routing_key` and ignores it. A queue per machine would be the SQS way — not built.
+
 ## Async twin
 
 `AsyncSqsTransport` mirrors this over native-async aioboto3/aiobotocore — the same

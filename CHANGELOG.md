@@ -15,6 +15,17 @@
   with `DefinitionChanged`, and a worker whose file differs from the version published refuses to
   start. Before, only a change to a state an execution was parked in failed it.
 - **A file declaring a machine twice is an error** (`DslError`); before, the last one won.
+- **A transport outside harel takes two more arguments**: `publish(..., routing_key=None)` and
+  `claim(..., routing_keys=None)` (see *Added*). The workers pass `routing_key` on every publish,
+  so a transport that doesn't accept it fails; one that can't route claims raises
+  `NotImplementedError` when given `routing_keys`. `harel.testing.assert_machine_routing_contract`
+  (or `assert_refuses_machine_routing`) checks it.
+- **`SCHEMA_VERSION` 5: the transport's groups table has a `routing_key` column**, with an
+  index, and Postgres' `claim` function a fifth argument. A transport built with
+  `create_schema=True` brings its schema up to date when it starts — a SQLite, libSQL or rqlite
+  table gets the column by an `ALTER TABLE` it runs once. Where a migration tool owns the schema,
+  apply `sql_schema(dialect, prefix)` again, plus, on a SQLite-dialect table created before,
+  `schema.sqlite_transport_upgrade(columns, prefix)`'s `ALTER TABLE`.
 
 ### Added
 
@@ -43,6 +54,14 @@
   `SCHEMA_VERSION` is 4 (a `definitions` table, collection, key or DynamoDB table): a backend
   built with `create_schema=True` creates it when it starts; where a migration tool owns the
   schema, apply `sql_schema(dialect, prefix)` again.
+- **Workers dedicated to machines.** `runner.worker(machines={"fulfilment"})` — and
+  `HAREL_MACHINES=fulfilment,publishing` for `python -m harel.worker` — claims only the work of the
+  executions started from those machines: their whole tree, regions, fan-out instances and
+  invoked submachines included, since every execution carries its root machine as its
+  `routing_key`. A worker given no machines claims everything, the dedicated ones' included, so
+  it is the safety net, and a busy machine can be given capacity of its own. The in-memory,
+  SQLite, libSQL, rqlite, Postgres and Mongo transports route claims; Redis and SQS refuse a worker
+  given `machines` at its first claim rather than give it every machine's work.
 - `definition_registry([...])` builds a registry with several versions of a machine,
   `machine_version()` and **`harel hash FILE`** give a machine's version and digest, and the
   monitor shows each execution its own version, from the store when it has no file for it.

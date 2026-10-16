@@ -8,6 +8,7 @@ from typing import Any, Callable, Optional
 
 from harel.engine.schema import DEFAULT_PREFIX, Names
 from harel.engine.transport import _ACK_LUA, _CLAIM_LUA, _PUBLISH_LUA, Lease
+from harel.engine.transport._base import _refuse_routing
 from harel.spec.states import Event
 
 
@@ -60,11 +61,20 @@ class AsyncRedisTransport:
     def _now_ms(self) -> int:
         return int(self._clock() * 1000)
 
-    async def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
+    async def publish(
+        self, group_id: str, event: Event, priority: int = 0, routing_key: Optional[str] = None
+    ) -> None:
         # one atomic round-trip: push + fix priority on first publish + ready in its tier's ZSET
         await self._publish_script(keys=[], args=[self._prefix, group_id, event.model_dump_json(), priority])
 
-    async def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
+    async def claim(
+        self,
+        worker_id: str,
+        visibility: float,
+        min_priority: int = 0,
+        routing_keys: Optional[frozenset[str]] = None,
+    ) -> Optional[Lease]:
+        _refuse_routing("AsyncRedisTransport", routing_keys)
         px = max(1, int(visibility * 1000))
         now = self._now_ms()
         token = f"{worker_id}:{uuid.uuid4().hex}"

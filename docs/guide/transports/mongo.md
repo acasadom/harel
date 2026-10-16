@@ -101,6 +101,13 @@ taken. `nack(delay>0)` parks the group until the delay passes.
 
 The head of a group is the smallest `_id`; one consumer per group at a time → order preserved.
 
+## Routing by machine
+
+A group's lock document keeps the `routing_key` the publish creating it carried (`$setOnInsert`;
+re-readying a group dropped mid-publish keeps it). A claim given `routing_keys` adds
+`routing_key: {$in: […]}` to its `find_one_and_update`, served by the index
+`(routing_key, available_at)`.
+
 ## Async twin
 
 `AsyncMongoTransport` mirrors this over `motor.motor_asyncio` — awaited, the same per-group lock
