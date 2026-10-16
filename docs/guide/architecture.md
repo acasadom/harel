@@ -462,6 +462,97 @@ Timers in the distributed host: `Worker.fire_due_timers` runs on the idle path o
 due timers are fired as independent work — with coroutines, a batch of expired timers is swept
 in one round instead of sequentially.
 
+## Machine versions — which Definition runs an execution
+
+A machine is identified by its name (`definition_id`) **and its version** (`machine order version
+2`, 1 when undeclared). Each Execution carries both — `definition_id`, `definition_version` — plus
+`definition_digest`, a hash of the source of that version as it started. An execution runs on its
+version to the end; its regions, fan-out instances and inline `invoke` children are stamped with
+the same.
+
+### The digest
+
+`harel.dsl.machine_version(text, name)` hashes, as tokens (so comments and layout don't count):
+
+- the machine's own block, without its `version` clause;
+- the declarations its file shares with every machine in it — `bind`, `guard`, `event`,
+  `fragment`, `import` — in file order;
+- for each import, the same declarations of the imported file, transitively. An import counts by
+  its alias and that content, **not its path**: a published version is rebuilt from its files laid
+  out in a scratch directory, and must hash the same.
+
+It hashes the DSL text, not the compiled `Definition`: the compiled model is harel's own and
+changes between harel releases, which would read as every machine having changed. The other
+machines of a file don't count, so editing one doesn't force a bump on its neighbours. The code
+of the actions doesn't count either — it isn't versioned.
+
+### Where versions live
+
+A runner's registry (`definitions`) keys each Definition by `id@version`, and by `id` for the
+highest version it holds (`definition_registry`, `register_definition`); a new execution gets the
+`id` entry, or `create(..., version=N)`'s.
+
+The **store** is the record of every version ever published — not the filesystem, which in a
+distributed deployment differs from one process (or image) to the next, and loses the old version
+the moment a file is edited. A `DefinitionRecord` is `(definition_id, version, digest, source)`,
+`source` being `{"main": <path>, "files": {<path>: <text>}}`: the machine's file and every file it
+imports, by paths relative to the directory holding them all. `publish_definition` stores a record
+**once per `(id, version)`**, atomically — a primary key with `INSERT OR IGNORE` / `ON CONFLICT DO
+NOTHING`, `HSETNX`, a duplicate `_id`, a conditional `PutItem` — and returns the record stored, so
+the publisher compares digests: a different one is a version changed without a bump
+(`DefinitionConflict`). Publishing happens at worker startup (`harel.worker.amain`) and from `harel
+publish`; nothing in the hot path writes records.
+
+### Resolving an execution's Definition
+
+The runners' logic (`DurableLogic`, `SenderLogic`, `WorkerLogic`) share `_DefinitionLookup`, whose
+`_defn_flow(exe)` is a **flow**: it reads the store by yielding `store("load_definition", …)`, so
+the same lookup runs under `run_async` and `run_inline`, and the engine stays pure. The drivers a
+runner builds get it as their `definition_flow`, so every place a driver needs another
+execution's Definition — an outbox target, a region, the error route — goes through it.
+
+```{mermaid}
+flowchart TD
+  Start["exe: id, version v, digest d"] --> Local{"registry has id@v<br/>with digest d (or none recorded)?"}
+  Local -- yes --> UseLocal["run on the runner's own"]
+  Local -- no --> Child{"a submachine child?<br/>(definition_fqn set)"}
+  Child -- yes --> Parent["resolve the parent's Definition<br/>take submachines[fqn] at version v"]
+  Child -- no --> Cache{"version v built already?"}
+  Cache -- yes --> Built["use it"]
+  Cache -- no --> Load["store.load_definition(id, v)"]
+  Load --> Build["build from the record:<br/>bind actions= / guards=,<br/>check digest, allowed modules,<br/>actions importable"]
+  Build --> Match{"digest d?"}
+  Parent --> Match
+  Built --> Match
+  Match -- yes --> UsePub["run on the published one<br/>(warn once if the local copy differs)"]
+  Match -- no --> HasLocal{"a local copy of v?"}
+  HasLocal -- yes --> Changed["run on it: definition_problem<br/>fails it with DefinitionChanged"]
+  HasLocal -- no --> NotLoaded["raise DefinitionNotLoaded"]
+```
+
+- The common case — the runner holds the version the execution started on — costs no IO.
+- A record is built once per `(id, version)` and kept (`PublishedDefinitions`): a published
+  version never changes, so the cache needs no invalidation. Building lays the files out in a
+  temporary directory and compiles them with `definition_from_dsl_file`, binding the runner's
+  `actions=` / `guards=` (the record holds the DSL only), then checks that it hashes to the
+  record's digest, that every action module it names is allowed — the modules the runner's own
+  Definitions and `actions=` call, `action_modules=`, `HAREL_ACTION_MODULES` — and that this
+  process can import every action. A failed check is a `DefinitionNotLoaded`: the version is
+  unusable *here*, not wrong — another process may run it.
+- An execution recorded before versions existed (`definition_version` None) runs as version 1,
+  and `_run_flow` stamps the digest of the Definition it runs on the first time it drives it (also
+  while it hasn't started: nothing ran on an earlier source).
+
+### What happens where
+
+| check | where | outcome |
+|---|---|---|
+| a version published with other content | `publish_definitions` (worker startup, `harel publish`) | `DefinitionConflict`: the worker doesn't start, the pipeline stops |
+| the same version twice among a runner's files | `definition_registry` / `load_definitions` | `ValueError` / `RuntimeError` at load |
+| a machine declared twice in a file | the parser | `DslError` |
+| no Definition for the execution's version | `_defn_flow` | `DefinitionNotLoaded`: a worker logs and nacks (retried after `suspend_recheck`); a durable host raises it, and leaves that execution's due timers armed |
+| a source other than the one it started on, or its state gone | `engine.definition_problem`, before the driver runs the engine | `DefinitionChanged`: the hosted runner's error policy — FAILED (dead letter), or raised under `on_action_error="raise"`; `redrive` adopts the current digest |
+
 ## Where state is persisted (checkpoint points)
 
 | When | Call | What is written |

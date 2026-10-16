@@ -182,3 +182,28 @@ def test_suspend_then_resume_on_the_worker_stack(stack):
     final = store.load(eid)
     assert final.active_path == "C"
     assert final.context["trace"] == ["A.enter", "B.enter", "C.enter"]
+
+
+def test_the_workers_run_a_version_only_the_store_has(stack, tmp_path):
+    """A machine none of the workers has a file for: published to the store here, the workers
+    read it from there when its execution comes in."""
+    from uuid import uuid4
+
+    from harel.published import definition_records, publish_definitions
+
+    name = f"published_{uuid4().hex[:8]}"
+    path = tmp_path / f"{name}.stm"
+    path.write_text(
+        f"event Go {{}}\nmachine {name} version 3 {{\n  initial A\n  state A {{}}\n"
+        f"  final B done\n  from A to B on Go\n}}\n"
+    )
+    defn = definition_from_dsl(path.read_text(), name)
+    store, transport = build_store(), build_transport()
+    publish_definitions(store, definition_records(path))
+    runner = DistributedRunner(store, transport, {defn.id: defn})
+
+    exe = runner.create(defn.id)
+    runner.send(exe.id, Event(kind="Go"))
+    done = _await(lambda: (e := store.load(exe.id)) is not None and e.status is Status.DONE)
+    assert done, "the worker stack did not run the published version in time"
+    assert store.load(exe.id).definition_version == 3

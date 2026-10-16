@@ -384,6 +384,13 @@ so a stale copy can't recreate it.
 
 `ids_with_prefix(prefix)` `SCAN`s `exe:<prefix>*`, with the glob metacharacters in the prefix
 escaped.
+## Published definitions
+
+The published machine versions live in one hash, `harel:definitions`, one field per version
+(`<definition_id>@<version>`) holding the record's JSON. `publish_definition` is `HSETNX` — the
+field is written only if absent — followed by an `HGET` of what is stored; `load_definition` is
+an `HGET`.
+
 ## Async twin
 
 `AsyncRedisStore` ([`aio_store/redis.py`](https://github.com/acasadom/harel/blob/main/src/harel/engine/aio_store/redis.py)) is the

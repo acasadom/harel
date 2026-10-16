@@ -34,6 +34,7 @@ _INVOKE_KW = {"invoke"}  # `invoke <fqn>` references a machine (local or importe
 # offered by completion regardless of context
 KEYWORDS = [
     "machine",
+    "version",
     "fragment",
     "state",
     "orthogonal",

@@ -18,27 +18,33 @@ The monitor builds its store from the **same environment variables as the worker
 (`HAREL_STORE_BACKEND` + the backend's URL/DSN/endpoint — see [Distribution](distribution.md)). Point
 it at the store your workers share and it lists what's there. No store of its own.
 
-To draw the **statechart tree** it also needs the machine's `Definition`, which the store doesn't
-persist — only `definition_id`. Give it the `.stm` files:
+To draw the **statechart tree** it also needs the machine's `Definition` — the **version** each
+execution runs on (`definition_version`). It finds it in the `.stm` files you give it:
 
 ```bash
 harel monitor --definitions-dir ./machines   # or $HAREL_DEFINITIONS_DIR
 ```
 
-Without them the monitor still runs **data-only**: every panel works (status, context, timers,
+and, for a version those files don't have, among the versions **published** in the store (see
+[changing a machine](durability.md#changing-a-machine-with-executions-in-flight)) — so an
+execution still on version 1 is drawn with version 1, and its DSL source shown, after the files
+moved on to version 2. Nothing it builds from the store is run: the monitor runs no actions.
+
+Without either the monitor still runs **data-only**: every panel works (status, context, timers,
 history), but the tree shows a placeholder and `cancel` is disabled (it needs the Definition to
 decide cooperative-vs-forceful — `terminate`/`suspend`/`resume` still work).
 
 ## The two screens
 
-**List** — a table of executions (id, definition, status, outcome, active state, version),
+**List** — a table of executions (id, definition, status, outcome, active state, and the record's
+write `version` — its CAS counter, not the machine's version),
 auto-refreshing. Keys: `enter` opens the selected execution, `/` filters by a free substring
 (id/definition/status), `r` forces a refresh, `p` pauses/resumes auto-refresh, `q` quits.
 
 **Detail** — opened with `enter`. The left column shows the **statechart tree** with the **active
 state highlighted** (ancestors bolded; orthogonal regions and `invoke` children annotated with their
-join outcome), and a collapsible **DSL source** panel underneath (the machine's `.stm`, folded by
-default — needs `--definitions-dir`). The right column is a status header, a row of control buttons,
+join outcome), and a collapsible **DSL source** panel underneath (the `.stm` of the version the execution runs, folded
+by default — from `--definitions-dir`, or from the store when it was published). The right column is a status header, a row of control buttons,
 and a navigable **execution timeline** over a per-step **detail**.
 
 Navigate the timeline (`↑/↓`) and each step shows its **event in, transition, guards, actions, what

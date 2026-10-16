@@ -452,6 +452,13 @@ It returns True if the Execution was deleted. If no row exists under the id at a
 
 `ids_with_prefix(prefix)` finds `{"_id": {"$regex": "^" + re.escape(prefix)}}` — an anchored
 regex, which the `_id` index serves.
+## Published definitions
+
+The published machine versions live in their own collection, `harel_definitions`: one document
+per version, `_id` `<definition_id>@<version>`, holding the record's JSON. `publish_definition`
+inserts it and takes a `DuplicateKeyError` as "stored before", then reads back what is stored;
+`load_definition` is a `find_one` by `_id`.
+
 ## Async twin
 
 `AsyncMongoStore` ([`aio_store/mongo.py`](https://github.com/acasadom/harel/blob/main/src/harel/engine/aio_store/mongo.py)) is the

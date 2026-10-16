@@ -21,7 +21,7 @@ import re
 from dataclasses import dataclass
 from functools import cached_property
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DEFAULT_PREFIX = "harel"
 
 # an SQL identifier; at most 30 characters, so the longest name built from it (an index) stays
@@ -71,6 +71,11 @@ class Names:
         return f"{self.prefix}_trace"
 
     @property
+    def definitions(self) -> str:
+        """The published machine versions."""
+        return f"{self.prefix}_definitions"
+
+    @property
     def counters(self) -> str:
         """The outbox/spawn sequence allocator (the document stores)."""
         return f"{self.prefix}_counters"
@@ -110,7 +115,7 @@ class Names:
     @cached_property
     def _placeholders(self) -> dict[str, str]:
         keys = (
-            "executions outbox processed_events spawns timers trace groups messages "
+            "executions outbox processed_events spawns timers trace definitions groups messages "
             "commit_cas claim ack prefix"
         )
         return {k: getattr(self, k) for k in keys.split()}
@@ -165,6 +170,9 @@ _SQLITE_STORE = (
     "CREATE TABLE IF NOT EXISTS {trace} "
     "(execution_id TEXT NOT NULL, idx INTEGER NOT NULL, entry TEXT NOT NULL, "
     "PRIMARY KEY (execution_id, idx))",
+    "CREATE TABLE IF NOT EXISTS {definitions} "
+    "(definition_id TEXT NOT NULL, version INTEGER NOT NULL, digest TEXT NOT NULL, "
+    "source TEXT NOT NULL, published_at REAL, PRIMARY KEY (definition_id, version))",
 )
 
 _SQLITE_TRANSPORT = (
@@ -193,6 +201,9 @@ _PG_STORE = (
     "root_path TEXT NOT NULL, context TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS {trace} "
     "(execution_id TEXT NOT NULL, idx INT NOT NULL, entry TEXT NOT NULL, PRIMARY KEY (execution_id, idx))",
+    "CREATE TABLE IF NOT EXISTS {definitions} "
+    "(definition_id TEXT NOT NULL, version INT NOT NULL, digest TEXT NOT NULL, "
+    "source TEXT NOT NULL, published_at DOUBLE PRECISION, PRIMARY KEY (definition_id, version))",
     # The state-only commit fast path, the analog of Redis' CAS script: for an event that only
     # advances state (no emits/spawns/timers/trace) it does the version-CAS + write (+ dedupe) in
     # ONE server-side round-trip. Returns true on commit, false on a version conflict (no RAISE,

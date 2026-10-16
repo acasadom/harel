@@ -67,7 +67,7 @@
     },
     "keywords": {
       "name": "keyword.control.stm",
-      "match": "\\b(machine|fragment|state|orthogonal|final|initial|from|to|on|enter|exit|activity|where|select|returns|join|all|any|else|invoke|for|in|with|use|as|import|event|guard|bind|timeout|context|outcome|carry|no|history|and|or|not)\\b"
+      "match": "\\b(machine|version|fragment|state|orthogonal|final|initial|from|to|on|enter|exit|activity|where|select|returns|join|all|any|else|invoke|for|in|with|use|as|import|event|guard|bind|timeout|context|outcome|carry|no|history|and|or|not)\\b"
     },
     "types": {
       "name": "storage.type.stm",

@@ -13,6 +13,7 @@ from harel.engine.execution import Execution
 from harel.engine.schema import Names, sql_schema
 from harel.testing import (
     assert_async_listing_contract,
+    assert_definitions_contract,
     assert_listing_contract,
     assert_outbox_contract,
     assert_purge_contract,
@@ -56,6 +57,7 @@ def test_postgres_under_a_prefix():
     assert_listing_contract(store, ordered=True)
     assert_purge_contract(store)
     assert_outbox_contract(store)
+    assert_definitions_contract(store)
     _isolated(store, PostgresStore(psycopg.connect(dsn), prefix=_fresh()))
     assert_transport_contract(
         lambda clock: PostgresTransport(psycopg.connect(dsn), clock=clock, prefix=_fresh())
@@ -118,6 +120,7 @@ def test_rqlite_under_a_prefix():
     assert_listing_contract(store, ordered=True)
     assert_purge_contract(store)
     assert_outbox_contract(store)
+    assert_definitions_contract(store)
     _isolated(store, RqliteStore(url, prefix=_fresh()))
     assert_transport_contract(lambda clock: RqliteTransport(url, clock=clock, prefix=_fresh()))
 
@@ -130,6 +133,7 @@ def test_rqlite_on_a_migrated_schema():
     RqliteStore(url, prefix="setup", create_schema=False)._execute(sql_schema("sqlite", prefix))
     store = RqliteStore.from_url(url, prefix=prefix, create_schema=False)
     assert_outbox_contract(store)
+    assert_definitions_contract(store)
 
 
 def _upgrade_recipe(section: str) -> list[str]:

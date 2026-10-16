@@ -59,6 +59,10 @@ class Execution(pydantic.BaseModel):
     definition_id: str
     definition_fqn: Optional[str] = None  # set on a submachine child: its FQN, so any
     #                                       worker can (re)resolve its Definition lazily
+    definition_version: Optional[int] = None  # the machine version it runs (None: written
+    #                                           before versions existed — version 1)
+    definition_digest: Optional[str] = None  # that version's source digest when it started:
+    #                                          a different one later means an edit without a bump
     root_path: str = ""  # node this execution runs (orthogonal child => branch node)
     status: Status = Status.PENDING
     outcome: Optional[str] = None  # result label of the terminal reached (model's, e.g. "failed");

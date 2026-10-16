@@ -8,7 +8,8 @@ change). Check a backend against the protocol with `harel.testing`.
 - `ExecutionStore` / `AsyncExecutionStore` — the protocols (sync / async).
 - `Step` — the description of a commit every writer passes to `commit(..., step=)`;
 - `OutboxEntry`, `SpawnEntry`, `TimerOp` — what `pending_outbox`, `pending_spawns` return and
-  `commit` receives; `ExecutionSummary`, `ExecutionPage` — what `list_executions` returns.
+  `commit` receives; `DefinitionRecord` — a published machine version (`publish_definition`,
+  `load_definition`); `ExecutionSummary`, `ExecutionPage` — what `list_executions` returns.
 - `StoreConflict` — `commit`/`save` lost the version CAS; `ExecutionAlreadyExists`.
 - `encode_offset(offset)` / `decode_offset(cursor)` — an opaque pagination cursor over an
   integer offset (a missing or garbled cursor decodes to 0).
@@ -26,6 +27,7 @@ from harel.engine.aio_store._base import AsyncExecutionStore
 from harel.engine.execution import ExecutionPage, ExecutionSummary
 from harel.engine.store._base import (
     DEFAULT_TRACE_MAX,
+    DefinitionRecord,
     ExecutionAlreadyExists,
     ExecutionStore,
     OutboxEntry,
@@ -43,6 +45,7 @@ from harel.engine.store._base import _matches as matches
 __all__ = [
     "AsyncExecutionStore",
     "DEFAULT_TRACE_MAX",
+    "DefinitionRecord",
     "ExecutionAlreadyExists",
     "ExecutionPage",
     "ExecutionStore",

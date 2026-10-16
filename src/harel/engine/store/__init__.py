@@ -12,6 +12,7 @@ module per backend. Everything is re-exported here, so importers keep using
 """
 
 from harel.engine.store._base import (
+    DefinitionRecord,
     ExecutionAlreadyExists,
     ExecutionStore,
     OutboxEntry,
@@ -30,6 +31,7 @@ from harel.engine.store.rqlite import RqliteStore
 from harel.engine.store.sqlite import SqliteStore
 
 __all__ = [
+    "DefinitionRecord",
     "ExecutionAlreadyExists",
     "ExecutionStore",
     "OutboxEntry",

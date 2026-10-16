@@ -28,6 +28,8 @@ unbound handler / guard / value param is a hard `DslError`.
 from __future__ import annotations
 
 import copy
+import hashlib
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
@@ -351,10 +353,63 @@ def definition_from_dsl(
     """
     cfg, name, has_imports = _resolve_cfg(text, name, base_path, actions, guards)
     defn = _build(cfg, name, text, has_imports, validate=validate)
+    defn.version, defn.digest = machine_version(text, name, base_path=base_path)
+    for sub in defn.submachines.values():  # inline `invoke` targets are part of this machine's text
+        sub.version, sub.digest = defn.version, defn.digest
     if _register_imports:
         for fqn, sub in _imported_machines(text, base_path, set()).items():
             defn.submachines.setdefault(fqn, sub)
     return defn
+
+
+# a DSL token: a string literal, a comment (dropped), a word (names, numbers, dotted paths), or
+# any other single character
+_TOKEN = re.compile(r'"(?:[^"\\]|\\.)*"|#[^\n]*|//[^\n]*|[A-Za-z0-9_.]+|\S')
+
+
+def _tokens(src: str) -> list[str]:
+    return [t for t in _TOKEN.findall(src) if not t.startswith(("#", "//"))]
+
+
+def _shared_digest_parts(text: str, base: Optional[Path], seen: set[Path]) -> list[str]:
+    """The normalized declarations of `text` every machine of the file depends on (imports,
+    bindings, guards, events, fragments), followed by those of each imported file, in turn. An
+    import counts by its alias and what the file holds, not by its path: a published version is
+    rebuilt from its files laid out elsewhere."""
+    prog = parse(text)
+    imports = set(prog.import_spans)
+    parts = []
+    for start, end in prog.shared_spans:
+        tokens = _tokens(text[start:end])
+        if (start, end) in imports:  # where the file is doesn't count — its content does, below
+            tokens = [t for t in tokens if not t.startswith('"')]
+        parts.append(" ".join(tokens))
+    for path, _alias, _pos in prog.imports:
+        resolved = ((base / path) if base is not None else Path(path)).resolve()
+        if resolved in seen or not resolved.exists():
+            continue
+        seen.add(resolved)
+        parts += _shared_digest_parts(resolved.read_text(), resolved.parent, seen)
+    return parts
+
+
+def machine_version(text: str, name: str, *, base_path: Optional[Path] = None) -> tuple[int, str]:
+    """Machine `name`'s declared version (1 when it declares none) and the digest of its DSL
+    source: its own block, plus the declarations of its file and of the files it imports.
+    Comments and layout don't count, nor does the `version` clause or the other machines of
+    the file. The digest stands for the DSL only — not the code of the actions it binds."""
+    prog = parse(text)
+    if name not in prog.machine_spans:
+        raise DslError(f"no machine named {name!r}")
+    start, end = prog.machine_spans[name]
+    own = _tokens(text[start:end])
+    if len(own) > 3 and own[2] == "version":  # machine <name> version <n> { ...
+        del own[2:4]
+    h = hashlib.sha256()
+    for part in [" ".join(own), *_shared_digest_parts(text, base_path, set())]:
+        h.update(part.encode())
+        h.update(b"\0")
+    return prog.versions.get(name, 1), h.hexdigest()[:16]
 
 
 def _imported_machines(text: str, base: Optional[Path], seen: set[Path]) -> dict[str, Definition]:

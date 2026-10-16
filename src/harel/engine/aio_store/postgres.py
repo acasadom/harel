@@ -7,14 +7,17 @@ from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, Status
 from harel.engine.schema import DEFAULT_PREFIX, Names, store_schema
-from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
+from harel.engine.store import DefinitionRecord, OutboxEntry, SpawnEntry, StoreConflict, TimerOp
 from harel.engine.store._base import (
+    _DEFINITION_COLUMNS,
     _IDS_WITH_PREFIX_SQL,
     _PG_SCHEMA_LOCK,
     _PURGE_COMPANIONS_SQL,
     DEFAULT_TRACE_MAX,
     Step,
     _decode_offset,
+    _definition_params,
+    _definition_row,
     _like_prefix,
     _listing_page,
     _listing_sql_pg,
@@ -327,6 +330,31 @@ class AsyncPostgresStore:
                     await cur.execute(sql.replace("?", "%s"), (execution_id,))
             await conn.commit()
         return bool(deleted)
+
+    async def publish_definition(self, record: DefinitionRecord) -> DefinitionRecord:
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"INSERT INTO {self._n.definitions} ({_DEFINITION_COLUMNS}) VALUES (%s, %s, %s, %s, %s) "
+                    "ON CONFLICT DO NOTHING",
+                    _definition_params(record),
+                )
+            await conn.commit()
+        stored = await self.load_definition(record.definition_id, record.version)
+        assert stored is not None  # just stored, or stored before
+        return stored
+
+    async def load_definition(self, definition_id: str, version: int) -> Optional[DefinitionRecord]:
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"SELECT {_DEFINITION_COLUMNS} FROM {self._n.definitions} "
+                    "WHERE definition_id = %s AND version = %s",
+                    (definition_id, version),
+                )
+                row = await cur.fetchone()
+            await conn.commit()
+        return _definition_row(row) if row is not None else None
 
     async def close(self) -> None:
         await self._pool.close()

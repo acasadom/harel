@@ -102,6 +102,19 @@ class Program:
     # "fragment"|"machine", name) -> (line, column). Machines/fragments also carry
     # `__pos__` in their cfg; this map covers events/guards which do not.
     positions: dict[tuple[str, str], tuple[int, int]] = field(default_factory=dict)
+    # declared machine versions (a machine without `version` is absent: version 1)
+    versions: dict[str, int] = field(default_factory=dict)
+    # source spans (start, end offsets into the text) for a machine's digest: each machine
+    # block, and — in file order — the declarations every machine of the file shares
+    # (imports, bindings, guards, events, fragments)
+    machine_spans: dict[str, tuple[int, int]] = field(default_factory=dict)
+    shared_spans: list[tuple[int, int]] = field(default_factory=list)
+    import_spans: list[tuple[int, int]] = field(default_factory=list)  # parallel to `imports`
+
+
+def _span(meta: Any) -> tuple[int, int]:
+    """A declaration's (start, end) offsets into the source text."""
+    return (meta.start_pos, meta.end_pos)
 
 
 def _unquote(s: str) -> str:
@@ -243,13 +256,14 @@ class _ToProgram(Transformer):
     def binding(self, name, impl):
         return (str(name), str(impl))
 
-    def bind_block(self, *bindings):
-        return ("bind", dict(bindings))
+    @v_args(meta=True)
+    def bind_block(self, meta, bindings):
+        return ("bind", dict(bindings), _span(meta))
 
     # --- named guards ---
     @v_args(inline=True, meta=True)
     def guard_decl(self, meta, name, pred):
-        return ("guard", str(name), _pred_to_dict(pred), (meta.line, meta.column))
+        return ("guard", str(name), _pred_to_dict(pred), (meta.line, meta.column), _span(meta))
 
     def guard_atom(self, name):
         # a named guard used as a predicate atom (alone or composed in a `where`);
@@ -286,7 +300,7 @@ class _ToProgram(Transformer):
 
     @v_args(inline=True, meta=True)
     def event_decl(self, meta, name, *fields):
-        return ("event", str(name), dict(fields), (meta.line, meta.column))
+        return ("event", str(name), dict(fields), (meta.line, meta.column), _span(meta))
 
     # --- predicates ---
     @v_args(inline=True, meta=True)
@@ -533,7 +547,8 @@ class _ToProgram(Transformer):
 
     @v_args(inline=True, meta=True)
     def import_stmt(self, meta, path, alias=None):
-        return ("import", str(path), str(alias) if alias is not None else None, (meta.line, meta.column))
+        alias = str(alias) if alias is not None else None
+        return ("import", str(path), alias, (meta.line, meta.column), _span(meta))
 
     # --- containers ---
     def _assemble(self, items) -> dict:
@@ -581,9 +596,20 @@ class _ToProgram(Transformer):
 
     @v_args(inline=True, meta=True)
     def machine_decl(self, meta, name, *items):
+        version = None
+        if items and isinstance(items[0], tuple) and items[0][0] == "__version__":
+            version, items = items[0][1], items[1:]
         cfg = self._assemble(items)
         cfg["__pos__"] = (meta.line, meta.column)
-        return ("machine", str(name), cfg)
+        return ("machine", str(name), cfg, version, _span(meta))
+
+    @v_args(inline=True, meta=True)
+    def machine_version(self, meta, n):
+        if int(n) < 1:
+            raise DslError(
+                f"machine version must be a positive integer, got {n}", line=meta.line, column=meta.column
+            )
+        return ("__version__", int(n))
 
     @v_args(inline=True, meta=True)
     def fragment_decl(self, meta, name, *rest):
@@ -594,13 +620,30 @@ class _ToProgram(Transformer):
         if params:
             cfg["__params__"] = params
         cfg["__pos__"] = (meta.line, meta.column)
-        return ("fragment", str(name), cfg)
+        return ("fragment", str(name), cfg, _span(meta))
 
     def start(self, *stmts):
         prog = Program()
         for kind, *rest in stmts:
+            if kind == "machine":
+                if rest[0] in prog.machines:
+                    line, column = rest[1]["__pos__"]
+                    raise DslError(
+                        f"machine {rest[0]!r} is declared twice in this file",
+                        line=line,
+                        column=column,
+                        hint="a new version replaces the old one in its file; the store keeps the old one",
+                    )
+                prog.machines[rest[0]] = rest[1]
+                prog.positions[("machine", rest[0])] = rest[1]["__pos__"]
+                if rest[2] is not None:
+                    prog.versions[rest[0]] = rest[2]
+                prog.machine_spans[rest[0]] = rest[3]
+                continue
+            prog.shared_spans.append(rest[-1])
             if kind == "import":
                 prog.imports.append((rest[0], rest[1], rest[2]))
+                prog.import_spans.append(rest[3])
             elif kind == "bind":
                 prog.bindings.update(rest[0])
             elif kind == "guard":
@@ -609,9 +652,6 @@ class _ToProgram(Transformer):
             elif kind == "event":
                 prog.events[rest[0]] = rest[1]
                 prog.positions[("event", rest[0])] = rest[2]
-            elif kind == "machine":
-                prog.machines[rest[0]] = rest[1]
-                prog.positions[("machine", rest[0])] = rest[1]["__pos__"]
             elif kind == "fragment":
                 prog.fragments[rest[0]] = rest[1]
                 prog.positions[("fragment", rest[0])] = rest[1]["__pos__"]

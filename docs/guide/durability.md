@@ -124,24 +124,78 @@ abolish it.
 
 ## Changing a machine with executions in flight
 
-An execution stores only its `definition_id`, the machine's name — and the state it is in. It is
-driven by whatever definition the runner has under that name when the next event arrives. So a
-deploy that changes a machine changes the machine of every execution parked in it, and harel has
-no versions of a definition yet.
+A machine declares a version, and a change to it is a new version:
 
-- **Compatible changes are safe**: a state, a transition or an action added; an action's body
-  changed. A running execution carries on under the new definition.
-- **A state an execution is parked in, renamed or removed, is not.** The runner checks before it
-  drives the execution and fails it terminally (`FAILED`) with a `DefinitionChanged` error that
-  names the missing state — `process()` raises it instead under `on_action_error="raise"`. The
-  event that found it is consumed with the dead letter. Nothing retries for ever, and nothing is
-  lost: [`redrive`](control-plane.md#redrive--repairing-a-dead-letter) the execution to a state the
-  new machine has, and send the event again. `cancel` and `terminate` work on it as ever.
-- A finished or suspended execution is not touched: the check applies to one the engine would
-  drive (`RUNNING`, or `CANCELLING` on its way to a `Cancel`).
+```text
+machine order version 2 {
+  …
+}
+```
 
-To rename or remove a state safely, drain first — let the executions in it move on — or redrive
-the stragglers afterwards.
+A machine without `version` is version 1. Each execution records the version it was created with
+and the *digest* of that version's source, and runs on it to the end; so do its regions, its
+fan-out instances and the inline machines it `invoke`s. A new execution gets the highest version
+the runner has loaded, or the one `create(..., version=1)` asks for.
+
+### Published versions
+
+The store keeps every version of every machine, so an execution finds the one it runs on
+whichever process picks it up — whatever files that process has. A version is published from its
+`.stm` file, with every file it imports, and is never changed once stored:
+
+- a **worker publishes** the machines of its definitions directory when it starts. A version
+  already published is left as it is; one published **with other content** — a machine changed
+  without a new version — stops the worker before it takes any work, so the deploy fails, not the
+  executions;
+- **`harel publish DIR`** does the same from a deploy pipeline, against the store the
+  `HAREL_STORE_*` settings name (`publish_definitions(store, read_definitions(dir))` in code);
+- a runner that meets an execution of a version it hasn't loaded **reads it from the store**.
+  So `order.stm` simply moves on to version 2: the workers keep running version 1's executions
+  from the store, and no copy of the old file is kept anywhere.
+
+To change a machine, bump its version and deploy. That's all.
+
+A version read from the store is checked before it runs: it may call only the action modules the
+runner's own machines call, plus those it is told to allow — `action_modules=` on a runner,
+`HAREL_ACTION_MODULES` (comma-separated) for a worker; a module allows the modules under it. A
+record written to the store by someone else can't make a worker run code its own machines don't.
+The store keeps the machines, not the code of their actions: an action a published version
+names has to stay importable, with the same meaning, for as long as executions run on it. What
+the code binds — `definition_from_dsl(..., actions=, guards=)` rather than a `bind` in the DSL —
+isn't in the store either: give the runner the same `actions=` and `guards=`, and it binds them
+in the versions it reads from there (a handler it can't bind is reported like a version it
+hasn't got).
+
+### What harel checks
+
+- **A version edited without a bump.** The digest covers the machine's block and what its file
+  shares with it — imports (by alias and content, not by where the file lives), events, guards,
+  `bind`s, fragments — but not comments, layout or the file's other machines, nor the code of the
+  actions. Publishing such a version is refused (above). A runner whose own copy differs from the
+  one an execution started on runs it on the published one, and logs a warning; if no published
+  one matches either, the execution fails (`FAILED`) with a `DefinitionChanged` error —
+  `process()` raises it instead under `on_action_error="raise"`, and the event that found it is
+  consumed with the dead letter. `harel hash FILE` prints each machine's version and digest.
+- **A version neither this runner nor the store has.** A worker logs a `DefinitionNotLoaded`
+  error and puts the message back to be retried, for a worker that has it; a durable runner raises
+  it to the caller and leaves that execution's timers armed. The execution is not touched. A
+  published version this runner can't use is reported the same way: one that calls a module it
+  doesn't allow, or an action its code can't import — an older worker meeting a version a newer
+  deploy published, which a newer worker then runs.
+- **The same version twice with different content** among the files a runner loads is refused:
+  `load_definitions` and `definition_registry` raise. A file declares each machine once.
+- **A state an execution is parked in, renamed or removed** — which a bump prevents, but an
+  execution from before versions, or an edit without one, can still meet — fails it with a
+  `DefinitionChanged` that names the missing state.
+
+`redrive` brings back an execution failed this way: it is
+[repositioned](control-plane.md#redrive--repairing-a-dead-letter) on a state of the machine
+loaded for its version, and carries on with that source from then on. `cancel` and `terminate`
+work on it as ever. A finished or suspended execution is not checked: only one the engine would
+drive (`RUNNING`, or `CANCELLING` on its way to a `Cancel`).
+
+An execution written before versions existed runs as version 1, and takes the digest of the
+version 1 loaded the first time it is processed.
 
 ## Retry & backoff is a composite, not a feature
 

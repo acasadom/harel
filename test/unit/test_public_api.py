@@ -11,10 +11,13 @@ def test_every_exported_name_exists():
 def test_the_errors_a_caller_catches_are_exported():
     from harel.definition.events import ContextError
     from harel.engine.control import PurgeRefused
-    from harel.engine.core import ExpressionError
+    from harel.engine.core import DefinitionChanged, ExpressionError
+    from harel.engine.resolve import DefinitionNotLoaded
     from harel.engine.store import StoreConflict
 
     assert harel.ContextError is ContextError
     assert harel.ExpressionError is ExpressionError
     assert harel.StoreConflict is StoreConflict
     assert harel.PurgeRefused is PurgeRefused
+    assert harel.DefinitionChanged is DefinitionChanged
+    assert harel.DefinitionNotLoaded is DefinitionNotLoaded

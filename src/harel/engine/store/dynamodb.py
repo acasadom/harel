@@ -11,6 +11,7 @@ from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, S
 from harel.engine.schema import DEFAULT_PREFIX, Names
 from harel.engine.store._base import (
     DEFAULT_TRACE_MAX,
+    DefinitionRecord,
     OutboxEntry,
     SpawnEntry,
     Step,
@@ -114,6 +115,7 @@ class DynamoDBStore:
             ("processed", [("execution_id", "S"), ("event_id", "S")]),
             ("counters", [("id", "S")]),
             ("trace", [("execution_id", "S"), ("idx", "N")]),
+            ("definitions", [("definition_id", "S"), ("version", "N")]),
         ]
         roles = ["HASH", "RANGE"]
         for name, keys in specs:
@@ -502,6 +504,29 @@ class DynamoDBStore:
             pending = {self._t(table): [{"DeleteRequest": {"Key": k}} for k in keys[i : i + 25]]}
             while pending:
                 pending = self._db.batch_write_item(RequestItems=pending).get("UnprocessedItems") or {}
+
+    def publish_definition(self, record: DefinitionRecord) -> DefinitionRecord:
+        item = {"definition_id": record.definition_id, "version": record.version, "record": record.to_json()}
+        try:
+            self._db.put_item(
+                TableName=self._t("definitions"),
+                Item=self._raw(item),
+                ConditionExpression="attribute_not_exists(definition_id)",
+            )
+        except self._ClientError as exc:
+            if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                raise  # stored before is fine: that one stands
+        stored = self.load_definition(record.definition_id, record.version)
+        assert stored is not None  # just stored, or stored before
+        return stored
+
+    def load_definition(self, definition_id: str, version: int) -> Optional[DefinitionRecord]:
+        resp = self._db.get_item(
+            TableName=self._t("definitions"),
+            Key=self._raw({"definition_id": definition_id, "version": version}),
+            ConsistentRead=True,
+        )
+        return DefinitionRecord.from_json(self._item(resp["Item"])["record"]) if "Item" in resp else None
 
     def close(self) -> None:
         self._db.close()

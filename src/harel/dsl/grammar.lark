@@ -26,7 +26,9 @@ OPTIONAL: "?"
 TYPE: "string" | "int" | "float" | "bool" | "any"
 
 // --- machines & states -----------------------------------------------------
-machine_decl:  "machine" ref "{" item* "}"
+// `version N` (a positive integer, default 1) — bump it whenever the machine's DSL changes
+machine_decl:  "machine" ref machine_version? "{" item* "}"
+machine_version: "version" INT
 fragment_decl: "fragment" ref param_list? "{" item* "}"
 state_decl:    KIND ref "{" item* "}"
 KIND: "state" | "orthogonal"

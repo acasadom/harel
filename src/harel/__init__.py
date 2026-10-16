@@ -10,14 +10,20 @@ module layout.
 from harel.archive import JsonlArchive
 from harel.definition.events import ContextError, EventError
 from harel.definition.validate import Issue, ValidationError, validate, validate_or_raise
-from harel.dsl import DslError, definition_from_dsl, definition_from_dsl_file
+from harel.dsl import DslError, definition_from_dsl, definition_from_dsl_file, machine_version
 from harel.dsl.resolve import FileResolver, ModuleResolver, SourceResolver
 from harel.engine.control import PurgeRefused
 from harel.engine.core import DefinitionChanged, ExpressionError
 from harel.engine.durable import DurableRunner
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary
 from harel.engine.observe import AsyncObservedStore, ObservedStore
-from harel.engine.resolve import DictResolver, MachineResolver, ResolveError
+from harel.engine.resolve import (
+    DefinitionNotLoaded,
+    DictResolver,
+    MachineResolver,
+    ResolveError,
+    definition_registry,
+)
 from harel.engine.runtime import Driver
 from harel.engine.store import (
     DictStore,
@@ -43,10 +49,13 @@ __all__ = [
     "render",
     "definition_from_dsl",
     "definition_from_dsl_file",
+    "machine_version",
+    "definition_registry",
     "DslError",
     "ContextError",
     "EventError",
     "DefinitionChanged",
+    "DefinitionNotLoaded",
     "ExpressionError",
     "StoreConflict",
     "PurgeRefused",

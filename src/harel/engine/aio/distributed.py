@@ -14,11 +14,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from harel.definition.model import Definition
 from harel.engine.aio.driver import _AsyncRuntimeDriver
-from harel.engine.distributed import _defn_for, _resolve_machine
+from harel.engine.distributed import _resolve_machine
 from harel.engine.driving import TransportDriverLogic
 from harel.engine.execution import Execution
 from harel.engine.flow import Flow, run_async
@@ -79,6 +79,10 @@ class AsyncWorker(WorkerLogic):
         trace: bool = False,
         high_ratio: float = 0.0,
         priority_threshold: int = 1,
+        *,
+        action_modules: Iterable[str] = (),
+        actions: Optional[dict] = None,
+        guards: Optional[dict] = None,
     ) -> None:
         super().__init__(
             definitions,
@@ -90,6 +94,9 @@ class AsyncWorker(WorkerLogic):
             trace=trace,
             high_ratio=high_ratio,
             priority_threshold=priority_threshold,
+            action_modules=action_modules,
+            actions=actions,
+            guards=guards,
         )
         self.store = store
         self.transport = transport
@@ -191,6 +198,10 @@ class AsyncDistributedRunner(SenderLogic):
         clock: Callable[[], float] = time.time,
         resolver: Optional[MachineResolver] = None,
         trace: bool = False,
+        *,
+        action_modules: Iterable[str] = (),
+        actions: Optional[dict] = None,
+        guards: Optional[dict] = None,
     ) -> None:
         super().__init__(
             definitions,
@@ -198,6 +209,9 @@ class AsyncDistributedRunner(SenderLogic):
             resolver,
             trace,
             shares_store_transaction=getattr(transport, "shares_store_transaction", False),
+            action_modules=action_modules,
+            actions=actions,
+            guards=guards,
         )
         self.store = store
         self.transport = transport
@@ -206,7 +220,7 @@ class AsyncDistributedRunner(SenderLogic):
         return await run_async(flow, {"store": self.store, "transport": self.transport})
 
     def _transport_driver(self, defn: Definition) -> AsyncTransportDriver:
-        return AsyncTransportDriver(
+        driver = AsyncTransportDriver(
             defn,
             self.store,
             self.transport,
@@ -215,6 +229,8 @@ class AsyncDistributedRunner(SenderLogic):
             resolve_machine=lambda fqn: _resolve_machine(self.definitions, self.resolver, fqn),
             trace=self._trace,
         )
+        driver.definition_flow = self._defn_flow
+        return driver
 
     async def create(
         self,
@@ -223,6 +239,8 @@ class AsyncDistributedRunner(SenderLogic):
         execution_id: Optional[str] = None,
         priority: int = 0,
         start_on_create: bool = True,
+        *,
+        version: Optional[int] = None,
     ) -> Execution:
         """Create an Execution — never runs its actions on this caller: they run on
         whichever worker claims its `Start`. Creating is not starting (unlike
@@ -237,9 +255,11 @@ class AsyncDistributedRunner(SenderLogic):
         and parking it would deadlock its group behind the missing `Start`. With
         `start_on_create=False` that window is open on purpose: anything sent before your
         own `start(execution_id)` is discarded on arrival, not queued. `create()` and
-        `start()` are the only ways to produce a `Start` — `send()` refuses the kind."""
+        `start()` are the only ways to produce a `Start` — `send()` refuses the kind.
+
+        `version` runs that version of the machine (it must be loaded) instead of the highest."""
         return await self._serve(
-            self.create_flow(definition_id, context, execution_id, priority, start_on_create)
+            self.create_flow(definition_id, context, execution_id, priority, start_on_create, version)
         )
 
     async def start(self, execution_id: str, data: Optional[dict] = None) -> None:
@@ -285,6 +305,9 @@ class AsyncDistributedRunner(SenderLogic):
             trace=self._trace,
             high_ratio=high_ratio,
             priority_threshold=priority_threshold,
+            action_modules=self.action_modules,
+            actions=self.actions,
+            guards=self.guards,
         )
 
     # --- control plane ------------------------------------------------------
@@ -292,7 +315,7 @@ class AsyncDistributedRunner(SenderLogic):
         exe = await self.store.load(execution_id)
         if exe is None:
             raise KeyError(execution_id)
-        return self._transport_driver(_defn_for(self.definitions, self.resolver, exe)), exe
+        return self._transport_driver(await self._serve(self._defn_flow(exe))), exe
 
     async def cancel(self, execution_id: str, *, reason: Optional[dict] = None) -> None:
         await self._serve(self.cancel_flow(execution_id, reason))

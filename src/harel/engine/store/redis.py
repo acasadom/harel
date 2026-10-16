@@ -10,6 +10,7 @@ from harel.engine.schema import DEFAULT_PREFIX, Names
 from harel.engine.store._base import (
     _COMMIT_CAS_LUA,
     DEFAULT_TRACE_MAX,
+    DefinitionRecord,
     OutboxEntry,
     SpawnEntry,
     Step,
@@ -263,6 +264,15 @@ class RedisStore:
                 return current is not None
             except self._WatchError:
                 return False  # a concurrent writer moved it on
+
+    def publish_definition(self, record: DefinitionRecord) -> DefinitionRecord:
+        key, field = self._k("definitions"), f"{record.definition_id}@{record.version}"
+        self._r.hsetnx(key, field, record.to_json())
+        return DefinitionRecord.from_json(_text(self._r.hget(key, field)))
+
+    def load_definition(self, definition_id: str, version: int) -> Optional[DefinitionRecord]:
+        raw = self._r.hget(self._k("definitions"), f"{definition_id}@{version}")
+        return DefinitionRecord.from_json(_text(raw)) if raw is not None else None
 
     def close(self) -> None:
         self._r.close()

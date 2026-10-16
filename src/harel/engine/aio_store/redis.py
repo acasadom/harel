@@ -7,7 +7,7 @@ from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.schema import DEFAULT_PREFIX, Names
-from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
+from harel.engine.store import DefinitionRecord, OutboxEntry, SpawnEntry, StoreConflict, TimerOp
 from harel.engine.store._base import _COMMIT_CAS_LUA, DEFAULT_TRACE_MAX, Step, _matches
 from harel.engine.store.redis import _glob_escape, _text, _timer_owner
 from harel.spec.states import Event
@@ -246,6 +246,15 @@ class AsyncRedisStore:
                 return current is not None
             except self._WatchError:
                 return False  # a concurrent writer moved it on
+
+    async def publish_definition(self, record: DefinitionRecord) -> DefinitionRecord:
+        key, field = self._k("definitions"), f"{record.definition_id}@{record.version}"
+        await self._r.hsetnx(key, field, record.to_json())
+        return DefinitionRecord.from_json(_text(await self._r.hget(key, field)))
+
+    async def load_definition(self, definition_id: str, version: int) -> Optional[DefinitionRecord]:
+        raw = await self._r.hget(self._k("definitions"), f"{definition_id}@{version}")
+        return DefinitionRecord.from_json(_text(raw)) if raw is not None else None
 
     async def close(self) -> None:
         await self._r.aclose()

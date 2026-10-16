@@ -5,7 +5,14 @@ the DSL, resolve imports + fragment includes, and build (optionally validate) th
 same `Definition` the YAML front-end produces.
 """
 
-from harel.dsl.loader import definition_from_dsl, definition_from_dsl_file
+from harel.dsl.loader import definition_from_dsl, definition_from_dsl_file, machine_version
 from harel.dsl.parser import DslError, Program, parse
 
-__all__ = ["definition_from_dsl", "definition_from_dsl_file", "parse", "Program", "DslError"]
+__all__ = [
+    "definition_from_dsl",
+    "definition_from_dsl_file",
+    "machine_version",
+    "parse",
+    "Program",
+    "DslError",
+]

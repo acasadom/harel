@@ -41,6 +41,7 @@ tutorial/14-validation
 tutorial/15-deferred-events
 tutorial/16-on-error
 tutorial/17-context
+tutorial/18-versions
 ```
 
 ## Operations & reference

@@ -96,6 +96,7 @@ def _commit_status_flow(
     clear_error: bool = False,
     clear_history: bool = False,
     rearm_ttl_of: Optional[Definition] = None,
+    adopt: Optional[Definition] = None,
     clock: Callable[[], float] = time.time,
     command: str,
 ) -> Flow:
@@ -111,7 +112,8 @@ def _commit_status_flow(
     reposition/clear the dead-letter reason/discard stale history in the same write
     (used by `redrive` — a level whose own `on_exit` raised never got to record its
     own history entry, even though descendants that exited cleanly earlier in the
-    same cascade did, so a partial, inconsistent history is worse than none)."""
+    same cascade did, so a partial, inconsistent history is worse than none). `adopt`
+    moves the Execution onto that Definition's source (its version and digest)."""
     for _ in range(_RETRIES):
         exe = yield from _store("load", execution_id)
         if exe is None:
@@ -130,6 +132,8 @@ def _commit_status_flow(
             exe.error = None
         if clear_history:
             exe.history.clear()
+        if adopt is not None:
+            exe.definition_version, exe.definition_digest = adopt.version, adopt.digest
         timers: tuple[TimerOp, ...] = ()
         delay = engine.ttl_delay(rearm_ttl_of, exe) if rearm_ttl_of is not None else None
         if delay is not None:  # the machine's `ttl` restarts from this write
@@ -318,7 +322,9 @@ def redrive_flow(
     its own history entry, even though a descendant that exited cleanly earlier in
     the same cascade did — that partial, inconsistent history is discarded rather
     than risking a later history re-entry restoring the pre-crash position instead
-    of wherever you just redrove to. No-op if not FAILED. Like `resume`, does not
+    of wherever you just redrove to. The execution takes `defn`'s source digest — a
+    redrive is how one that failed on a changed machine (`DefinitionChanged`) carries
+    on with it. No-op if not FAILED. Like `resume`, does not
     drain automatic transitions inline — the next event/timer picks that up normally.
 
     Refuses (`ValueError`, see `_validate_redrive_target`) a target outside this
@@ -344,6 +350,7 @@ def redrive_flow(
         clear_error=True,
         clear_history=True,
         rearm_ttl_of=defn,
+        adopt=defn,  # placed by hand on this source: it runs on it from now on
         clock=clock,
         command="redrive",
     )

@@ -8,7 +8,7 @@ from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.schema import DEFAULT_PREFIX, Names
-from harel.engine.store import OutboxEntry, SpawnEntry, StoreConflict, TimerOp
+from harel.engine.store import DefinitionRecord, OutboxEntry, SpawnEntry, StoreConflict, TimerOp
 from harel.engine.store._base import DEFAULT_TRACE_MAX, Step, _decode_offset, _encode_offset, _matches
 from harel.engine.store.dynamodb import _PURGE_PARTITIONS
 from harel.spec.states import Event
@@ -100,6 +100,7 @@ class AsyncDynamoDBStore:
             ("processed", [("execution_id", "S"), ("event_id", "S")]),
             ("counters", [("id", "S")]),
             ("trace", [("execution_id", "S"), ("idx", "N")]),
+            ("definitions", [("definition_id", "S"), ("version", "N")]),
         ]
         roles = ["HASH", "RANGE"]
         for name, keys in specs:
@@ -500,6 +501,29 @@ class AsyncDynamoDBStore:
                 pending = (await self._db.batch_write_item(RequestItems=pending)).get(
                     "UnprocessedItems"
                 ) or {}
+
+    async def publish_definition(self, record: DefinitionRecord) -> DefinitionRecord:
+        item = {"definition_id": record.definition_id, "version": record.version, "record": record.to_json()}
+        try:
+            await self._db.put_item(
+                TableName=self._t("definitions"),
+                Item=self._raw(item),
+                ConditionExpression="attribute_not_exists(definition_id)",
+            )
+        except self._ClientError as exc:
+            if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                raise  # stored before is fine: that one stands
+        stored = await self.load_definition(record.definition_id, record.version)
+        assert stored is not None  # just stored, or stored before
+        return stored
+
+    async def load_definition(self, definition_id: str, version: int) -> Optional[DefinitionRecord]:
+        resp = await self._db.get_item(
+            TableName=self._t("definitions"),
+            Key=self._raw({"definition_id": definition_id, "version": version}),
+            ConsistentRead=True,
+        )
+        return DefinitionRecord.from_json(self._item(resp["Item"])["record"]) if "Item" in resp else None
 
     async def close(self) -> None:
         # release only a client we own (created via create()); an injected client is the

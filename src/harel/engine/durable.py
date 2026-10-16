@@ -23,7 +23,7 @@ a running event loop is refused with a clear error, in either mode).
 from __future__ import annotations
 
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from harel.definition.model import Definition
 from harel.engine.aio import facade
@@ -59,10 +59,16 @@ class DurableRunner:
         *,
         execution: str = "background",
         on_action_error: str = "fail",
+        action_modules: Iterable[str] = (),
+        actions: Optional[dict] = None,
+        guards: Optional[dict] = None,
     ) -> None:
         """`execution` is `"background"` or `"inline"` (see the module docstring);
         `on_action_error` is `"fail"` (dead-letter the execution) or `"raise"` (the
-        exception reaches the caller, and that step isn't committed)."""
+        exception reaches the caller, and that step isn't committed). A machine version read
+        from the store (see `harel.published`) binds its handlers and guards with `actions` and
+        `guards`, as `definition_from_dsl` does, and may call the modules (or packages) in
+        `action_modules` besides those `definitions` and `actions` call."""
         check_execution(execution, ("store", store))
         self.store = store  # kept so callers can introspect the same store object
         self.definitions = definitions
@@ -72,15 +78,44 @@ class DurableRunner:
         self._inline: Optional[_InlineDurable] = None
         self._async: Optional[AsyncDurableRunner] = None
         if execution == "inline":
-            self._inline = _InlineDurable(store, definitions, clock, resolver, trace, on_action_error)
+            self._inline = _InlineDurable(
+                store,
+                definitions,
+                clock,
+                resolver,
+                trace,
+                on_action_error,
+                action_modules=action_modules,
+                actions=actions,
+                guards=guards,
+            )
         else:
             # build the async runner ON the shared portal loop (so async backends bind their
             # connection pools to that loop); a sync store is adapted to the async interface
-            self._async = facade.run(self._build, store, definitions, clock, resolver, trace, on_action_error)
+            self._async = facade.run(
+                self._build,
+                store,
+                definitions,
+                clock,
+                resolver,
+                trace,
+                on_action_error,
+                tuple(action_modules),
+                actions,
+                guards,
+            )
 
     @staticmethod
     async def _build(
-        store, definitions, clock, resolver, trace=False, on_action_error="fail"
+        store,
+        definitions,
+        clock,
+        resolver,
+        trace=False,
+        on_action_error="fail",
+        action_modules=(),
+        actions=None,
+        guards=None,
     ) -> AsyncDurableRunner:
         return AsyncDurableRunner(
             facade.as_async_store(store),
@@ -89,6 +124,9 @@ class DurableRunner:
             resolver,
             trace=trace,
             on_action_error=on_action_error,
+            action_modules=action_modules,
+            actions=actions,
+            guards=guards,
         )
 
     def _do(self, name: str, *args: Any, **kwargs: Any) -> Any:
@@ -104,6 +142,8 @@ class DurableRunner:
         context: Optional[dict] = None,
         execution_id: Optional[str] = None,
         priority: int = 0,
+        *,
+        version: Optional[int] = None,
     ) -> Execution:
         """Create, start and persist a new Execution; return its committed state.
 
@@ -111,9 +151,10 @@ class DurableRunner:
         id) instead of a generated one.  Raises `ExecutionAlreadyExists` if that id is
         already in the store.  `priority` (0–4) is stored on the Execution but has no effect
         here — it controls transport claim weighting only under `DistributedRunner` (this
-        single-process runner has no transport to weight).
+        single-process runner has no transport to weight). `version` runs that version of
+        the machine (it must be loaded) instead of the highest.
         """
-        return self._do("create", definition_id, context, execution_id, priority)
+        return self._do("create", definition_id, context, execution_id, priority, version=version)
 
     def process(self, execution_id: str, event: Event) -> Execution:
         """Load a persisted Execution, feed it one event, return the committed state."""

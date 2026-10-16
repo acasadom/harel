@@ -445,6 +445,14 @@ no row at its version: the multi-statement path only inserts when `old == 0`, an
 `harel_commit_cas` returns false, so it raises `StoreConflict` instead of recreating the row.
 
 `ids_with_prefix(prefix)` is the same escaped `LIKE` query as the SQLite family's, with `%s`.
+## Published definitions
+
+The published machine versions live in `harel_definitions` — `(definition_id, version)`
+primary key, `digest`, `source` (JSON text) and `published_at` (`DOUBLE PRECISION`).
+`publish_definition` is `INSERT … ON CONFLICT DO NOTHING`, so of two publishers of one version
+only the first stores it, and then reads back what is stored; `load_definition` is a primary-key
+lookup. Neither touches an execution's commit.
+
 ## Async twin
 
 `AsyncPostgresStore` (in `harel/engine/aio_store/postgres.py`) is the async mirror, byte-for-byte the

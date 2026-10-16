@@ -10,6 +10,7 @@ from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, S
 from harel.engine.schema import DEFAULT_PREFIX, Names
 from harel.engine.store._base import (
     DEFAULT_TRACE_MAX,
+    DefinitionRecord,
     OutboxEntry,
     SpawnEntry,
     Step,
@@ -56,6 +57,7 @@ class MongoStore:
         names = Names(prefix)
         self._exes = self._db[names.executions]
         self._counters = self._db[names.counters]
+        self._defs = self._db[names.definitions]
         self._after = ReturnDocument.AFTER
         self._DuplicateKeyError = DuplicateKeyError
         self.trace_max = DEFAULT_TRACE_MAX
@@ -297,6 +299,20 @@ class MongoStore:
             {"outbox.target_id": execution_id}, {"$pull": {"outbox": {"target_id": execution_id}}}
         )
         return bool(res.deleted_count)
+
+    def publish_definition(self, record: DefinitionRecord) -> DefinitionRecord:
+        key = f"{record.definition_id}@{record.version}"
+        try:
+            self._defs.insert_one({"_id": key, "record": record.to_json()})
+        except self._DuplicateKeyError:
+            pass  # stored before: that one stands
+        stored = self.load_definition(record.definition_id, record.version)
+        assert stored is not None  # just stored, or stored before
+        return stored
+
+    def load_definition(self, definition_id: str, version: int) -> Optional[DefinitionRecord]:
+        doc = self._defs.find_one({"_id": f"{definition_id}@{version}"})
+        return DefinitionRecord.from_json(doc["record"]) if doc is not None else None
 
     def close(self) -> None:
         self._client.close()

@@ -17,7 +17,7 @@ import inspect
 import logging
 import random
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from harel import engine
 from harel.definition.events import check_context, check_event, with_defaults
@@ -26,7 +26,13 @@ from harel.engine import control
 from harel.engine.driving import DriverLogic, FailOnActionError, TransportDriverLogic, store, transport
 from harel.engine.execution import Execution, Status, stamp
 from harel.engine.flow import Flow, parallel
-from harel.engine.resolve import MachineResolver, ResolveError
+from harel.engine.resolve import (
+    DefinitionNotLoaded,
+    MachineResolver,
+    ResolveError,
+    find_definition,
+    register_definition,
+)
 from harel.engine.store import Step, StoreConflict
 from harel.spec.states import Event
 
@@ -60,9 +66,10 @@ class _HostedTransportDriverLogic(FailOnActionError, TransportDriverLogic):
 
 def _register_submachines(definitions: dict) -> None:
     """Fold every registered Definition's inline `invoke` targets into `definitions`
-    by id (= their synthetic FQN), so they resolve without an external resolver."""
+    by id (= their synthetic FQN) and version, so they resolve without an external resolver."""
     for defn in list(definitions.values()):
-        definitions.update({s.id: s for s in defn.submachines.values()})
+        for sub in defn.submachines.values():
+            register_definition(definitions, sub)
 
 
 def _resolve_machine(definitions: dict, resolver: Optional[MachineResolver], fqn: str) -> Definition:
@@ -74,26 +81,118 @@ def _resolve_machine(definitions: dict, resolver: Optional[MachineResolver], fqn
     if resolver is None:
         raise ResolveError(f"invoke {fqn!r} but this runner has no machine resolver")
     defn = resolver.resolve(fqn)
-    definitions[defn.id] = defn
+    register_definition(definitions, defn)
     return defn
 
 
-def _defn_for(definitions: dict, resolver: Optional[MachineResolver], exe: Execution) -> Definition:
-    """The Definition to drive `exe`: from the registry, or — for a submachine child
-    whose Definition this worker has not built yet — lazily resolved by its persisted
-    FQN (the spawning worker may be a different process)."""
-    defn = definitions.get(exe.definition_id)
-    if defn is None and exe.definition_fqn is not None:
-        defn = _resolve_machine(definitions, resolver, exe.definition_fqn)
+def _find_local(
+    definitions: dict, resolver: Optional[MachineResolver], exe: Execution
+) -> Optional[Definition]:
+    """The Definition of `exe`'s version this runner holds: in the registry, or — for a submachine
+    child whose Definition this worker has not built yet — resolved by its persisted FQN (the
+    spawning worker may be a different process). None when it has none."""
+    version = exe.definition_version or 1
+    if find_definition(definitions, exe.definition_id, version) is None and exe.definition_fqn is not None:
+        try:
+            _resolve_machine(definitions, resolver, exe.definition_fqn)
+        except ResolveError:
+            return None
+    return find_definition(definitions, exe.definition_id, version)
+
+
+class _DefinitionLookup:
+    """How a runner finds the Definition an execution runs on (`_defn_flow`): its own — the
+    registry it was given — when that is the version and source the execution started on, else
+    the version published in the store (see `harel.published`), which then may call only the
+    action modules the runner's own definitions call, plus `action_modules` — with its handlers and
+    guards bound by `actions` and `guards`, as `definition_from_dsl` binds them."""
+
+    definitions: dict[str, Definition]
+    resolver: Optional[MachineResolver]
+    action_modules: tuple[str, ...] = ()
+    actions: Optional[dict] = None
+    guards: Optional[dict] = None
+    _published: Any = None
+
+    def _published_definitions(self) -> Any:
+        if self._published is None:
+            from harel.published import PublishedDefinitions, allowed_action_modules
+
+            own = allowed_action_modules(list(self.definitions.values()), self.action_modules)
+            self._published = PublishedDefinitions(own, actions=self.actions, guards=self.guards)
+        return self._published
+
+    def _defn_flow(self, exe: Execution) -> Flow:
+        """The Definition to drive `exe` with. Raises `DefinitionNotLoaded` when neither this
+        runner nor the store has its version."""
+        version = exe.definition_version or 1
+        local = _find_local(self.definitions, self.resolver, exe)
+        if local is not None and (local.digest is None or exe.definition_digest in (None, local.digest)):
+            return local
+        published = yield from self._published_flow(exe, version)
+        if published is not None and exe.definition_digest in (None, published.digest):
+            seen = self._published_definitions().warned
+            if local is not None and (exe.definition_id, version) not in seen:
+                seen.add((exe.definition_id, version))
+                logger.warning(
+                    "machine %r version %d here differs from the published one, which execution %s "
+                    "started on: running it on the published one",
+                    exe.definition_id,
+                    version,
+                    exe.id,
+                )
+            return published
+        if local is not None:
+            return local  # a source the execution didn't start on: `definition_problem` says so
+        raise DefinitionNotLoaded(
+            f"execution {exe.id!r} runs machine {exe.definition_id!r} version {version}, which this "
+            f"runner hasn't loaded and the store hasn't published"
+        )
+
+    def _published_flow(self, exe: Execution, version: int) -> Flow:
+        """`exe`'s version as published: a machine's own record, or — for a submachine child —
+        what its parent's Definition holds under the child's FQN."""
+        if exe.definition_fqn is not None:
+            if exe.parent_id is None:
+                return None
+            parent = yield from store("load", exe.parent_id)
+            if parent is None:
+                return None
+            sub = (yield from self._defn_flow(parent)).submachines.get(exe.definition_fqn)
+            return sub if sub is not None and sub.version == version else None
+        published = self._published_definitions()
+        built = published.get(exe.definition_id, version)
+        if built is not None:
+            return built
+        record = yield from store("load_definition", exe.definition_id, version)
+        if record is None:
+            return None
+        try:
+            return published.build(record)
+        except Exception as exc:
+            raise DefinitionNotLoaded(
+                f"execution {exe.id!r} runs machine {exe.definition_id!r} version {version}, whose "
+                f"published definition this runner can't use: {exc}"
+            ) from exc
+
+
+def _new_defn(definitions: dict, definition_id: str, version: Optional[int]) -> Definition:
+    """The Definition a new execution of `definition_id` runs: `version`, else the highest."""
+    defn = (
+        definitions.get(definition_id)
+        if version is None
+        else find_definition(definitions, definition_id, version)
+    )
     if defn is None:
-        raise KeyError(exe.definition_id)
+        which = repr(definition_id) if version is None else f"{definition_id!r} version {version}"
+        raise KeyError(f"unknown definition_id {which}")
     return defn
 
 
 ACTION_ERROR_POLICIES = ("fail", "raise")
 
 
-class DurableLogic:
+class DurableLogic(_DefinitionLookup):
     """The durable host: drives an Execution's events inline, checkpointing at every event
     boundary. An action error nothing in the model handles is, by `on_action_error`:
 
@@ -111,6 +210,10 @@ class DurableLogic:
         resolver: Optional[MachineResolver] = None,
         trace: bool = False,
         on_action_error: str = "fail",
+        *,
+        action_modules: Iterable[str] = (),
+        actions: Optional[dict] = None,
+        guards: Optional[dict] = None,
     ) -> None:
         if on_action_error not in ACTION_ERROR_POLICIES:
             raise ValueError(
@@ -121,19 +224,23 @@ class DurableLogic:
         self._clock = clock
         self.resolver = resolver
         self._trace = trace
+        self.action_modules = tuple(action_modules)
+        self.actions, self.guards = actions, guards
         self._driver_class = _HostedDriverLogic if on_action_error == "fail" else DriverLogic
 
     def _resolve_machine(self, fqn: str) -> Definition:
         return _resolve_machine(self.definitions, self.resolver, fqn)
 
-    def _driver_logic(self, definition_id: str) -> DriverLogic:
-        return self._driver_class(
-            self.definitions[definition_id],
+    def _driver_logic(self, defn: Definition) -> DriverLogic:
+        driver = self._driver_class(
+            defn,
             clock=self._clock,
             definitions=self.definitions,
             resolve_machine=self._resolve_machine,
             trace=self._trace,
         )
+        driver.definition_flow = self._defn_flow
+        return driver
 
     def _loaded_flow(self, execution_id: str) -> Flow:
         loaded = yield from store("load", execution_id)
@@ -146,16 +253,19 @@ class DurableLogic:
         context: Optional[dict] = None,
         execution_id: Optional[str] = None,
         priority: int = 0,
+        version: Optional[int] = None,
     ) -> Flow:
         if execution_id is not None and (yield from store("load", execution_id)) is not None:
             from harel.engine.store import ExecutionAlreadyExists
 
             raise ExecutionAlreadyExists(execution_id)
-        driver = self._driver_logic(definition_id)
+        driver = self._driver_logic(_new_defn(self.definitions, definition_id, version))
         context = with_defaults(driver.defn.context_schema, dict(context or {}))
         check_context(driver.defn.context_schema, context)
         exe = Execution(
             definition_id=definition_id,
+            definition_version=driver.defn.version,
+            definition_digest=driver.defn.digest,
             context=context,
             priority=priority,
             **({"id": execution_id} if execution_id is not None else {}),
@@ -167,13 +277,13 @@ class DurableLogic:
         exe = yield from store("load", execution_id)
         if exe is None:
             raise KeyError(execution_id)
-        driver = self._driver_logic(exe.definition_id)
+        driver = self._driver_logic((yield from self._defn_flow(exe)))
         check_event(driver.defn.events, event.kind, event.data)  # before anything runs
         yield from driver.inject_flow(exe, event)
         return (yield from self._loaded_flow(execution_id))
 
     def recover_flow(self, definition_id: str) -> Flow:
-        yield from self._driver_logic(definition_id)._flush_flow()
+        yield from self._driver_logic(self.definitions[definition_id])._flush_flow()
 
     def fire_due_timers_flow(self) -> Flow:
         # one at a time: delivering a timeout commits a CAS write on the execution, and two
@@ -184,8 +294,14 @@ class DurableLogic:
             if exe is not None and exe.status is Status.SUSPENDED:
                 continue  # left armed: it fires once resumed (the worker path parks it the same way)
             if exe is not None and exe.definition_id in self.definitions:
+                try:
+                    defn = yield from self._defn_flow(exe)
+                except DefinitionNotLoaded:
+                    # left armed for a runner that has its version; the other timers still fire
+                    logger.warning("timer %s of execution %s not fired", path, execution_id, exc_info=True)
+                    continue
                 event = engine.timeout_event(execution_id, path, fire_at)
-                yield from self._driver_logic(exe.definition_id)._deliver_timeout_flow(execution_id, event)
+                yield from self._driver_logic(defn)._deliver_timeout_flow(execution_id, event)
             yield from store("delete_timer", execution_id, path, fire_at)
             fired += 1
         return fired
@@ -195,7 +311,7 @@ class DurableLogic:
         exe = yield from store("load", execution_id)
         if exe is None:
             raise KeyError(execution_id)
-        driver = self._driver_logic(exe.definition_id)
+        driver = self._driver_logic((yield from self._defn_flow(exe)))
         yield from control.cancel_flow(driver.defn, execution_id, reason=reason, clock=self._clock)
         yield from driver._flush_flow()  # deliver the injected Cancel inline (runs the cleanup)
         return (yield from self._loaded_flow(execution_id))
@@ -219,12 +335,12 @@ class DurableLogic:
         exe = yield from store("load", execution_id)
         if exe is None:
             raise KeyError(execution_id)
-        driver = self._driver_logic(exe.definition_id)
+        driver = self._driver_logic((yield from self._defn_flow(exe)))
         yield from control.redrive_flow(driver.defn, execution_id, target_path, clock=self._clock)
         return (yield from self._loaded_flow(execution_id))
 
 
-class SenderLogic:
+class SenderLogic(_DefinitionLookup):
     """The distributed runner's writing side: create an Execution and queue its `Start`,
     start a deferred one, send an event, and the control plane. It never runs a machine's
     actions — a worker does, when it claims what this queued."""
@@ -236,6 +352,10 @@ class SenderLogic:
         resolver: Optional[MachineResolver] = None,
         trace: bool = False,
         shares_store_transaction: bool = False,
+        *,
+        action_modules: Iterable[str] = (),
+        actions: Optional[dict] = None,
+        guards: Optional[dict] = None,
     ) -> None:
         """`shares_store_transaction`: the transport writes in the store's transaction (see
         `Transport`), so a failed `Start` publish reaches the caller."""
@@ -245,15 +365,19 @@ class SenderLogic:
         self._clock = clock
         self._trace = trace
         self._shares_store_transaction = shares_store_transaction
+        self.action_modules = tuple(action_modules)
+        self.actions, self.guards = actions, guards
 
     def _transport_logic(self, defn: Definition) -> TransportDriverLogic:
-        return _HostedTransportDriverLogic(
+        logic = _HostedTransportDriverLogic(
             defn,
             clock=self._clock,
             definitions=self.definitions,
             resolve_machine=lambda fqn: _resolve_machine(self.definitions, self.resolver, fqn),
             trace=self._trace,
         )
+        logic.definition_flow = self._defn_flow
+        return logic
 
     def create_flow(
         self,
@@ -262,23 +386,25 @@ class SenderLogic:
         execution_id: Optional[str] = None,
         priority: int = 0,
         start_on_create: bool = True,
+        version: Optional[int] = None,
     ) -> Flow:
         if execution_id is not None and (yield from store("load", execution_id)) is not None:
             from harel.engine.store import ExecutionAlreadyExists
 
             raise ExecutionAlreadyExists(execution_id)
-        if definition_id not in self.definitions:
-            # fail now, in the caller's own stack: a bad id must not persist a PENDING record
-            # that later dies (or loops) on whichever worker claims its Start. Checked after
-            # the execution_id collision, so a caller retrying with a bad definition_id still
-            # learns about an id collision first.
-            raise KeyError(f"unknown definition_id {definition_id!r}")
+        # fail now, in the caller's own stack: a bad id must not persist a PENDING record
+        # that later dies (or loops) on whichever worker claims its Start. Checked after
+        # the execution_id collision, so a caller retrying with a bad definition_id still
+        # learns about an id collision first.
+        defn = _new_defn(self.definitions, definition_id, version)
         # a required field may still come with `start(data=...)` when the start is deferred
-        schema = self.definitions[definition_id].context_schema
+        schema = defn.context_schema
         context = with_defaults(schema, dict(context or {}))
         check_context(schema, context, check_required=start_on_create)
         exe = Execution(
             definition_id=definition_id,
+            definition_version=defn.version,
+            definition_digest=defn.digest,
             context=context,
             priority=priority,
             **({"id": execution_id} if execution_id is not None else {}),
@@ -345,7 +471,7 @@ class SenderLogic:
                 exe.status.value,
             )
             return
-        defn = _defn_for(self.definitions, self.resolver, exe)
+        defn = yield from self._defn_flow(exe)
         check_context(defn.context_schema, {**exe.context, **(data or {})})
         yield from self._persist_start_flow(exe, data, cause="start")
 
@@ -358,7 +484,7 @@ class SenderLogic:
             )
         exe = yield from store("load", execution_id)
         if exe is not None:  # checked in the caller's stack: a malformed event never queues
-            check_event(_defn_for(self.definitions, self.resolver, exe).events, event.kind, event.data)
+            check_event((yield from self._defn_flow(exe)).events, event.kind, event.data)
         priority = exe.priority if exe is not None else 0
         yield from transport("publish", execution_id, event, priority=priority)
 
@@ -367,7 +493,7 @@ class SenderLogic:
         exe = yield from store("load", execution_id)
         if exe is None:
             raise KeyError(execution_id)
-        return self._transport_logic(_defn_for(self.definitions, self.resolver, exe)), exe
+        return self._transport_logic((yield from self._defn_flow(exe))), exe
 
     def cancel_flow(self, execution_id: str, reason: Optional[dict] = None) -> Flow:
         logic, exe = yield from self._logic_for_flow(execution_id)
@@ -391,7 +517,7 @@ class SenderLogic:
         yield from control.redrive_flow(logic.defn, execution_id, target_path, clock=self._clock)
 
 
-class WorkerLogic:
+class WorkerLogic(_DefinitionLookup):
     """What a worker does with the transport: claim a message (applying the priority policy)
     and handle it — load, dedupe, route by status, run the engine, ack or nack — and fire
     the due timers by publishing them."""
@@ -407,8 +533,14 @@ class WorkerLogic:
         trace: bool = False,
         high_ratio: float = 0.0,
         priority_threshold: int = 1,
+        *,
+        action_modules: Iterable[str] = (),
+        actions: Optional[dict] = None,
+        guards: Optional[dict] = None,
     ) -> None:
         self.definitions = definitions
+        self.action_modules = tuple(action_modules)
+        self.actions, self.guards = actions, guards
         _register_submachines(self.definitions)
         self.resolver = resolver
         self.worker_id = worker_id
@@ -419,14 +551,16 @@ class WorkerLogic:
         self.high_ratio = high_ratio
         self.priority_threshold = priority_threshold
 
-    def _transport_logic(self, exe: Execution) -> TransportDriverLogic:
-        return _HostedTransportDriverLogic(
-            _defn_for(self.definitions, self.resolver, exe),
+    def _transport_logic_flow(self, exe: Execution) -> Flow:
+        logic = _HostedTransportDriverLogic(
+            (yield from self._defn_flow(exe)),
             clock=self._clock,
             definitions=self.definitions,
             resolve_machine=lambda fqn: _resolve_machine(self.definitions, self.resolver, fqn),
             trace=self._trace,
         )
+        logic.definition_flow = self._defn_flow
+        return logic
 
     def _load_for_event_flow(self, execution_id: str, event_id: str, combined: bool) -> Flow:
         """Load the Execution and its dedupe flag: one round-trip if the store offers
@@ -468,7 +602,8 @@ class WorkerLogic:
             yield from transport("ack", lease)
             return True
         try:
-            yield from self._transport_logic(exe).route_flow(exe, lease.event)
+            logic = yield from self._transport_logic_flow(exe)
+            yield from logic.route_flow(exe, lease.event)
         except StoreConflict:
             yield from transport("nack", lease)
             return True

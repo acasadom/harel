@@ -188,6 +188,10 @@ class Definition:
     #                            is expired (`Expired`); None = no inactivity limit
     context_schema: dict[str, FieldSpec] = field(default_factory=dict)  # the context's declared,
     #                                          typed fields (empty => an untyped context)
+    version: int = 1  # the machine's declared version (`machine m version N`); an execution
+    #                   keeps the version it was created with
+    digest: Optional[str] = None  # a hash of the machine's DSL source (None: not built from
+    #                               the DSL), stamped on executions to catch an edit without a bump
 
     def get(self, path: str) -> Optional[Node]:
         return self.index.get(path)

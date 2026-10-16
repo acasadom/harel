@@ -9,7 +9,7 @@ Same contract as the sync `DurableRunner`, every public method `async def`. The 
 from __future__ import annotations
 
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from harel.definition.model import Definition
 from harel.engine.execution import Execution
@@ -28,8 +28,21 @@ class AsyncDurableRunner(DurableLogic):
         resolver: Optional[MachineResolver] = None,
         trace: bool = False,
         on_action_error: str = "fail",
+        *,
+        action_modules: Iterable[str] = (),
+        actions: Optional[dict] = None,
+        guards: Optional[dict] = None,
     ) -> None:
-        super().__init__(definitions, clock, resolver, trace, on_action_error)
+        super().__init__(
+            definitions,
+            clock,
+            resolver,
+            trace,
+            on_action_error,
+            action_modules=action_modules,
+            actions=actions,
+            guards=guards,
+        )
         self.store = store
 
     async def _serve(self, flow: Flow) -> Any:
@@ -41,8 +54,10 @@ class AsyncDurableRunner(DurableLogic):
         context: Optional[dict] = None,
         execution_id: Optional[str] = None,
         priority: int = 0,
+        *,
+        version: Optional[int] = None,
     ) -> Execution:
-        return await self._serve(self.create_flow(definition_id, context, execution_id, priority))
+        return await self._serve(self.create_flow(definition_id, context, execution_id, priority, version))
 
     async def process(self, execution_id: str, event: Event) -> Execution:
         return await self._serve(self.process_flow(execution_id, event))
