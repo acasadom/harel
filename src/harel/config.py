@@ -20,6 +20,12 @@ logger = logging.getLogger(__name__)
 _warned: set[str] = set()  # the pre-0.7 names already logged by this process
 
 
+def _names(raw: Optional[str]) -> Optional[frozenset[str]]:
+    """A comma-separated list of names, or None when unset or blank."""
+    names = frozenset(n.strip() for n in (raw or "").split(",") if n.strip())
+    return names or None
+
+
 @dataclass(frozen=True)
 class Config:
     """A snapshot of the `HAREL_*` environment. Build with `Config.from_env()`."""
@@ -54,6 +60,7 @@ class Config:
     worker_id: Optional[str] = None  # HAREL_WORKER_ID (None -> caller defaults to the hostname)
     visibility: float = 30.0  # HAREL_VISIBILITY (lease seconds)
     concurrency: int = 256  # HAREL_CONCURRENCY (events in flight on the async loop)
+    machines: Optional[frozenset[str]] = None  # HAREL_MACHINES (comma-separated; None -> all)
     # --- monitoring TUI ---
     tui_interval_ms: int = 1000  # HAREL_TUI_INTERVAL_MS (auto-refresh)
     tui_theme: str = "nord"  # HAREL_TUI_THEME
@@ -97,6 +104,7 @@ class Config:
             worker_id=e.get("HAREL_WORKER_ID"),
             visibility=float(e.get("HAREL_VISIBILITY", "30")),
             concurrency=int(e.get("HAREL_CONCURRENCY", "256")),
+            machines=_names(e.get("HAREL_MACHINES")),
             tui_interval_ms=int(e.get("HAREL_TUI_INTERVAL_MS", "1000")),
             tui_theme=e.get("HAREL_TUI_THEME", "nord"),
             trace=e.get("HAREL_TRACE", "").lower() in ("1", "true", "yes", "on"),

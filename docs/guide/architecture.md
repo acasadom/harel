@@ -553,6 +553,29 @@ flowchart TD
 | no Definition for the execution's version | `_defn_flow` | `DefinitionNotLoaded`: a worker logs and nacks (retried after `suspend_recheck`); a durable host raises it, and leaves that execution's due timers armed |
 | a source other than the one it started on, or its state gone | `engine.definition_problem`, before the driver runs the engine | `DefinitionChanged`: the hosted runner's error policy — FAILED (dead letter), or raised under `on_action_error="raise"`; `redrive` adopts the current digest |
 
+## Routing by machine — which worker claims an execution's messages
+
+Each Execution carries a `routing_key`: the `definition_id` of the machine its tree started from.
+A root gets its own when it is created (`DurableLogic`/`SenderLogic.create_flow`); a child — an
+orthogonal region, a fan-out instance, an invoked submachine — gets its parent's in
+`DriverLogic._create_spawn_flow`, so a whole tree shares one key and a worker given its root
+machine runs all of it. An execution written before the field existed has none, and its
+`definition_id` stands in (`execution.routing_key(exe)`).
+
+The transport keeps the key per **group** (= execution id), next to its priority: the publish
+that creates the group stores it. A group is deleted once drained, so the next publish creates it
+again — which is why **every** publish passes the key of the execution it is *for*, not of the one
+publishing: the relay (`TransportDriverLogic._flush_flow`) loads each outbox target, as it already
+did for its priority, and the domain-event fan-out in `route_flow` passes each region's. Nothing
+new is persisted for it in the outbox.
+
+`WorkerLogic.claim_flow` passes the worker's `machines` as `claim(..., routing_keys=)`, and passes
+nothing for a worker given none — so a transport that can't route still serves every unfiltered
+worker. The SQL transports filter with `routing_key IN (…)` (`transport._base._sqlite_claim`) or,
+in Postgres, the `claim` function's `p_routing_keys`; Mongo adds it to the claim's
+`find_one_and_update`; Redis and SQS refuse (`_refuse_routing`). Routing restricts what a worker
+**claims**; it changes nothing about how a message is handled once claimed.
+
 ## Where state is persisted (checkpoint points)
 
 | When | Call | What is written |

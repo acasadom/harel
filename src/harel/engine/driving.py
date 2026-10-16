@@ -17,7 +17,7 @@ from typing import Any, Callable, Optional
 from harel import engine
 from harel.definition.events import with_defaults
 from harel.definition.model import Definition
-from harel.engine.execution import Execution, Status, stamp
+from harel.engine.execution import Execution, Status, routing_key, stamp
 from harel.engine.flow import CallAction, Flow, call, parallel, run_inline
 from harel.engine.resolve import DefinitionNotLoaded, ResolveError, find_definition
 from harel.engine.runtime import _CONTROL, _action_name, _ActionKeys, _Proxy, _resolve, _trace_step
@@ -308,6 +308,8 @@ class DriverLogic:
             parent_id=entry.parent_id,
             child_id=entry.child_id,
             priority=parent.priority if parent is not None else 0,
+            # the whole tree routes as its root machine: a worker given that machine runs it all
+            routing_key=routing_key(parent) if parent is not None else child_defn.id,
         )
         yield from self._run_flow(child, engine.start(child_defn, child))
 
@@ -464,9 +466,9 @@ class TransportDriverLogic(DriverLogic):
     def _deliver_timeout_flow(self, execution_id: str, event: Event) -> Flow:
         exe = yield from store("load", execution_id)
         priority = exe.priority if exe is not None else 0
-        yield from transport("publish", execution_id, event, priority=priority)
+        yield from transport("publish", execution_id, event, priority=priority, routing_key=routing_key(exe))
 
-    def _flush_flow(self, primary_priority: Optional[dict[str, int]] = None) -> Flow:
+    def _flush_flow(self, primary: Optional[dict[str, Execution]] = None) -> Flow:
         while True:
             spawns = yield from store("pending_spawns")
             outbox = yield from store("pending_outbox")
@@ -480,14 +482,21 @@ class TransportDriverLogic(DriverLogic):
                 yield from parallel([store("ack_spawn", s.seq) for s in spawns])
             for entry in outbox:
                 if entry.target_id is not None:
-                    # self-targeted re-publish uses this exe's priority (primary_priority);
-                    # a cross-execution emit (e.g. a region's Finished -> parent) uses the
-                    # TARGET's own priority, not 0, so it doesn't pin the target's group.
-                    prio = (primary_priority or {}).get(entry.target_id)
-                    if prio is None:
+                    # a self-targeted re-publish uses this exe (`primary`); a cross-execution emit
+                    # (e.g. a region's Finished -> parent) uses the TARGET's own priority and
+                    # routing key — a group that drained is created again by this publish, and
+                    # must not take the emitter's
+                    target = (primary or {}).get(entry.target_id)
+                    if target is None:
                         target = yield from store("load", entry.target_id)
-                        prio = target.priority if target is not None else 0
-                    yield from transport("publish", entry.target_id, entry.event, priority=prio)
+                    prio = target.priority if target is not None else 0
+                    yield from transport(
+                        "publish",
+                        entry.target_id,
+                        entry.event,
+                        priority=prio,
+                        routing_key=routing_key(target),
+                    )
                 yield from store("ack_outbox", entry.seq)
 
     def route_flow(self, exe: Execution, event: Event) -> Flow:
@@ -501,7 +510,9 @@ class TransportDriverLogic(DriverLogic):
                     live.append(child)
         if event.kind not in _CONTROL and live:
             for child in live:
-                yield from transport("publish", child.id, event, priority=child.priority)
+                yield from transport(
+                    "publish", child.id, event, priority=child.priority, routing_key=routing_key(child)
+                )
             timers: tuple[TimerOp, ...] = ()
             delay = engine.ttl_delay(self.defn, exe)  # the broadcast is activity for exe's `ttl`
             if delay is not None:
@@ -526,7 +537,7 @@ class TransportDriverLogic(DriverLogic):
         # by the next emitting event's relay and by `recover()` on startup (the idle loop never
         # flushed either, so this does not change the at-least-once guarantee).
         if enqueued:
-            yield from self._flush_flow(primary_priority={exe.id: exe.priority})
+            yield from self._flush_flow(primary={exe.id: exe})
 
 
 class _InlineDriver(DriverLogic):

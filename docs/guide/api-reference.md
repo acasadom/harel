@@ -114,7 +114,8 @@ DistributedRunner(store, transport, definitions, clock=time.time, resolver=None,
                                    # create()'s start_on_create=True already does this;
                                    # data seeds the context — the only way to attach one to Start
     .send(execution_id, event) -> None  # refuses a caller-supplied Start (raises ValueError)
-    .worker(...) -> Worker        # .step() one message; .run(stop_event) loops; same `execution`
+    .worker(..., *, machines=None) -> Worker   # .step() one message; .run(stop_event) loops;
+                                               # same `execution`; `machines`: claim only their work
     .cancel / .terminate / .suspend / .resume / .redrive / .purge
 ```
 

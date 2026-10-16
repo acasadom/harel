@@ -55,7 +55,9 @@ class AsyncPostgresTransport:
                 await conn.commit()
         return cls(pool, clock, prefix=prefix)
 
-    async def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
+    async def publish(
+        self, group_id: str, event: Event, priority: int = 0, routing_key: Optional[str] = None
+    ) -> None:
         async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
@@ -65,14 +67,20 @@ class AsyncPostgresTransport:
                 # ready the group iff new; the no-op update locks its row, as the ack
                 # function does, so a concurrent ack can't delete it under this message
                 await cur.execute(
-                    f"INSERT INTO {self._n.groups} (group_id, locked_by, lock_expiry, priority) "
-                    "VALUES (%s, NULL, NULL, %s) "
+                    f"INSERT INTO {self._n.groups} (group_id, locked_by, lock_expiry, priority, routing_key) "
+                    "VALUES (%s, NULL, NULL, %s, %s) "
                     f"ON CONFLICT (group_id) DO UPDATE SET priority = {self._n.groups}.priority",
-                    (group_id, priority),
+                    (group_id, priority, routing_key),
                 )
             await conn.commit()
 
-    async def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
+    async def claim(
+        self,
+        worker_id: str,
+        visibility: float,
+        min_priority: int = 0,
+        routing_keys: Optional[frozenset[str]] = None,
+    ) -> Optional[Lease]:
         now = self._clock()
         token = f"{worker_id}:{uuid.uuid4().hex}"
         # one round-trip: the function leases the lowest claimable group (FOR UPDATE SKIP LOCKED,
@@ -81,8 +89,14 @@ class AsyncPostgresTransport:
             try:
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        f"SELECT group_id, seq, event FROM {self._n.claim}(%s, %s, %s, %s)",
-                        (now, now + visibility, token, min_priority),
+                        f"SELECT group_id, seq, event FROM {self._n.claim}(%s, %s, %s, %s, %s::text[])",
+                        (
+                            now,
+                            now + visibility,
+                            token,
+                            min_priority,
+                            sorted(routing_keys) if routing_keys is not None else None,
+                        ),
                     )
                     row = await cur.fetchone()
                 await conn.commit()

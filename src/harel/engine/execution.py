@@ -63,6 +63,10 @@ class Execution(pydantic.BaseModel):
     #                                           before versions existed — version 1)
     definition_digest: Optional[str] = None  # that version's source digest when it started:
     #                                          a different one later means an edit without a bump
+    routing_key: Optional[str] = None  # the machine its tree started from — the root's
+    #                                    definition_id, inherited by every child — which the
+    #                                    transport routes its messages by (None: written before
+    #                                    routing existed; its own definition_id stands in)
     root_path: str = ""  # node this execution runs (orthogonal child => branch node)
     status: Status = Status.PENDING
     outcome: Optional[str] = None  # result label of the terminal reached (model's, e.g. "failed");
@@ -97,6 +101,13 @@ class Execution(pydantic.BaseModel):
 
 
 _FINISHED = (Status.DONE, Status.CANCELLED)
+
+
+def routing_key(exe: Optional[Execution]) -> Optional[str]:
+    """The key the transport routes `exe`'s messages by: its tree's root machine."""
+    if exe is None:
+        return None
+    return exe.routing_key or exe.definition_id
 
 
 def stamp(exe: Execution, now: float) -> None:

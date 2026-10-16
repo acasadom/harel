@@ -76,3 +76,8 @@ group is only ever advanced by one consumer at a time, so within a group order i
 
 See the [transports hub](../transports) for the contract and [distribution](../distribution) for
 running workers.
+
+## Routing by machine
+
+Each `_groups` entry also keeps the `routing_key` the publish creating it carried. A claim given
+`routing_keys` skips a group whose key isn't among them, in the same pass as the priority floor.

@@ -29,7 +29,7 @@ class FailingPublish(InMemoryTransport):
         super().__init__()
         self.shares_store_transaction = shares
 
-    def publish(self, group_id, event, priority=0):
+    def publish(self, group_id, event, priority=0, routing_key=None):
         raise PublishDown("publish failed")
 
 
@@ -38,7 +38,7 @@ class AsyncFailingPublish(AsyncInMemoryTransport):
         super().__init__()
         self.shares_store_transaction = shares
 
-    async def publish(self, group_id, event, priority=0):
+    async def publish(self, group_id, event, priority=0, routing_key=None):
         raise PublishDown("publish failed")
 
 

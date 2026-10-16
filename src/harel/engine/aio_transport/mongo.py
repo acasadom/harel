@@ -65,6 +65,7 @@ class AsyncMongoTransport:
                 inst = cls(client, db_name, prefix=prefix)
                 if create_schema:
                     await inst._locks.create_index("available_at")  # the claim index
+                    await inst._locks.create_index([("routing_key", 1), ("available_at", 1)])
                 return inst
             except PyMongoError as exc:
                 last = exc
@@ -77,7 +78,9 @@ class AsyncMongoTransport:
         )
         return int(doc["n"])
 
-    async def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
+    async def publish(
+        self, group_id: str, event: Event, priority: int = 0, routing_key: Optional[str] = None
+    ) -> None:
         await self._msgs.insert_one(
             {"_id": await self._next_seq(), "group_id": group_id, "event": event.model_dump_json()}
         )
@@ -86,11 +89,24 @@ class AsyncMongoTransport:
         # priority is fixed on first publish ($setOnInsert ignores subsequent publishes).
         await self._locks.update_one(
             {"_id": group_id},
-            {"$setOnInsert": {"available_at": 0.0, "token": None, "priority": priority}},
+            {
+                "$setOnInsert": {
+                    "available_at": 0.0,
+                    "token": None,
+                    "priority": priority,
+                    "routing_key": routing_key,
+                }
+            },
             upsert=True,
         )
 
-    async def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
+    async def claim(
+        self,
+        worker_id: str,
+        visibility: float,
+        min_priority: int = 0,
+        routing_keys: Optional[frozenset[str]] = None,
+    ) -> Optional[Lease]:
         now = self._clock()
         while True:
             token = f"{worker_id}:{uuid.uuid4().hex}"
@@ -100,7 +116,11 @@ class AsyncMongoTransport:
             # leases). Replaces a find()-then-loop-of-find_one_and_update where workers fished
             # the same candidate window and burned round-trips on lost leases.
             leased = await self._locks.find_one_and_update(
-                {"available_at": {"$lte": now}, "priority": {"$gte": min_priority}},
+                {
+                    "available_at": {"$lte": now},
+                    "priority": {"$gte": min_priority},
+                    **({"routing_key": {"$in": sorted(routing_keys)}} if routing_keys is not None else {}),
+                },
                 {"$set": {"token": token, "available_at": now + visibility}},
                 sort=[("available_at", 1)],
             )
@@ -135,7 +155,12 @@ class AsyncMongoTransport:
         sync `MongoTransport._drop_group`)."""
         dropped = await self._locks.find_one_and_delete({"_id": group_id, "token": token})
         if dropped is not None and await self._msgs.find_one({"group_id": group_id}) is not None:
-            ready = {"available_at": 0.0, "token": None, "priority": dropped.get("priority", 0)}
+            ready = {
+                "available_at": 0.0,
+                "token": None,
+                "priority": dropped.get("priority", 0),
+                "routing_key": dropped.get("routing_key"),
+            }
             await self._locks.update_one({"_id": group_id}, {"$setOnInsert": ready}, upsert=True)
 
     async def nack(self, lease: Lease, delay: float = 0.0) -> None:

@@ -21,7 +21,7 @@ import re
 from dataclasses import dataclass
 from functools import cached_property
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 DEFAULT_PREFIX = "harel"
 
 # an SQL identifier; at most 30 characters, so the longest name built from it (an index) stays
@@ -145,6 +145,16 @@ def transport_schema(dialect: str, prefix: str = DEFAULT_PREFIX) -> list[str]:
     return [names.sql(t) for t in (_PG_TRANSPORT if dialect == "postgres" else _SQLITE_TRANSPORT)]
 
 
+def sqlite_transport_upgrade(columns: list[str], prefix: str = DEFAULT_PREFIX) -> list[str]:
+    """What brings a SQLite-dialect transport's `groups` table, with `columns`, up to this
+    schema: the `ALTER TABLE` adding `routing_key` to one created before SCHEMA_VERSION 5."""
+    return (
+        []
+        if "routing_key" in columns
+        else [f"ALTER TABLE {Names(prefix).groups} ADD COLUMN routing_key TEXT"]
+    )
+
+
 def sql_schema(dialect: str, prefix: str = DEFAULT_PREFIX) -> list[str]:
     """The whole SQL schema under `prefix` — the store's and the transport's — as the
     statements the backends run: what a migration tool applies when it owns the schema
@@ -175,15 +185,21 @@ _SQLITE_STORE = (
     "source TEXT NOT NULL, published_at REAL, PRIMARY KEY (definition_id, version))",
 )
 
+# A `groups` table created before SCHEMA_VERSION 5 lacks `routing_key`: SQLite has no
+# `ADD COLUMN IF NOT EXISTS`, so the backends add it (`sqlite_transport_upgrade`) between these
+# tables and the indexes. A migration tool owning such a table runs that ALTER once.
 _SQLITE_TRANSPORT = (
     "CREATE TABLE IF NOT EXISTS {messages} "
     "(seq INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT NOT NULL, event TEXT NOT NULL, "
     "locked_by TEXT, lock_expiry REAL)",
     "CREATE TABLE IF NOT EXISTS {groups} "
     "(group_id TEXT PRIMARY KEY, last_claimed_at REAL NOT NULL DEFAULT 0.0, "
-    "priority INT NOT NULL DEFAULT 0)",
+    "priority INT NOT NULL DEFAULT 0, routing_key TEXT)",
     "CREATE INDEX IF NOT EXISTS {prefix}_transport_groups_by_last_claimed ON {groups} (last_claimed_at)",
     "CREATE INDEX IF NOT EXISTS {prefix}_transport_messages_by_group ON {messages} (group_id, seq)",
+    # a worker given `machines` claims in this order among its machines' groups
+    "CREATE INDEX IF NOT EXISTS {prefix}_transport_groups_by_routing_key ON {groups} "
+    "(routing_key, last_claimed_at)",
 )
 
 # --- Postgres -----------------------------------------------------------------------------------
@@ -235,7 +251,12 @@ _PG_TRANSPORT = (
     "CREATE INDEX IF NOT EXISTS {prefix}_transport_messages_by_group ON {messages} (group_id, seq)",
     "CREATE TABLE IF NOT EXISTS {groups} "
     "(group_id TEXT PRIMARY KEY, locked_by TEXT, lock_expiry DOUBLE PRECISION, "
-    "priority INT NOT NULL DEFAULT 0)",
+    "priority INT NOT NULL DEFAULT 0, routing_key TEXT)",
+    # a table created before SCHEMA_VERSION 5
+    "ALTER TABLE {groups} ADD COLUMN IF NOT EXISTS routing_key TEXT",
+    # claim's order among the groups of the machines a worker is given
+    "CREATE INDEX IF NOT EXISTS {prefix}_transport_groups_by_routing_key ON {groups} "
+    "(routing_key, (COALESCE(lock_expiry, 0)), group_id)",
     # claim's order — the least recently served first — so it walks this index and stops at the
     # first claimable group, instead of sorting every group on each claim
     "CREATE INDEX IF NOT EXISTS {prefix}_transport_groups_claim_order ON {groups} "
@@ -248,9 +269,12 @@ _PG_TRANSPORT = (
     # server-side call. The lease itself is atomic either way (FOR UPDATE SKIP LOCKED).
     #
     # claim: lock the first claimable group (unlocked or lease expired, at least `p_min_priority`,
-    # least recently served first) with SKIP LOCKED, and return its head message; a group left
-    # with no messages is dropped and the next one tried
-    """CREATE OR REPLACE FUNCTION {claim}(p_now double precision, p_lease double precision, p_token text, p_min_priority int DEFAULT 0)
+    # of one of `p_routing_keys` when given, least recently served first) with SKIP LOCKED, and
+    # return its head message; a group left with no messages is dropped and the next one tried.
+    # The function before SCHEMA_VERSION 5 took no `p_routing_keys`: dropped, so a call with four
+    # arguments isn't ambiguous between the two
+    "DROP FUNCTION IF EXISTS {claim}(double precision, double precision, text, int)",
+    """CREATE OR REPLACE FUNCTION {claim}(p_now double precision, p_lease double precision, p_token text, p_min_priority int DEFAULT 0, p_routing_keys text[] DEFAULT NULL)
 RETURNS TABLE(group_id text, seq bigint, event text) AS $$
 DECLARE g text;
 BEGIN
@@ -260,6 +284,7 @@ BEGIN
       SELECT s.group_id FROM {groups} s
       WHERE (s.locked_by IS NULL OR s.lock_expiry < p_now)
         AND s.priority >= p_min_priority
+        AND (p_routing_keys IS NULL OR s.routing_key = ANY(p_routing_keys))
       ORDER BY COALESCE(s.lock_expiry, 0) ASC, s.group_id FOR UPDATE SKIP LOCKED LIMIT 1
     ) RETURNING tg.group_id INTO g;
     IF g IS NULL THEN RETURN; END IF;

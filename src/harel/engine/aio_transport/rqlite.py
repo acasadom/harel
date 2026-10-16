@@ -6,8 +6,9 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 
-from harel.engine.schema import DEFAULT_PREFIX, Names, transport_schema
+from harel.engine.schema import DEFAULT_PREFIX, Names, sqlite_transport_upgrade, transport_schema
 from harel.engine.transport import _PARKED, Lease
+from harel.engine.transport._base import _routing_filter
 from harel.spec.states import Event
 
 
@@ -55,7 +56,13 @@ class AsyncRqliteTransport:
             try:
                 transport = cls(client, url, timeout, prefix=prefix)
                 if create_schema:
-                    await transport._execute(transport_schema("sqlite", prefix))
+                    statements = transport_schema("sqlite", prefix)
+                    await transport._execute([q for q in statements if q.startswith("CREATE TABLE")])
+                    info = await transport._query(f"PRAGMA table_info({Names(prefix).groups})", ())
+                    upgrade = sqlite_transport_upgrade([row[1] for row in info], prefix)
+                    await transport._execute(
+                        upgrade + [q for q in statements if not q.startswith("CREATE TABLE")]
+                    )
                 else:
                     await transport._query("SELECT 1", ())  # nothing created: still wait for a leader
                 return transport
@@ -88,7 +95,9 @@ class AsyncRqliteTransport:
             raise RuntimeError(f"rqlite query error: {result['error']}")
         return result.get("values") or []
 
-    async def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
+    async def publish(
+        self, group_id: str, event: Event, priority: int = 0, routing_key: Optional[str] = None
+    ) -> None:
         await self._execute(
             [
                 [
@@ -97,17 +106,25 @@ class AsyncRqliteTransport:
                     event.model_dump_json(),
                 ],
                 [
-                    f"INSERT OR IGNORE INTO {self._n.groups} (group_id, priority) VALUES (?, ?)",
+                    f"INSERT OR IGNORE INTO {self._n.groups} (group_id, priority, routing_key) VALUES (?, ?, ?)",
                     group_id,
                     priority,
+                    routing_key,
                 ],
             ],
             transaction=True,
         )
 
-    async def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
+    async def claim(
+        self,
+        worker_id: str,
+        visibility: float,
+        min_priority: int = 0,
+        routing_keys: Optional[frozenset[str]] = None,
+    ) -> Optional[Lease]:
         now = self._clock()
         token = f"{worker_id}:{uuid.uuid4().hex}"
+        routing, keys = _routing_filter(routing_keys, "g.routing_key")
         results = await self._execute(
             [
                 [
@@ -117,13 +134,14 @@ class AsyncRqliteTransport:
                     "  WHERE (m.locked_by IS NULL OR m.lock_expiry < ?) "
                     "    AND m.group_id NOT IN ("
                     f"      SELECT group_id FROM {self._n.messages} WHERE locked_by IS NOT NULL AND lock_expiry >= ?"
-                    "    ) AND g.priority >= ?"
+                    f"    ) AND g.priority >= ?{routing}"
                     "  ORDER BY g.last_claimed_at ASC, m.seq ASC LIMIT 1)",
                     token,
                     now + visibility,
                     now,
                     now,
                     min_priority,
+                    *keys,
                 ]
             ]
         )

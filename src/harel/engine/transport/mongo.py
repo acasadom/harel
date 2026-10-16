@@ -61,6 +61,7 @@ class MongoTransport:
         self._clock = clock
         if create_schema:
             self._locks.create_index("available_at")  # the claim index (O(log N + K))
+            self._locks.create_index([("routing_key", 1), ("available_at", 1)])  # a filtered claim
 
     @classmethod
     def from_url(
@@ -95,7 +96,9 @@ class MongoTransport:
         )
         return int(doc["n"])
 
-    def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
+    def publish(
+        self, group_id: str, event: Event, priority: int = 0, routing_key: Optional[str] = None
+    ) -> None:
         self._msgs.insert_one(
             {"_id": self._next_seq(), "group_id": group_id, "event": event.model_dump_json()}
         )
@@ -104,11 +107,24 @@ class MongoTransport:
         # priority is fixed on first publish ($setOnInsert ignores subsequent publishes).
         self._locks.update_one(
             {"_id": group_id},
-            {"$setOnInsert": {"available_at": 0.0, "token": None, "priority": priority}},
+            {
+                "$setOnInsert": {
+                    "available_at": 0.0,
+                    "token": None,
+                    "priority": priority,
+                    "routing_key": routing_key,
+                }
+            },
             upsert=True,
         )
 
-    def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
+    def claim(
+        self,
+        worker_id: str,
+        visibility: float,
+        min_priority: int = 0,
+        routing_keys: Optional[frozenset[str]] = None,
+    ) -> Optional[Lease]:
         now = self._clock()
         while True:
             token = f"{worker_id}:{uuid.uuid4().hex}"
@@ -118,7 +134,11 @@ class MongoTransport:
             # leases). Replaces a find()-then-loop-of-find_one_and_update where workers fished
             # the same candidate window and burned round-trips on lost leases.
             leased = self._locks.find_one_and_update(
-                {"available_at": {"$lte": now}, "priority": {"$gte": min_priority}},
+                {
+                    "available_at": {"$lte": now},
+                    "priority": {"$gte": min_priority},
+                    **({"routing_key": {"$in": sorted(routing_keys)}} if routing_keys is not None else {}),
+                },
                 {"$set": {"token": token, "available_at": now + visibility}},
                 sort=[("available_at", 1)],
             )
@@ -155,7 +175,12 @@ class MongoTransport:
         delete sees it — and readies the group again, with the priority it had."""
         dropped = self._locks.find_one_and_delete({"_id": group_id, "token": token})
         if dropped is not None and self._msgs.find_one({"group_id": group_id}) is not None:
-            ready = {"available_at": 0.0, "token": None, "priority": dropped.get("priority", 0)}
+            ready = {
+                "available_at": 0.0,
+                "token": None,
+                "priority": dropped.get("priority", 0),
+                "routing_key": dropped.get("routing_key"),
+            }
             self._locks.update_one({"_id": group_id}, {"$setOnInsert": ready}, upsert=True)
 
     def nack(self, lease: Lease, delay: float = 0.0) -> None:

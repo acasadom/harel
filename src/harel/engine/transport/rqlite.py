@@ -6,8 +6,8 @@ import time
 import uuid
 from typing import Callable, Optional
 
-from harel.engine.schema import DEFAULT_PREFIX, Names, transport_schema
-from harel.engine.transport._base import _PARKED, Lease
+from harel.engine.schema import DEFAULT_PREFIX, Names
+from harel.engine.transport._base import _PARKED, Lease, _routing_filter, _sqlite_create_schema
 from harel.spec.states import Event
 
 
@@ -38,7 +38,7 @@ class RqliteTransport:
         self._clock = clock
         self._session = requests.Session()
         if create_schema:
-            self._execute(transport_schema("sqlite", prefix))
+            _sqlite_create_schema(prefix, lambda sql: self._execute([sql]), self._group_columns)
 
     @classmethod
     def from_url(
@@ -86,7 +86,12 @@ class RqliteTransport:
             raise RuntimeError(f"rqlite query error: {result['error']}")
         return result.get("values") or []
 
-    def publish(self, group_id: str, event: Event, priority: int = 0) -> None:
+    def _group_columns(self) -> list[str]:
+        return [row[1] for row in self._query(f"PRAGMA table_info({self._n.groups})", ())]
+
+    def publish(
+        self, group_id: str, event: Event, priority: int = 0, routing_key: Optional[str] = None
+    ) -> None:
         self._execute(
             [
                 [
@@ -95,17 +100,25 @@ class RqliteTransport:
                     event.model_dump_json(),
                 ],
                 [
-                    f"INSERT OR IGNORE INTO {self._n.groups} (group_id, priority) VALUES (?, ?)",
+                    f"INSERT OR IGNORE INTO {self._n.groups} (group_id, priority, routing_key) VALUES (?, ?, ?)",
                     group_id,
                     priority,
+                    routing_key,
                 ],
             ],
             transaction=True,
         )
 
-    def claim(self, worker_id: str, visibility: float, min_priority: int = 0) -> Optional[Lease]:
+    def claim(
+        self,
+        worker_id: str,
+        visibility: float,
+        min_priority: int = 0,
+        routing_keys: Optional[frozenset[str]] = None,
+    ) -> Optional[Lease]:
         now = self._clock()
         token = f"{worker_id}:{uuid.uuid4().hex}"
+        routing, keys = _routing_filter(routing_keys, "g.routing_key")
         results = self._execute(
             [
                 [
@@ -115,13 +128,14 @@ class RqliteTransport:
                     "  WHERE (m.locked_by IS NULL OR m.lock_expiry < ?) "
                     "    AND m.group_id NOT IN ("
                     f"      SELECT group_id FROM {self._n.messages} WHERE locked_by IS NOT NULL AND lock_expiry >= ?"
-                    "    ) AND g.priority >= ?"
+                    f"    ) AND g.priority >= ?{routing}"
                     "  ORDER BY g.last_claimed_at ASC, m.seq ASC LIMIT 1)",
                     token,
                     now + visibility,
                     now,
                     now,
                     min_priority,
+                    *keys,
                 ]
             ]
         )

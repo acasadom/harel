@@ -78,6 +78,16 @@ immediate retry.
 
 `ORDER BY seq` within a group, one consumer at a time → order preserved.
 
+## Routing by machine
+
+`harel_transport_groups` has a `routing_key TEXT` column, set by the `INSERT OR IGNORE` of the
+publish that creates the group. A claim given `routing_keys` adds `AND g.routing_key IN (?, …)`
+to the claim query, and the index `harel_transport_groups_by_routing_key (routing_key,
+last_claimed_at)` serves that order. A table created before the column existed (`SCHEMA_VERSION`
+4) gets it when the transport starts (over the HTTP API) — SQLite has no `ADD COLUMN IF NOT EXISTS`, so the transport
+checks `PRAGMA table_info` and runs the `ALTER TABLE` once; where a migration tool owns the
+schema, it runs that `ALTER TABLE` (`schema.sqlite_transport_upgrade`).
+
 ## Async twin
 
 `AsyncRqliteTransport` mirrors this over `httpx.AsyncClient` — the same single serialized `UPDATE`
