@@ -520,6 +520,34 @@ class SenderLogic(_DefinitionLookup):
         yield from control.redrive_flow(logic.defn, execution_id, target_path, clock=self._clock)
 
 
+def log_handling_failed(worker_id: str, lease: Any, retry_in: float) -> None:
+    """A worker's loop failed handling `lease` (a store or transport outage, a version it can't
+    run, an engine bug — an action's own error is the driver's to route, not this)."""
+    logger.exception(
+        "worker %s failed handling %s event %s for execution %s; retrying in %ss",
+        worker_id,
+        lease.event.kind,
+        lease.event.id,
+        lease.group_id,
+        retry_in,
+    )
+
+
+def log_nack_failed(worker_id: str, lease: Any) -> None:
+    logger.exception(
+        "worker %s could not nack %s event %s for execution %s; it is redelivered when its lease expires",
+        worker_id,
+        lease.event.kind,
+        lease.event.id,
+        lease.group_id,
+    )
+
+
+def log_loop_step_failed(worker_id: str, what: str, retry_in: float) -> None:
+    """A worker's loop failed to claim, or to sweep the due timers: it carries on after a pause."""
+    logger.exception("worker %s could not %s; retrying in %ss", worker_id, what, retry_in)
+
+
 class WorkerLogic(_DefinitionLookup):
     """What a worker does with the transport: claim a message (applying the priority policy)
     and handle it — load, dedupe, route by status, run the engine, ack or nack — and fire

@@ -93,6 +93,13 @@ In production you don't call `step()` in a loop — a worker runs `run(stop_even
 claim→process and, on its idle path, sweeping due timers (`fire_due_timers`) so timeouts fire
 without a separate scheduler.
 
+Only `stop_event` ends that loop. A message whose handling raises — a store or transport outage,
+a machine version the worker can't run, an engine bug — is logged with its traceback and goes
+back to the queue, to come back after `suspend_recheck` seconds (default 5); a claim or a timer
+sweep that raises is logged, and the loop carries on after the same pause. An action's own error
+isn't one of these: the driver routes it (`on error`, else the execution fails). The sync
+`Worker.run` and the async `AsyncWorker.run` behave the same.
+
 ### Async-native workers
 
 The worker is **async-native**. The bundled `python -m harel.worker` runs one `asyncio` event
