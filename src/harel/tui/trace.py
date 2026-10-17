@@ -1,8 +1,8 @@
 """The execution-trace model the timeline renders: one `TraceStep` per processed event,
 with what went in (event + context) and what came out (transition + actions/guards +
-context). The engine does NOT yet persist this — it keeps a state snapshot, not an event
-log. For now a preview store seam (`read_trace`/`append_trace` on Sqlite/Dict) holds it,
-seeded by the demo; a future engine feature will have the Driver record it for real.
+context). The runners record it in each commit when tracing is on (`HAREL_TRACE=1`, or
+`trace=True`), in every store backend, as a ring of the last `HAREL_TRACE_MAX` steps; with
+tracing off there is none and the timeline says so.
 """
 
 from __future__ import annotations

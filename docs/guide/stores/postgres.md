@@ -445,6 +445,10 @@ no row at its version: the multi-statement path only inserts when `old == 0`, an
 `harel_commit_cas` returns false, so it raises `StoreConflict` instead of recreating the row.
 
 `ids_with_prefix(prefix)` is the same escaped `LIKE` query as the SQLite family's, with `%s`.
+## Pending work
+
+`pending_work(id)` is three keyed reads on one cursor: `harel_timers` by `execution_id` (its primary key), `harel_outbox` by `target_id` and `harel_spawns` by `parent_id` — the last two hold only what the relay hasn't delivered yet, so they stay small.
+
 ## Published definitions
 
 The published machine versions live in `harel_definitions` — `(definition_id, version)`

@@ -151,6 +151,9 @@ class _AsyncStoreAdapter:
     async def delete_timer(self, execution_id, path, fire_at):
         return self._s.delete_timer(execution_id, path, fire_at)
 
+    async def pending_work(self, execution_id):
+        return self._s.pending_work(execution_id)
+
     async def ids_with_prefix(self, prefix):
         return self._s.ids_with_prefix(prefix)
 

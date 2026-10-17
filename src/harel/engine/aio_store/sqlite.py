@@ -8,10 +8,13 @@ from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, Status
 from harel.engine.schema import DEFAULT_PREFIX, Names, store_schema
-from harel.engine.store import DefinitionRecord, OutboxEntry, SpawnEntry, StoreConflict, TimerOp
+from harel.engine.store import DefinitionRecord, OutboxEntry, PendingWork, SpawnEntry, StoreConflict, TimerOp
 from harel.engine.store._base import (
     _DEFINITION_COLUMNS,
     _IDS_WITH_PREFIX_SQL,
+    _PENDING_OUTBOX_SQL,
+    _PENDING_SPAWNS_SQL,
+    _PENDING_TIMERS_SQL,
     _PURGE_COMPANIONS_SQL,
     DEFAULT_TRACE_MAX,
     Step,
@@ -21,6 +24,7 @@ from harel.engine.store._base import (
     _like_prefix,
     _listing_page,
     _listing_sql_sqlite,
+    _pending_work,
 )
 from harel.spec.states import Event
 
@@ -255,6 +259,14 @@ class AsyncSqliteStore:
         await self._execute_and_commit(
             f"DELETE FROM {self._n.timers} WHERE execution_id = ? AND path = ? AND fire_at = ?",
             (execution_id, path, fire_at),
+        )
+
+    async def pending_work(self, execution_id: str) -> PendingWork:
+        async def rows(template: str) -> list:
+            return await self._fetchall(self._n.sql(template), (execution_id,))
+
+        return _pending_work(
+            await rows(_PENDING_TIMERS_SQL), await rows(_PENDING_OUTBOX_SQL), await rows(_PENDING_SPAWNS_SQL)
         )
 
     async def ids_with_prefix(self, prefix: str) -> list[str]:

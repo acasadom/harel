@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import base64
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional, Protocol, runtime_checkable
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
@@ -102,11 +102,13 @@ def _matches(summary: ExecutionSummary, status, definition_id, roots_only) -> bo
 _SUMMARY_COLUMNS_SQLITE = (
     "id, definition_id, version, json_extract(data,'$.status'), json_extract(data,'$.outcome'), "
     "json_extract(data,'$.active_path'), json_extract(data,'$.parent_id'), "
-    "json_extract(data,'$.finished_at')"
+    "json_extract(data,'$.finished_at'), json_extract(data,'$.definition_version'), "
+    "json_extract(data,'$.updated_at')"
 )
 _SUMMARY_COLUMNS_PG = (
     "id, definition_id, version, data::jsonb->>'status', data::jsonb->>'outcome', "
-    "data::jsonb->>'active_path', data::jsonb->>'parent_id', (data::jsonb->>'finished_at')::float8"
+    "data::jsonb->>'active_path', data::jsonb->>'parent_id', (data::jsonb->>'finished_at')::float8, "
+    "(data::jsonb->>'definition_version')::int, (data::jsonb->>'updated_at')::float8"
 )
 
 
@@ -165,7 +167,9 @@ def _listing_sql_pg(
 
 
 def _listing_page(rows: list, limit: int, off: int) -> ExecutionPage:
-    """An `ExecutionPage` from the rows of a listing query (the extra row means more)."""
+    """An `ExecutionPage` from the rows of a listing query (the extra row means more): each
+    `(id, definition_id, version, status, outcome, active_path, parent_id, finished_at)`,
+    optionally followed by `definition_version, updated_at`."""
     items = [
         ExecutionSummary(
             id=r[0],
@@ -176,6 +180,8 @@ def _listing_page(rows: list, limit: int, off: int) -> ExecutionPage:
             active_path=r[5],
             parent_id=r[6],
             finished_at=r[7],
+            definition_version=r[8] if len(r) > 8 else None,
+            updated_at=r[9] if len(r) > 9 else None,
         )
         for r in rows[:limit]
     ]
@@ -204,6 +210,41 @@ class SpawnEntry:
     child_id: str
     root_path: str
     context: dict
+
+
+@dataclass
+class PendingWork:
+    """What is waiting for one Execution and not done yet: its armed timers (`(path, fire_at)`,
+    soonest first), the outbox entries addressed to it, and the child spawns it issued (each in
+    `seq` order). What `ExecutionStore.pending_work` returns."""
+
+    timers: list[tuple[str, float]] = field(default_factory=list)
+    outbox: list[OutboxEntry] = field(default_factory=list)
+    spawns: list[SpawnEntry] = field(default_factory=list)
+
+
+# `pending_work` on the SQL backends: three keyed reads, one per table. Templates
+# (`schema.Names.sql`) with `?` params — Postgres swaps them for `%s` (`_pg_params`).
+_PENDING_TIMERS_SQL = "SELECT path, fire_at FROM {timers} WHERE execution_id = ? ORDER BY fire_at, path"
+_PENDING_OUTBOX_SQL = "SELECT seq, target_id, event FROM {outbox} WHERE target_id = ? ORDER BY seq"
+_PENDING_SPAWNS_SQL = (
+    "SELECT seq, parent_id, child_id, root_path, context FROM {spawns} WHERE parent_id = ? ORDER BY seq"
+)
+
+
+def _pg_params(sql: str) -> str:
+    return sql.replace("?", "%s")
+
+
+def _pending_work(timers: list, outbox: list, spawns: list) -> PendingWork:
+    """A `PendingWork` from the rows of the three `_PENDING_*` queries."""
+    return PendingWork(
+        timers=[(path, float(fire_at)) for path, fire_at in timers],
+        outbox=[
+            OutboxEntry(seq, target_id, Event.model_validate_json(event)) for seq, target_id, event in outbox
+        ],
+        spawns=[SpawnEntry(seq, pid, cid, rp, json.loads(ctx)) for seq, pid, cid, rp, ctx in spawns],
+    )
 
 
 @dataclass(frozen=True)
@@ -418,6 +459,12 @@ class ExecutionStore(Protocol):
     def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None:
         """Remove the timer for `(execution_id, path)` — but only if it still holds
         `fire_at` (so a concurrent re-schedule to a new time survives a stale sweep)."""
+        ...
+
+    def pending_work(self, execution_id: str) -> PendingWork:
+        """What is waiting for `execution_id` and not done yet: its armed timers, the outbox
+        entries addressed to it, and the child spawns it issued — read by its id, for a
+        monitor showing one execution."""
         ...
 
     def ids_with_prefix(self, prefix: str) -> list[str]:

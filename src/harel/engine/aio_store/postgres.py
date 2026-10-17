@@ -7,10 +7,13 @@ from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, Status
 from harel.engine.schema import DEFAULT_PREFIX, Names, store_schema
-from harel.engine.store import DefinitionRecord, OutboxEntry, SpawnEntry, StoreConflict, TimerOp
+from harel.engine.store import DefinitionRecord, OutboxEntry, PendingWork, SpawnEntry, StoreConflict, TimerOp
 from harel.engine.store._base import (
     _DEFINITION_COLUMNS,
     _IDS_WITH_PREFIX_SQL,
+    _PENDING_OUTBOX_SQL,
+    _PENDING_SPAWNS_SQL,
+    _PENDING_TIMERS_SQL,
     _PG_SCHEMA_LOCK,
     _PURGE_COMPANIONS_SQL,
     DEFAULT_TRACE_MAX,
@@ -21,6 +24,8 @@ from harel.engine.store._base import (
     _like_prefix,
     _listing_page,
     _listing_sql_pg,
+    _pending_work,
+    _pg_params,
 )
 from harel.spec.states import Event
 
@@ -301,6 +306,20 @@ class AsyncPostgresStore:
                     (execution_id, path, fire_at),
                 )
             await conn.commit()
+
+    async def pending_work(self, execution_id: str) -> PendingWork:
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+
+                async def rows(template: str) -> list:
+                    await cur.execute(_pg_params(self._n.sql(template)), (execution_id,))
+                    return await cur.fetchall()
+
+                timers = await rows(_PENDING_TIMERS_SQL)
+                outbox = await rows(_PENDING_OUTBOX_SQL)
+                spawns = await rows(_PENDING_SPAWNS_SQL)
+            await conn.commit()
+        return _pending_work(timers, outbox, spawns)
 
     async def ids_with_prefix(self, prefix: str) -> list[str]:
         async with self._pool.connection() as conn:

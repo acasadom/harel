@@ -15,6 +15,11 @@
   with `DefinitionChanged`, and a worker whose file differs from the version published refuses to
   start. Before, only a change to a state an execution was parked in failed it.
 - **A file declaring a machine twice is an error** (`DslError`); before, the last one won.
+- **A store backend outside harel implements `pending_work(execution_id)`** (see *Added*), checked
+  by `harel.testing.assert_pending_work_contract`.
+- **`MongoStore` creates an index** — on `outbox.target_id`, which `pending_work` reads by — and
+  takes `create_schema` like the other backends with a schema; with `create_schema=False` the
+  index is expected to exist.
 - **A transport outside harel takes two more arguments**: `publish(..., routing_key=None)` and
   `claim(..., routing_keys=None)` (see *Added*). The workers pass `routing_key` on every publish,
   so a transport that doesn't accept it fails; one that can't route claims raises
@@ -62,6 +67,21 @@
   it is the safety net, and a busy machine can be given capacity of its own. The in-memory,
   SQLite, libSQL, rqlite, Postgres and Mongo transports route claims; Redis and SQS refuse a worker
   given `machines` at its first claim rather than give it every machine's work.
+- **The monitor, reworked.**
+  - *The list* is filtered and paged by the store: status (`f`), roots or roots and children (`a`),
+    pages (`n`/`b`), so it reaches every execution; it shows whole ids, each execution's machine
+    and version, and when it was last written.
+  - *The detail* shows the machine version and its source digest, the tree's root machine and the
+    parent, and the error whole; tabs for the timeline, the context and history (shown without a
+    trace too), what is pending, and the children (`enter` opens one, `u` goes up to the parent).
+  - *Actions:* a failed execution can be terminated, and redriven (`d`) at the leaf state selected
+    in the tree.
+  - *Cost:* a refresh of the detail reads that execution only (`pending_work`), not every timer,
+    outbox entry and spawn in the store.
+- **`ExecutionStore.pending_work(execution_id)`** returns what is waiting for one execution — its
+  armed timers, the outbox entries addressed to it, the child spawns it issued (`PendingWork`) —
+  read by its id, on every backend. `ExecutionSummary` (`list_executions`) carries the
+  execution's `definition_version` and `updated_at`.
 - `definition_registry([...])` builds a registry with several versions of a machine,
   `machine_version()` and **`harel hash FILE`** give a machine's version and digest, and the
   monitor shows each execution its own version, from the store when it has no file for it.

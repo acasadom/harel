@@ -13,6 +13,7 @@ from harel.engine.store._base import (
     DEFAULT_TRACE_MAX,
     DefinitionRecord,
     OutboxEntry,
+    PendingWork,
     SpawnEntry,
     Step,
     StoreConflict,
@@ -432,6 +433,43 @@ class DynamoDBStore:
         except self._ClientError as exc:
             if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
                 raise  # the guard didn't match (stale sweep) — a no-op, as intended
+
+    def pending_work(self, execution_id: str) -> PendingWork:
+        kwargs: dict[str, Any] = {
+            "TableName": self._t("timers"),
+            "KeyConditionExpression": "execution_id = :e",
+            "ExpressionAttributeValues": {":e": {"S": execution_id}},
+        }
+        timers: list[tuple[str, float]] = []
+        while True:  # the timers' partition is the execution: a Query
+            resp = self._db.query(**kwargs)
+            timers += [(r["path"], float(r["fire_at"])) for r in map(self._item, resp.get("Items", []))]
+            if not resp.get("LastEvaluatedKey"):
+                break
+            kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+
+        def addressed(table: str, attr: str) -> list[dict]:  # outbox/spawns drain: a filtered Scan
+            rows = self._scan(
+                table,
+                FilterExpression="#a = :v",
+                ExpressionAttributeNames={"#a": attr},
+                ExpressionAttributeValues={":v": {"S": execution_id}},
+            )
+            return sorted(rows, key=lambda r: int(r["seq"]))
+
+        return PendingWork(
+            timers=sorted(timers, key=lambda t: (t[1], t[0])),
+            outbox=[
+                OutboxEntry(int(r["seq"]), r.get("target_id"), Event.model_validate_json(r["event"]))
+                for r in addressed("outbox", "target_id")
+            ],
+            spawns=[
+                SpawnEntry(
+                    int(r["seq"]), r["parent_id"], r["child_id"], r["root_path"], json.loads(r["context"])
+                )
+                for r in addressed("spawns", "parent_id")
+            ],
+        )
 
     def ids_with_prefix(self, prefix: str) -> list[str]:
         # a hash key can't be range-queried, so this is a filtered Scan of the whole table

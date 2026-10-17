@@ -386,6 +386,10 @@ A stale copy's later commit can't recreate it: an existing Execution is only eve
 (see (a) above).
 
 `ids_with_prefix(prefix)` is the same escaped `LIKE` query as `SqliteStore`'s, over `_query`.
+## Pending work
+
+`pending_work(id)` is three keyed reads: `harel_timers` by `execution_id` (its primary key), `harel_outbox` by `target_id` and `harel_spawns` by `parent_id` — the last two tables hold only what the relay hasn't delivered yet, so they stay small.
+
 ## Published definitions
 
 The published machine versions (see [published versions](../durability.md#changing-a-machine-with-executions-in-flight))
