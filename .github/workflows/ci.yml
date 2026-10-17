@@ -43,6 +43,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
       - run: uv sync --all-extras
+      # every backend's tests run here: a test whose dependency is missing is skipped, so a
+      # dependency that stopped installing would drop its backend's coverage without a failure
+      - name: Check the optional backends' test dependencies are installed
+        run: uv run python -c "import aiomoto, fakeredis, libsql, mongomock, moto, pygls, requests, textual"
       # The `stack` tests (real Redis/Postgres via docker-compose) are opt-in and
       # deselected by default (pyproject addopts = -m 'not stack'); the transport/
       # store logic is covered deterministically by the fakeredis tests.

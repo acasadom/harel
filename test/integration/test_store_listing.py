@@ -131,3 +131,23 @@ async def test_async_dynamodb_listing():
         await assert_async_listing_contract(store, ordered=False, ns=_ns())  # Scan is unordered
     finally:
         await store.close()
+
+
+def test_redis_listing():
+    from harel.engine.store import RedisStore
+
+    store = RedisStore.from_url(_env("redis", "HAREL_REDIS_URL"), prefix="s" + uuid.uuid4().hex[:8])
+    try:
+        assert_listing_contract(store, ordered=False, ns=_ns())
+    finally:
+        store.close()
+
+
+async def test_async_redis_listing():
+    from harel.engine.aio_store import AsyncRedisStore
+
+    store = AsyncRedisStore.from_url(_env("redis", "HAREL_REDIS_URL"), prefix="s" + uuid.uuid4().hex[:8])
+    try:
+        await assert_async_listing_contract(store, ordered=False, ns=_ns())
+    finally:
+        await store.close()

@@ -65,6 +65,8 @@
 - `definition_registry([...])` builds a registry with several versions of a machine,
   `machine_version()` and **`harel hash FILE`** give a machine's version and digest, and the
   monitor shows each execution its own version, from the store when it has no file for it.
+- `AsyncRqliteTransport.from_url` and `AsyncMongoTransport.from_url` take `clock`, as their sync
+  twins' constructors do.
 - **`mermaid.render(definition, active=[...])`** highlights the given states — by full path, an
   execution's `active_path` and its regions' — with a `classDef`/`class` pair (`active_style=` sets
   the style). **`mermaid.node_id(definition, path)`** gives the id the diagram uses for a state,

@@ -1,5 +1,5 @@
 """The published-definitions contract (`publish_definition` / `load_definition`) against the
-REAL networked backends (Postgres / rqlite / Mongo / DynamoDB-on-LocalStack), sync and async, in
+REAL networked backends (Postgres / rqlite / Mongo / Redis / DynamoDB-on-LocalStack), sync and async, in
 the stack.
 
 The in-process backends are covered in test/unit/engine/test_store_definitions.py; this runs
@@ -108,6 +108,26 @@ async def test_async_dynamodb_definitions():
 
     endpoint = _env("dynamodb", "HAREL_DYNAMODB_ENDPOINT")
     store = await AsyncDynamoDBStore.create(endpoint, os.environ.get("HAREL_AWS_REGION", "us-east-1"))
+    try:
+        await assert_async_definitions_contract(store, ns=_ns())
+    finally:
+        await store.close()
+
+
+def test_redis_definitions():
+    from harel.engine.store import RedisStore
+
+    store = RedisStore.from_url(_env("redis", "HAREL_REDIS_URL"), prefix="s" + uuid.uuid4().hex[:8])
+    try:
+        assert_definitions_contract(store, ns=_ns())
+    finally:
+        store.close()
+
+
+async def test_async_redis_definitions():
+    from harel.engine.aio_store import AsyncRedisStore
+
+    store = AsyncRedisStore.from_url(_env("redis", "HAREL_REDIS_URL"), prefix="s" + uuid.uuid4().hex[:8])
     try:
         await assert_async_definitions_contract(store, ns=_ns())
     finally:

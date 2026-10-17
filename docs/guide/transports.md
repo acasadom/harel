@@ -125,6 +125,29 @@ transports/sqs
 | [MongoTransport](transports/mongo) | per-group ready-index/lock doc; `claim` is one atomic sorted `find_one_and_update` |
 | [SqsTransport](transports/sqs) | SQS FIFO `MessageGroupId` (native) + visibility-timeout lease |
 
+### What each backend supports
+
+Every backend implements the protocol, sync and async, and passes `assert_transport_contract` —
+in CI for the in-process ones, in the stack against the real servers. Where a backend can't do
+something, it refuses it with an error rather than ignore it:
+
+| | In-memory | SQLite | libSQL | rqlite | Postgres | Mongo | Redis | SQS |
+|---|---|---|---|---|---|---|---|---|
+| durable | — | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| priority (`priority`, `min_priority`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | refuses |
+| routing by machine (`routing_keys`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | refuses | refuses |
+| deadlines by the injected clock | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | server TTLs | queue visibility |
+
+- **SQS** can't select what it receives — no per-group priority, no filter: it refuses both
+  (`ValueError` for a priority, `NotImplementedError` for `routing_keys`). A queue per priority or
+  per machine would be the SQS way; not built.
+- **Redis** keeps its ready sets per priority level, so a claim can't pick one machine's groups
+  out of them without scanning: it refuses `routing_keys`. A ready set per machine and priority
+  would do it; not built.
+- **Deadlines:** Redis keeps its group locks with server-side TTLs and SQS its visibility
+  timeouts, both on real time; the others measure leases and parks with the clock they are
+  given, which tests inject.
+
 ## Naming and schema ownership
 
 Like the stores, every persistent transport takes `prefix` (default `"harel"`), which names its

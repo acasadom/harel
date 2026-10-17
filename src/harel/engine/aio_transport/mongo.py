@@ -47,12 +47,13 @@ class AsyncMongoTransport:
         connect_retries: int = 30,
         retry_delay: float = 1.0,
         *,
+        clock: Callable[[], float] = time.time,
         prefix: str = DEFAULT_PREFIX,
         create_schema: bool = True,
     ) -> "AsyncMongoTransport":
         """Connect, retrying until Mongo answers; `prefix` names its collections (see
         `harel.engine.schema`), and with `create_schema=False` the claim index is expected to
-        exist."""
+        exist. `clock` is what its leases and parks are measured by."""
         import anyio
         import motor.motor_asyncio
         from pymongo.errors import PyMongoError
@@ -62,7 +63,7 @@ class AsyncMongoTransport:
             try:
                 client: Any = motor.motor_asyncio.AsyncIOMotorClient(url)
                 await client.admin.command("ping")
-                inst = cls(client, db_name, prefix=prefix)
+                inst = cls(client, db_name, clock, prefix=prefix)
                 if create_schema:
                     await inst._locks.create_index("available_at")  # the claim index
                     await inst._locks.create_index([("routing_key", 1), ("available_at", 1)])

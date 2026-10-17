@@ -130,6 +130,24 @@ stores/dynamodb
 | [MongoStore](stores/mongo) | document store, single-document atomic | `update_one({_id, version})` |
 | [DynamoDBStore](stores/dynamodb) | AWS serverless, pairs with `SqsTransport` | conditional write + `TransactWriteItems` |
 
+### What each backend supports
+
+Every backend implements the whole protocol, sync and async, and passes every contract in
+`harel.testing` (listing, purge, outbox, published definitions) — in CI for the in-process ones,
+in the stack (`make test-stack`) against the real servers. They differ in two places only:
+
+| | Dict | SQLite | libSQL | rqlite | Postgres | Mongo | Redis | DynamoDB |
+|---|---|---|---|---|---|---|---|---|
+| durable | — | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `prefix` / a schema it creates (`create_schema`) | — / — | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / — | ✓ / — | ✓ / ✓ |
+| `load_for_event` (load + dedupe in one round-trip) | — | async | ✓ | async | async | async | async | async |
+
+- **Dict** keeps everything in the process: tests and embedding, nothing to name or create.
+- **Mongo and Redis** have no schema to create: a Mongo collection and a Redis key come into
+  being with their first write, so they take a `prefix` but no `create_schema`.
+- **`load_for_event`** is an optional optimization: a worker that finds it folds the dedupe check
+  into its load, else it makes two calls. The sync ports run only under `execution="inline"`.
+
 ## Naming and schema ownership
 
 Every persistent backend takes a **`prefix`** (default `"harel"`) and names everything it creates
