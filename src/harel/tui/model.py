@@ -1,7 +1,7 @@
 """The monitor's read model — a pure facade over an `ExecutionStore` plus a
 `DefinitionSource`. No textual, no async, no timers of its own: it snapshots the store
-and builds the renderable data the UI displays. The textual app calls these from worker
-threads so a slow store never blocks the UI.
+and builds the renderable data the UI displays, reading one execution by its id. The textual
+app calls these from worker threads so a slow store never blocks the UI.
 """
 
 from __future__ import annotations
@@ -11,28 +11,47 @@ from typing import Any, Iterable, Optional
 
 from harel.definition.model import Definition
 from harel.engine.execution import Execution, ExecutionPage, Status
-from harel.engine.store import ExecutionStore, OutboxEntry, SpawnEntry
+from harel.engine.store import ExecutionStore, OutboxEntry, PendingWork, SpawnEntry
 from harel.tui.resolve import DefinitionSource
 from harel.tui.trace import TraceStep
 from harel.tui.tree import TreeModel, build_tree_model
 
-# a horizon far beyond any real fire_at: `due_timers(now)` returns fire_at <= now, so a
-# huge `now` yields ALL of an execution's timers (there is no "all timers" store method).
-_ALL_TIMERS_HORIZON = 1e18
+
+@dataclass(frozen=True)
+class ChildRow:
+    """A child execution the detail lists: an orthogonal region or an invoked submachine, with
+    the join state its parent keeps for it."""
+
+    id: str
+    kind: str  # "region" | "invoke"
+    root_path: str  # the region's branch ("" for an invoked machine)
+    finished: bool
+    outcome: Optional[str]
 
 
 @dataclass
 class ExecutionDetail:
     """Everything the detail screen shows for one Execution: the full record, the
-    statechart highlight tree, and the pending work scoped to this id."""
+    statechart highlight tree, what is waiting for it, its children and its timeline."""
 
     execution: Execution
     tree: TreeModel
-    timers: list[tuple[str, float]] = field(default_factory=list)  # (path, fire_at)
-    inbound: list[OutboxEntry] = field(default_factory=list)  # outbox entries targeting this id
-    spawns: list[SpawnEntry] = field(default_factory=list)  # pending child creations from this id
-    trace: list[TraceStep] = field(default_factory=list)  # the execution timeline (preview)
+    pending: PendingWork = field(default_factory=PendingWork)  # timers, inbound events, spawns
+    children: list[ChildRow] = field(default_factory=list)
+    trace: list[TraceStep] = field(default_factory=list)  # the execution timeline (HAREL_TRACE)
     source: Optional[str] = None  # the machine's .stm source text (collapsible view), if known
+
+    @property
+    def timers(self) -> list[tuple[str, float]]:
+        return self.pending.timers
+
+    @property
+    def inbound(self) -> list[OutboxEntry]:
+        return self.pending.outbox
+
+    @property
+    def spawns(self) -> list[SpawnEntry]:
+        return self.pending.spawns
 
 
 class MonitorModel:
@@ -84,29 +103,17 @@ class MonitorModel:
 
     def detail(self, execution_id: str) -> Optional[ExecutionDetail]:
         """Snapshot one Execution: load it, resolve its Definition (None => data-only
-        tree), build the highlight tree, and collect its pending timers/outbox/spawns.
-        Returns None if the execution no longer exists."""
+        tree), build the highlight tree, and read what is waiting for it — by its id, so a
+        refresh costs the same however large the store. Returns None if it no longer exists."""
         exe = self._store.load(execution_id)
         if exe is None:
             return None
         defn = self._definition(exe)
-        tree = build_tree_model(defn, exe)
-        timers = [
-            (path, fire_at)
-            for (eid, path, fire_at) in self._store.due_timers(_ALL_TIMERS_HORIZON)
-            if eid == execution_id
-        ]
-        timers.sort(key=lambda t: t[1])
-        inbound = [e for e in self._store.pending_outbox() if e.target_id == execution_id]
-        spawns = [s for s in self._store.pending_spawns() if s.parent_id == execution_id]
-        # PREVIEW: the execution timeline, if the store carries a trace (Sqlite/Dict). A
-        # store without the seam simply yields no timeline (the panel shows a placeholder).
-        reader = getattr(self._store, "read_trace", None)
-        # the store records `context_out` per step; derive each step's `context_in` from the
-        # previous step's `context_out` (the first step starts from the empty context).
+        # the timeline is the store's opt-in trace (HAREL_TRACE); it records `context_out` per
+        # step, so each step's `context_in` is the previous one's (the first starts empty)
         trace = []
         prev_ctx: dict = {}
-        for raw in reader(execution_id) if reader else []:
+        for raw in self._store.read_trace(execution_id):
             step = TraceStep.from_dict({**raw, "context_in": raw.get("context_in") or prev_ctx})
             trace.append(step)
             prev_ctx = step.context_out
@@ -114,12 +121,21 @@ class MonitorModel:
         if source is None and exe.definition_fqn is None:
             built = self._published_version(exe.definition_id, exe.definition_version or 1)
             source = built[1] if built is not None else None
+        children = [
+            ChildRow(
+                id=child_id,
+                kind="invoke" if child.submachine else "region",
+                root_path=child.root_path,
+                finished=child.finished,
+                outcome=child.outcome,
+            )
+            for child_id, child in exe.children.items()
+        ]
         return ExecutionDetail(
             execution=exe,
-            tree=tree,
-            timers=timers,
-            inbound=inbound,
-            spawns=spawns,
+            tree=build_tree_model(defn, exe),
+            pending=self._store.pending_work(execution_id),
+            children=children,
             trace=trace,
             source=source,
         )
@@ -148,6 +164,24 @@ class MonitorModel:
         from harel.engine import control
 
         control.terminate(self._store, execution_id)
+
+    def can_redrive(self, execution_id: str) -> bool:
+        """Redrive needs the Definition: its target is a state of the machine."""
+        exe = self._store.load(execution_id)
+        return exe is not None and exe.status is Status.FAILED and self._definition(exe) is not None
+
+    def redrive(self, execution_id: str, target_path: str) -> None:
+        """Bring a dead-lettered execution back at `target_path`, a leaf state of its machine
+        (`control.redrive`, which refuses a target it can't resume from with a reason)."""
+        from harel.engine import control
+
+        exe = self._store.load(execution_id)
+        if exe is None:
+            return
+        defn = self._definition(exe)
+        if defn is None:
+            raise ValueError("redrive needs the machine's definition, which this monitor can't find")
+        control.redrive(self._store, defn, execution_id, target_path)
 
     def can_cancel(self, execution_id: str) -> bool:
         """Cancel needs the Definition (to decide cooperative vs forceful). When the

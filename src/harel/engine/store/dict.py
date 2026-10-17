@@ -10,6 +10,7 @@ from harel.engine.store._base import (
     DEFAULT_TRACE_MAX,
     DefinitionRecord,
     OutboxEntry,
+    PendingWork,
     SpawnEntry,
     Step,
     StoreConflict,
@@ -147,6 +148,16 @@ class DictStore:
     def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None:
         if self._timers.get((execution_id, path)) == fire_at:
             del self._timers[(execution_id, path)]
+
+    def pending_work(self, execution_id: str) -> PendingWork:
+        timers = sorted(
+            ((p, at) for (e, p), at in self._timers.items() if e == execution_id), key=lambda t: (t[1], t[0])
+        )
+        return PendingWork(
+            timers=timers,
+            outbox=[e for e in self._outbox if e.target_id == execution_id],
+            spawns=[s for s in self._spawns if s.parent_id == execution_id],
+        )
 
     def ids_with_prefix(self, prefix: str) -> list[str]:
         return [i for i in self._by_id if i.startswith(prefix)]

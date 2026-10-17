@@ -12,6 +12,7 @@ def test_my_store_meets_the_protocol():
     assert_purge_contract(MyStore())
     assert_outbox_contract(MyStore())
     assert_definitions_contract(MyStore())
+    assert_pending_work_contract(MyStore())
 
 def test_my_transport_meets_the_protocol():
     assert_transport_contract(lambda clock: MyTransport(clock=clock))
@@ -27,6 +28,7 @@ runner works.
 from harel.testing.definitions import assert_async_definitions_contract, assert_definitions_contract
 from harel.testing.listing import assert_async_listing_contract, assert_listing_contract
 from harel.testing.outbox import assert_async_outbox_contract, assert_outbox_contract
+from harel.testing.pending import assert_async_pending_work_contract, assert_pending_work_contract
 from harel.testing.purge import assert_async_purge_contract, assert_purge_contract
 from harel.testing.routing import (
     assert_async_machine_routing_contract,
@@ -37,6 +39,8 @@ from harel.testing.routing import (
 from harel.testing.transport import assert_async_transport_contract, assert_transport_contract
 
 __all__ = [
+    "assert_async_pending_work_contract",
+    "assert_pending_work_contract",
     "assert_async_machine_routing_contract",
     "assert_async_refuses_machine_routing",
     "assert_machine_routing_contract",

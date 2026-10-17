@@ -70,3 +70,14 @@ def test_a_trace_step_shows_what_a_set_wrote():
     assert "[b]set[/]" not in step_markup(
         TraceStep.from_dict({"index": 0, "event_kind": "Start", "from_path": None, "to_path": "A"})
     )
+
+
+def test_redrive_brings_a_failed_execution_back_at_a_leaf():
+    store = DictStore()
+    b = next(p for p, n in DEFN.index.items() if n.name == "B")
+    store.save(Execution(id="e1", definition_id="M", status=Status.FAILED, active_path=b, error="x"))
+    model = _model(store)
+    assert model.can_redrive("e1")
+    model.redrive("e1", b)
+    assert store.load("e1").status is Status.RUNNING
+    assert not model.can_redrive("e1")

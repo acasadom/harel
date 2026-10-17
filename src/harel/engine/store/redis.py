@@ -12,6 +12,7 @@ from harel.engine.store._base import (
     DEFAULT_TRACE_MAX,
     DefinitionRecord,
     OutboxEntry,
+    PendingWork,
     SpawnEntry,
     Step,
     StoreConflict,
@@ -219,6 +220,31 @@ class RedisStore:
 
     def ack_outbox(self, seq: int) -> None:
         self._r.hdel(self._k("outbox"), str(seq))
+
+    def pending_work(self, execution_id: str) -> PendingWork:
+        # the timers are one sorted set, ordered by when they fire: ZSCAN matches this execution's
+        # members server-side (the set is read whole there, not sent). The outbox and spawn
+        # hashes drain as the relay runs, so they are read whole and filtered here.
+        timers = []
+        for member, score in self._r.zscan_iter(
+            self._k("timers"), match=_glob_escape(execution_id) + "\x00*"
+        ):
+            timers.append((_text(member).partition("\x00")[2], float(score)))
+        outbox = [
+            OutboxEntry(int(seq), p["t"], Event.model_validate_json(p["e"]))
+            for seq, p in ((s, json.loads(v)) for s, v in self._r.hgetall(self._k("outbox")).items())
+            if p["t"] == execution_id
+        ]
+        spawns = [
+            SpawnEntry(int(seq), p["p"], p["c"], p["r"], p["x"])
+            for seq, p in ((s, json.loads(v)) for s, v in self._r.hgetall(self._k("spawns")).items())
+            if p["p"] == execution_id
+        ]
+        return PendingWork(
+            timers=sorted(timers, key=lambda t: (t[1], t[0])),
+            outbox=sorted(outbox, key=lambda e: e.seq),
+            spawns=sorted(spawns, key=lambda e: e.seq),
+        )
 
     def ids_with_prefix(self, prefix: str) -> list[str]:
         head = self._k("exe:")

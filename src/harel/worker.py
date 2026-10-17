@@ -124,7 +124,9 @@ def build_store(cfg: Optional[Config] = None) -> ExecutionStore:
     if backend == "rqlite":
         return RqliteStore.from_url(require(cfg.rqlite_url, "HAREL_RQLITE_URL"), **cfg.schema_kwargs())
     if backend == "mongo":
-        return MongoStore.from_url(require(cfg.mongo_url, "HAREL_MONGO_URL"), cfg.mongo_db, prefix=cfg.prefix)
+        return MongoStore.from_url(
+            require(cfg.mongo_url, "HAREL_MONGO_URL"), cfg.mongo_db, **cfg.schema_kwargs()
+        )
     if backend == "libsql":
         return LibsqlStore(
             require(cfg.libsql_db, "HAREL_LIBSQL_DB"), **cfg.libsql_kwargs(), **cfg.schema_kwargs()
@@ -187,7 +189,7 @@ async def build_store_async(cfg: Optional[Config] = None) -> Any:
         from harel.engine.aio_store import AsyncMongoStore
 
         return await AsyncMongoStore.from_url(
-            require(cfg.mongo_url, "HAREL_MONGO_URL"), cfg.mongo_db, prefix=cfg.prefix
+            require(cfg.mongo_url, "HAREL_MONGO_URL"), cfg.mongo_db, **cfg.schema_kwargs()
         )
     if backend == "rqlite":
         from harel.engine.aio_store import AsyncRqliteStore

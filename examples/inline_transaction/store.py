@@ -20,7 +20,9 @@ from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, S
 from harel.engine.schema import DEFAULT_PREFIX, Names
 from harel.engine.store.base import (
     DEFAULT_TRACE_MAX,
+    DefinitionRecord,
     OutboxEntry,
+    PendingWork,
     SpawnEntry,
     Step,
     StoreConflict,
@@ -127,20 +129,8 @@ class ConnectionStore:
     ) -> ExecutionPage:
         statuses = set(status) if status is not None else None
         summaries = [
-            ExecutionSummary(
-                id=e.id,
-                definition_id=e.definition_id,
-                version=e.version,
-                status=e.status,
-                outcome=e.outcome,
-                active_path=e.active_path,
-                parent_id=e.parent_id,
-                finished_at=e.finished_at,
-            )
-            for e in (
-                Execution.model_validate_json(r[0])
-                for r in self._q("SELECT data FROM {executions} ORDER BY id")
-            )
+            ExecutionSummary.of(Execution.model_validate_json(r[0]))
+            for r in self._q("SELECT data FROM {executions} ORDER BY id")
         ]
         found = [s for s in summaries if matches(s, statuses, definition_id, roots_only)]
         off = decode_offset(cursor)
@@ -186,6 +176,26 @@ class ConnectionStore:
             (execution_id, path, fire_at),
         )
 
+    def pending_work(self, execution_id: str) -> PendingWork:
+        timers = self._q(
+            "SELECT path, fire_at FROM {timers} WHERE execution_id = ? ORDER BY fire_at, path",
+            (execution_id,),
+        )
+        outbox = self._q(
+            "SELECT seq, target_id, event FROM {outbox} WHERE target_id = ? ORDER BY seq", (execution_id,)
+        )
+        spawns = self._q(
+            "SELECT seq, parent_id, child_id, root_path, context FROM {spawns} WHERE parent_id = ? ORDER BY seq",
+            (execution_id,),
+        )
+        return PendingWork(
+            timers=[(path, fire_at) for path, fire_at in timers],
+            outbox=[
+                OutboxEntry(seq, target, Event.model_validate_json(event)) for seq, target, event in outbox
+            ],
+            spawns=[SpawnEntry(seq, p, c, r, json.loads(ctx)) for seq, p, c, r, ctx in spawns],
+        )
+
     def read_trace(self, execution_id: str) -> list[dict]:
         rows = self._q("SELECT idx, entry FROM {trace} WHERE execution_id = ? ORDER BY idx", (execution_id,))
         return [{**json.loads(entry), "index": idx} for idx, entry in rows]
@@ -206,6 +216,33 @@ class ConnectionStore:
         ):
             self._q(f"DELETE FROM {{{table}}} WHERE {column} = ?", (execution_id,))
         return bool(deleted)
+
+    # --- published machine versions ----------------------------------------------------------
+    def publish_definition(self, record: DefinitionRecord) -> DefinitionRecord:
+        self._q(
+            "INSERT OR IGNORE INTO {definitions} (definition_id, version, digest, source, published_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                record.definition_id,
+                record.version,
+                record.digest,
+                json.dumps(record.source),
+                record.published_at,
+            ),
+        )
+        stored = self.load_definition(record.definition_id, record.version)
+        assert stored is not None  # just stored, or stored before
+        return stored
+
+    def load_definition(self, definition_id: str, version: int) -> Optional[DefinitionRecord]:
+        row = self._q(
+            "SELECT definition_id, version, digest, source, published_at FROM {definitions} "
+            "WHERE definition_id = ? AND version = ?",
+            (definition_id, version),
+        ).fetchone()
+        if row is None:
+            return None
+        return DefinitionRecord(row[0], int(row[1]), row[2], json.loads(row[3]), row[4])
 
     def close(self) -> None:
         """The connection is the caller's: nothing to release."""

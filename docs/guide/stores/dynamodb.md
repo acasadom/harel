@@ -465,6 +465,10 @@ recreated.
 `ids_with_prefix(prefix)` has no key range to query on a hash key, so it is a `Scan` of
 `executions` with `begins_with(id, :prefix)` — a full-table read per purged tree. Fine for a
 periodic retention job; worth knowing on a very large table.
+## Pending work
+
+`pending_work(id)` is a `Query` on the `timers` table (its partition is the execution) and a filtered `Scan` of `outbox` (by `target_id`) and `spawns` (by `parent_id`) — the same trade-off as the relay's reads: those tables drain and stay near-empty.
+
 ## Published definitions
 
 The published machine versions live in their own table, `harel_definitions` —

@@ -211,3 +211,165 @@ async def test_data_only_when_definition_unresolved_disables_cancel():
         await pilot.press("c")
         await _settle(app, pilot)
         assert store.load("run-1").status is Status.RUNNING
+
+
+# --- the list: filtered and paged by the store ---------------------------------------
+
+
+def _tree_store():
+    """A root with a region child, a failed root (with context), and a done one."""
+    store = DictStore()
+    store.save(Execution(id="p", definition_id="M", status=Status.RUNNING, active_path=_S1, children={}))
+    store.save(Execution(id="p:Work:0", definition_id="M", status=Status.RUNNING, parent_id="p"))
+    store.save(
+        Execution(
+            id="dead",
+            definition_id="M",
+            status=Status.FAILED,
+            active_path=_S2,
+            error="RuntimeError: boom",
+            context={"order": 42},
+        )
+    )
+    store.save(Execution(id="done", definition_id="M", status=Status.DONE, outcome="success"))
+    return store
+
+
+def _row_ids(app):
+    return [r.value for r in app.screen.query_one(DataTable).rows]
+
+
+async def test_the_list_shows_roots_and_the_children_on_request():
+    app = MonitorApp(_model(_tree_store()), interval=10.0)
+    async with app.run_test() as pilot:
+        await _settle(app, pilot)
+        assert "p:Work:0" not in _row_ids(app)  # roots only by default
+        await pilot.press("a")
+        await _settle(app, pilot)
+        assert "p:Work:0" in _row_ids(app)
+
+
+async def test_the_list_filters_by_status_in_the_store():
+    app = MonitorApp(_model(_tree_store()), interval=10.0)
+    async with app.run_test() as pilot:
+        await _settle(app, pilot)
+        await pilot.press("f")  # live
+        await _settle(app, pilot)
+        assert _row_ids(app) == ["p"]
+        await pilot.press("f")  # failed
+        await _settle(app, pilot)
+        assert _row_ids(app) == ["dead"]
+
+
+async def test_the_list_pages(monkeypatch):
+    from harel.tui import screens
+
+    monkeypatch.setattr(screens, "_PAGE", 2)
+    app = MonitorApp(_model(_tree_store()), interval=10.0)
+    async with app.run_test() as pilot:
+        await _settle(app, pilot)
+        first = _row_ids(app)
+        assert len(first) == 2
+        await pilot.press("n")
+        await _settle(app, pilot)
+        second = _row_ids(app)
+        assert second and not set(first) & set(second)
+        await pilot.press("b")
+        await _settle(app, pilot)
+        assert _row_ids(app) == first
+
+
+# --- the detail ----------------------------------------------------------------------
+
+
+async def _open(app, pilot, execution_id):
+    table = app.screen.query_one(DataTable)
+    table.move_cursor(row=_row_ids(app).index(execution_id))
+    await pilot.press("enter")
+    await _settle(app, pilot)
+
+
+async def test_a_failed_execution_shows_its_error_and_can_be_terminated_or_redriven():
+    store = _tree_store()
+    app = MonitorApp(_model(store), interval=10.0)
+    async with app.run_test(size=(140, 45)) as pilot:
+        await _settle(app, pilot)
+        await _open(app, pilot, "dead")
+        assert "RuntimeError: boom" in str(app.screen.query_one("#error", Static).render())
+        disabled = {b.id: b.disabled for b in app.screen.query(Button)}
+        assert disabled["btn-terminate"] is False and disabled["btn-redrive"] is False
+        assert disabled["btn-cancel"] is True and disabled["btn-suspend"] is True
+
+        tree = app.screen.query_one(Tree)
+        from harel.tui.widgets import find_node
+
+        tree.move_cursor(find_node(tree, _S1))  # a leaf state to resume from
+        await pilot.press("d")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmModal)
+        await pilot.press("y")
+        await _settle(app, pilot)
+        redriven = store.load("dead")
+        assert (redriven.status, redriven.active_path, redriven.error) == (Status.RUNNING, _S1, None)
+
+
+async def test_redrive_needs_a_leaf_selected():
+    store = _tree_store()
+    app = MonitorApp(_model(store), interval=10.0)
+    async with app.run_test(size=(140, 45)) as pilot:
+        await _settle(app, pilot)
+        await _open(app, pilot, "dead")
+        tree = app.screen.query_one(Tree)
+        from harel.tui.widgets import find_node
+
+        tree.move_cursor(find_node(tree, next(p for p, n in DEFN.index.items() if n.name == "Work")))
+        await pilot.press("d")
+        await _settle(app, pilot)
+        assert not isinstance(app.screen, ConfirmModal)
+        assert store.load("dead").status is Status.FAILED
+
+
+async def test_a_failed_execution_terminates_to_cancelled():
+    store = _tree_store()
+    app = MonitorApp(_model(store), interval=10.0)
+    async with app.run_test(size=(140, 45)) as pilot:
+        await _settle(app, pilot)
+        await _open(app, pilot, "dead")
+        await pilot.press("t")
+        await pilot.pause()
+        await pilot.press("y")
+        await _settle(app, pilot)
+        assert store.load("dead").status is Status.CANCELLED
+
+
+async def test_the_context_shows_without_a_trace():
+    app = MonitorApp(_model(_tree_store()), interval=10.0)
+    async with app.run_test(size=(140, 45)) as pilot:
+        await _settle(app, pilot)
+        await _open(app, pilot, "dead")
+        assert "order" in str(app.screen.query_one("#context", Static).render())
+        assert "HAREL_TRACE" in str(app.screen.query_one("#step-detail", Static).render())
+
+
+async def test_children_open_and_u_goes_up_to_the_parent():
+    store = _tree_store()
+    parent = store.load("p")
+    from harel.engine.execution import ChildState
+
+    parent.children = {"p:Work:0": ChildState(root_path="Work")}
+    store.save(parent)
+    app = MonitorApp(_model(store), interval=10.0)
+    async with app.run_test(size=(140, 45)) as pilot:
+        await _settle(app, pilot)
+        await _open(app, pilot, "p")
+        children = app.screen.query_one("#children", DataTable)
+        assert [r.value for r in children.rows] == ["p:Work:0"]
+        app.screen.query_one("#tabs").active = "tab-children"
+        await pilot.pause()
+        children.focus()
+        await pilot.press("enter")
+        await _settle(app, pilot)
+        assert isinstance(app.screen, DetailScreen) and app.screen.execution_id == "p:Work:0"
+        await pilot.press("u")
+        await _settle(app, pilot)
+        assert app.screen.execution_id == "p"

@@ -233,6 +233,10 @@ The result: `_trace[id]` is a bounded window of the most recent steps, but the s
 `index` values reflect the true monotonic position in the full timeline (older indices are
 simply no longer present once trimmed). Default window: 200 steps.
 
+## Pending work
+
+`pending_work(id)` filters the in-memory timers, outbox and spawn lists by the id.
+
 ## Published definitions
 
 `publish_definition` / `load_definition` keep the published machine versions in

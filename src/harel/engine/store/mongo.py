@@ -12,6 +12,7 @@ from harel.engine.store._base import (
     DEFAULT_TRACE_MAX,
     DefinitionRecord,
     OutboxEntry,
+    PendingWork,
     SpawnEntry,
     Step,
     StoreConflict,
@@ -47,8 +48,12 @@ class MongoStore:
     and tests use mongomock. Collections live under `db_name`, named by `prefix`: ``<prefix>_executions``
     (the documents) + ``<prefix>_counters`` (the monotonic outbox/spawn seq allocator)."""
 
-    def __init__(self, client: Any, db_name: str = "harel", *, prefix: str = DEFAULT_PREFIX) -> None:
-        """`prefix` names its collections under `db_name` (see `harel.engine.schema`)."""
+    def __init__(
+        self, client: Any, db_name: str = "harel", *, prefix: str = DEFAULT_PREFIX, create_schema: bool = True
+    ) -> None:
+        """`prefix` names its collections under `db_name` (see `harel.engine.schema`). With
+        `create_schema` (the default) it creates its one index — `outbox.target_id`, which
+        `pending_work` reads by; with `False` the index is expected to exist."""
         from pymongo import ReturnDocument
         from pymongo.errors import DuplicateKeyError
 
@@ -61,6 +66,8 @@ class MongoStore:
         self._after = ReturnDocument.AFTER
         self._DuplicateKeyError = DuplicateKeyError
         self.trace_max = DEFAULT_TRACE_MAX
+        if create_schema:
+            self._exes.create_index("outbox.target_id", sparse=True)
 
     @classmethod
     def from_url(
@@ -71,6 +78,7 @@ class MongoStore:
         retry_delay: float = 1.0,
         *,
         prefix: str = DEFAULT_PREFIX,
+        create_schema: bool = True,
     ) -> "MongoStore":
         """Convenience constructor; imports `pymongo` lazily (the optional dep).
         Pings the server, retrying so a worker starting alongside Mongo (compose)
@@ -85,7 +93,7 @@ class MongoStore:
             try:
                 client: Any = pymongo.MongoClient(url)
                 client.admin.command("ping")
-                return cls(client, db_name, prefix=prefix)
+                return cls(client, db_name, prefix=prefix, create_schema=create_schema)
             except PyMongoError as exc:
                 last = exc
                 time.sleep(retry_delay)
@@ -283,6 +291,27 @@ class MongoStore:
         # guarded on the stored value: a concurrent re-schedule to a new time wins
         key = f"timers.{self._enc(path)}"
         self._exes.update_one({"_id": execution_id, key: fire_at}, {"$unset": {key: ""}})
+
+    def pending_work(self, execution_id: str) -> PendingWork:
+        own = self._exes.find_one({"_id": execution_id}, {"timers": 1, "spawns": 1}) or {}
+        timers = [(self._dec(enc), float(at)) for enc, at in (own.get("timers") or {}).items()]
+        spawns = [
+            SpawnEntry(s["seq"], s["parent_id"], s["child_id"], s["root_path"], dict(s["context"]))
+            for s in own.get("spawns", [])
+        ]
+        # an outbox entry lives in the document of the execution that emitted it: the index on
+        # `outbox.target_id` finds the ones addressed to this execution
+        outbox = [
+            OutboxEntry(e["seq"], e["target_id"], Event.model_validate_json(e["event"]))
+            for doc in self._exes.find({"outbox.target_id": execution_id}, {"outbox": 1})
+            for e in doc.get("outbox", [])
+            if e["target_id"] == execution_id
+        ]
+        return PendingWork(
+            timers=sorted(timers, key=lambda t: (t[1], t[0])),
+            outbox=sorted(outbox, key=lambda e: e.seq),
+            spawns=sorted(spawns, key=lambda e: e.seq),
+        )
 
     def ids_with_prefix(self, prefix: str) -> list[str]:
         query = {"_id": {"$regex": "^" + re.escape(prefix)}}

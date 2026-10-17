@@ -26,6 +26,7 @@ a twin under `harel/engine/aio_store/` (same data model, awaited IO):
 | `list_executions(...)` | a page of lightweight summaries, for the monitor and `purge_finished` |
 | `ids_with_prefix(prefix)` | ids of the stored Executions starting with `prefix` — how `purge` finds every descendant of a tree (a child's id extends its parent's), including those the parent no longer lists |
 | `publish_definition(record)` / `load_definition(id, version)` | the published machine versions: a version is stored once — publishing it again returns the one stored first — and read by the runners that haven't loaded it (see [changing a machine](durability.md#changing-a-machine-with-executions-in-flight)) |
+| `pending_work(id)` | what is waiting for one execution — its armed timers, the outbox entries addressed to it, the child spawns it issued — read by its id; the monitor's detail view |
 | `purge(id, expected_version)` | permanently delete one Execution and every row keyed by it (dedupe, trace, timers, outbox entries addressed to it, spawn intents it issued), iff still at `expected_version` — see [purge](control-plane.md#purge) |
 | `close()` | release the connection/client |
 
@@ -56,13 +57,14 @@ each:
 
 ```text
 from harel.testing import assert_listing_contract, assert_outbox_contract, assert_purge_contract
-from harel.testing import assert_definitions_contract
+from harel.testing import assert_definitions_contract, assert_pending_work_contract
 
 def test_my_store():
     assert_listing_contract(MyStore(), ordered=True)   # ordered=False for an unordered scan
     assert_purge_contract(MyStore())
     assert_outbox_contract(MyStore())
     assert_definitions_contract(MyStore())
+    assert_pending_work_contract(MyStore())
 ```
 
 Each has an `assert_async_*` twin for an async store, and takes `ns=` to prefix the ids it seeds
@@ -133,18 +135,19 @@ stores/dynamodb
 ### What each backend supports
 
 Every backend implements the whole protocol, sync and async, and passes every contract in
-`harel.testing` (listing, purge, outbox, published definitions) — in CI for the in-process ones,
+`harel.testing` (listing, purge, outbox, published definitions, pending work) — in CI for the in-process ones,
 in the stack (`make test-stack`) against the real servers. They differ in two places only:
 
 | | Dict | SQLite | libSQL | rqlite | Postgres | Mongo | Redis | DynamoDB |
 |---|---|---|---|---|---|---|---|---|
 | durable | — | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `prefix` / a schema it creates (`create_schema`) | — / — | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / — | ✓ / — | ✓ / ✓ |
+| `prefix` / a schema it creates (`create_schema`) | — / — | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ | ✓ / ✓ (an index) | ✓ / — | ✓ / ✓ |
 | `load_for_event` (load + dedupe in one round-trip) | — | async | ✓ | async | async | async | async | async |
 
 - **Dict** keeps everything in the process: tests and embedding, nothing to name or create.
-- **Mongo and Redis** have no schema to create: a Mongo collection and a Redis key come into
-  being with their first write, so they take a `prefix` but no `create_schema`.
+- **Redis** has no schema to create: a key comes into being with its first write, so it takes a
+  `prefix` but no `create_schema`. **Mongo**'s collections do too; what it creates is one index,
+  on `outbox.target_id`, which `pending_work` reads by.
 - **`load_for_event`** is an optional optimization: a worker that finds it folds the dedupe check
   into its load, else it makes two calls. The sync ports run only under `execution="inline"`.
 

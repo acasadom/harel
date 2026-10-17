@@ -150,7 +150,13 @@ def test_inline_transaction_store_meets_the_contracts():
 
     from examples.inline_transaction.store import ConnectionStore
     from harel.engine.schema import store_schema
-    from harel.testing import assert_listing_contract, assert_outbox_contract, assert_purge_contract
+    from harel.testing import (
+        assert_definitions_contract,
+        assert_listing_contract,
+        assert_outbox_contract,
+        assert_pending_work_contract,
+        assert_purge_contract,
+    )
 
     conn = sqlite3.connect(":memory:")
     for statement in store_schema("sqlite"):
@@ -159,3 +165,5 @@ def test_inline_transaction_store_meets_the_contracts():
     assert_listing_contract(store, ordered=True)
     assert_purge_contract(store)
     assert_outbox_contract(store)
+    assert_definitions_contract(store)
+    assert_pending_work_contract(store)

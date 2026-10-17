@@ -2,8 +2,8 @@
 
 A terminal UI to watch executions run — "k9s for statecharts". List the executions in a store,
 drill into one to see its **statechart with the active state highlighted** plus its data
-(status, outcome, context, pending timers, history), and drive the **control plane**
-(suspend/resume/cancel/terminate) by keyboard. It polls the store, so it works against any backend
+(status, machine version, error, context, history, pending timers and events, children), and
+drive the **control plane** (suspend/resume/cancel/terminate/redrive) by keyboard. It polls the store, so it works against any backend
 and any running worker fleet — it's a read/observe client, not part of the engine.
 
 ```bash
@@ -31,49 +31,68 @@ execution still on version 1 is drawn with version 1, and its DSL source shown, 
 moved on to version 2. Nothing it builds from the store is run: the monitor runs no actions.
 
 Without either the monitor still runs **data-only**: every panel works (status, context, timers,
-history), but the tree shows a placeholder and `cancel` is disabled (it needs the Definition to
-decide cooperative-vs-forceful — `terminate`/`suspend`/`resume` still work).
+history), but the tree shows a placeholder, and `cancel` and `redrive` are disabled — they need the
+Definition (to decide cooperative-vs-forceful, and to know the states); `terminate`/`suspend`/`resume`
+still work.
 
 ## The two screens
 
-**List** — a table of executions (id, definition, status, outcome, active state, and the record's
-write `version` — its CAS counter, not the machine's version),
-auto-refreshing. Keys: `enter` opens the selected execution, `/` filters by a free substring
-(id/definition/status), `r` forces a refresh, `p` pauses/resumes auto-refresh, `q` quits.
+**List** — the executions, a page at a time, auto-refreshing: id, machine and version (`order v2`),
+status, outcome, active state, and how long ago it was last written. The **store** filters and
+pages it, so it reaches every execution however many there are:
 
-**Detail** — opened with `enter`. The left column shows the **statechart tree** with the **active
-state highlighted** (ancestors bolded; orthogonal regions and `invoke` children annotated with their
-join outcome), and a collapsible **DSL source** panel underneath (the `.stm` of the version the execution runs, folded
-by default — from `--definitions-dir`, or from the store when it was published). The right column is a status header, a row of control buttons,
-and a navigable **execution timeline** over a per-step **detail**.
+| key | |
+|-----|--|
+| `f` | cycle the status filter: any → live (pending, running, suspended, cancelling) → failed → done → cancelled |
+| `a` | show the children too (orthogonal regions, fan-out instances, invoked machines); by default only the roots of their trees |
+| `n` / `b` | next / previous page |
+| `/` | narrow the page shown by a substring of id, machine or status (`escape` clears it) |
+| `r` / `p` | refresh now / pause or resume the auto-refresh |
+| `enter` | open the selected execution |
 
-Navigate the timeline (`↑/↓`) and each step shows its **event in, transition, guards, actions, what
-a `set` wrote, and context before → after**; the step's target state is marked in the tree (a `◀` marker) so you can
-see both the live state and the one you're inspecting. Control-plane actions are both **keys and
-buttons** (the buttons enable/disable per status):
+**Detail** — opened with `enter`. On the left, the **statechart tree** with the **active state
+highlighted** (ancestors bolded; orthogonal regions and `invoke` children annotated with their join
+outcome) and the machine's **DSL source**, folded — the `.stm` of the version the execution runs,
+from `--definitions-dir`, or from the store when it was published.
+
+On the right, a header — status, id, the **machine version** and its source digest, the root
+machine of its tree when it is a child of another's, its parent, outcome, and when it was created
+and last written — then its **error**, whole, when it has one (a dead letter's reason, a
+`DefinitionChanged`), the control buttons, and four tabs:
+
+- **Timeline** — one step per event, when the runners record one (see below): navigate it with
+  `↑/↓` and each step shows its **event in, transition, guards, actions, what a `set` wrote, and
+  context before → after**; the step's target state is marked in the tree (`◀`).
+- **Context** — the execution's context and its history (the last active child of each composite),
+  trace or no trace.
+- **Pending** — what is waiting for it: armed timers (and when they fire), events queued for it
+  but not delivered yet, children it is about to spawn.
+- **Children** — its regions and invoked machines, with their join state; `enter` opens one.
+  `u` goes up to the parent from a child.
+
+Control-plane actions are both **keys and buttons**, each enabled only where it applies:
 
 | key / button | action | |
 |-----|--------|--|
-| `s` Suspend | suspend | immediate (RUNNING → SUSPENDED) |
-| `R` Resume | resume | immediate (SUSPENDED → RUNNING) |
-| `c` Cancel | cancel | confirm; modelled if the machine has an `on Cancel`, else forceful; disabled when the Definition is unresolved |
-| `t` Terminate | terminate | confirm; forceful (→ CANCELLED) |
+| `s` Suspend | suspend | a running execution, immediately (RUNNING → SUSPENDED) |
+| `R` Resume | resume | a suspended one, immediately (SUSPENDED → RUNNING) |
+| `c` Cancel | cancel | a live one; confirm; modelled if the machine has an `on Cancel`, else forceful; needs the Definition |
+| `t` Terminate | terminate | any unfinished one, a failed one included; confirm; forceful (→ CANCELLED) |
+| `d` Redrive | redrive | a failed one, at the **leaf state selected in the tree**; confirm; needs the Definition — see [redrive](control-plane.md#redrive--repairing-a-dead-letter) |
+| `u` | parent | open the parent of a child |
 | `escape`/`h` | back | |
 
-The destructive actions (`c`/`t`) ask for confirmation. All of these go through the
-[control plane](control-plane.md), which CASes the record so the change lands at the next event
-boundary.
+All of them go through the [control plane](control-plane.md), which CASes the record so the change
+lands at the next event boundary; one it refuses (a redrive target it can't resume from, say)
+shows its reason in a toast.
 
 > **The timeline is opt-in.** Recording it is **off by default** (the engine keeps a state snapshot,
 > not an event log, so the hot path pays nothing). Enable it with **`HAREL_TRACE=1`** (or
-> `DurableRunner(..., trace=True)` / `DistributedRunner(..., trace=True)`): the Driver then records one
-> step per event — event in, transition from→to, the actions run, and the resulting context — **in the
-> same `commit` transaction** as the state advance (no extra round-trip, and `load` is unaffected). Kept
-> as a ring of the last `HAREL_TRACE_MAX` steps (default 200). Recorded by **every store backend** in its
-> commit transaction / atomic write (SQL via an in-txn insert, Redis via a ring list in the MULTI, Mongo
-> via a `$push/$slice` array, DynamoDB via a Put+Delete in the `TransactWriteItems`). Without a trace the
-> timeline shows a placeholder; the tree, source, status, control plane and pending-work panels all work
-> regardless.
+> `DurableRunner(..., trace=True)` / `DistributedRunner(..., trace=True)`): the runners then record
+> one step per event — event in, transition from→to, the actions run, and the resulting context —
+> **in the same `commit` transaction** as the state advance (no extra round-trip, and `load` is
+> unaffected). Kept as a ring of the last `HAREL_TRACE_MAX` steps (default 200), by every store
+> backend. Without it the Timeline tab says so; everything else works regardless.
 
 ## Theming
 
@@ -90,8 +109,12 @@ busy store, raise `--interval` or pause with `p`.
 
 ## Notes
 
-- Listing is a lightweight projection (`ExecutionStore.list_executions` → `ExecutionSummary`); the
-  full record is loaded only when you open an execution. On the durable backends the status filter
-  is applied as the list is scanned (status isn't a broken-out column) — fine for operator volumes.
+- The list is a lightweight projection (`ExecutionStore.list_executions` → `ExecutionSummary`),
+  filtered and paged by the store; the full record is loaded only when you open an execution. On
+  the durable backends the status filter is applied as the list is scanned (status isn't a
+  broken-out column) — fine for operator volumes. The list is ordered by id.
+- The detail reads one execution: its record, its trace, and what is pending for it
+  (`ExecutionStore.pending_work`), each by the execution's id — so a refresh costs the same however
+  large the store.
 - The pure model (`harel.tui.model`/`tree`/`summary`) has no textual dependency and is unit-tested
   on its own; the textual UI is tested through Textual's Pilot.

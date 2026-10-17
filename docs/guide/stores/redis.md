@@ -384,6 +384,10 @@ so a stale copy can't recreate it.
 
 `ids_with_prefix(prefix)` `SCAN`s `exe:<prefix>*`, with the glob metacharacters in the prefix
 escaped.
+## Pending work
+
+`pending_work(id)` finds the execution's timers in the `timers` sorted set with a `ZSCAN` matching its members (the set is ordered by fire time, so the match is server-side over the whole set, not sent), and reads the `outbox` and `spawns` hashes whole — they hold only what the relay hasn't delivered yet — keeping the entries for the id.
+
 ## Published definitions
 
 The published machine versions live in one hash, `harel:definitions`, one field per version

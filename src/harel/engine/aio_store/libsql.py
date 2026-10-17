@@ -7,7 +7,7 @@ from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, Status
 from harel.engine.schema import DEFAULT_PREFIX
-from harel.engine.store import DefinitionRecord, OutboxEntry, SpawnEntry, TimerOp
+from harel.engine.store import DefinitionRecord, OutboxEntry, PendingWork, SpawnEntry, TimerOp
 from harel.engine.store._base import Step
 from harel.spec.states import Event
 
@@ -148,6 +148,10 @@ class AsyncLibsqlStore:
     async def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None:
         async with self._lock:
             await asyncio.to_thread(self._s.delete_timer, execution_id, path, fire_at)
+
+    async def pending_work(self, execution_id: str) -> PendingWork:
+        async with self._lock:
+            return await asyncio.to_thread(self._s.pending_work, execution_id)
 
     async def ids_with_prefix(self, prefix: str) -> list[str]:
         async with self._lock:

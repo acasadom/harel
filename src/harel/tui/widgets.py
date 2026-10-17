@@ -4,6 +4,7 @@ in the pure layer (`tree`/`summary`); this only turns it into Rich markup / tree
 
 from __future__ import annotations
 
+from rich.markup import escape
 from rich.text import Text
 from textual.widgets import Tree
 
@@ -46,8 +47,9 @@ def node_label(tn: TreeNode, *, selected: bool = False) -> Text:
 
 def populate_statechart(tree: Tree, model: TreeModel, selected_path: str | None = None) -> None:
     """Fill a Textual `Tree` from a `TreeModel`, marking `selected_path` (the navigated
-    timeline step). Statecharts are shallow, so re-populating on each navigation is cheap.
-    With no resolved Definition, show a single data-only placeholder."""
+    timeline step). Each node's `data` is its full path (what a redrive targets); a leaf state
+    is a tree leaf, with nothing to expand. Statecharts are shallow, so re-populating on each
+    navigation is cheap. With no resolved Definition, show a single data-only placeholder."""
     tree.clear()
     if not model.resolved or model.root is None:
         tree.root.set_label(Text("(definition unavailable — data-only)", style="dim italic"))
@@ -58,13 +60,25 @@ def populate_statechart(tree: Tree, model: TreeModel, selected_path: str | None 
 
     def add(parent, tn: TreeNode) -> None:
         for child in tn.children:
-            node = parent.add(
-                node_label(child, selected=child.full_path == selected_path), data=child.full_path
-            )
-            add(node, child)
+            label = node_label(child, selected=child.full_path == selected_path)
+            if child.children:
+                add(parent.add(label, data=child.full_path, expand=True), child)
+            else:
+                parent.add_leaf(label, data=child.full_path)
 
     add(tree.root, model.root)
-    tree.root.expand_all()
+    tree.root.expand()
+
+
+def find_node(tree: Tree, path: str):
+    """The node of `tree` whose data is `path` (a state's full path), or None."""
+    stack = [tree.root]
+    while stack:
+        node = stack.pop()
+        if node.data == path:
+            return node
+        stack.extend(node.children)
+    return None
 
 
 def step_markup(step: TraceStep) -> str:
@@ -99,41 +113,39 @@ def step_markup(step: TraceStep) -> str:
     return "\n".join(parts)
 
 
-def status_header_markup(detail: ExecutionDetail) -> str:
-    """A compact id/status/outcome header for the detail screen."""
-    exe = detail.execution
-    color = summary.status_color(exe.status)
-    head = f"[{color}]{summary.status_label(exe.status)}[/]   [b]{exe.id}[/]   v{exe.version}"
-    bits = []
-    if exe.outcome:
-        bits.append(f"outcome=[b]{exe.outcome}[/]")
-    if exe.error:
-        bits.append(f"[red]{summary.truncate(exe.error, 60)}[/]")
-    if detail.timers:
-        bits.append(f"{len(detail.timers)} timer(s)")
-    if detail.inbound:
-        bits.append(f"{len(detail.inbound)} queued event(s)")
-    return head + ("\n" + "   ".join(bits) if bits else "")
-
-
-def status_markup(detail: ExecutionDetail) -> str:
-    """The status panel: lifecycle status (coloured), domain outcome, error, ids."""
+def status_header_markup(detail: ExecutionDetail, now: float) -> str:
+    """The detail screen's header: status, id, the machine version and its source digest, the
+    routing key when it isn't the machine's own (a child of another machine's tree), the
+    parent, the outcome, and when it was created and last written."""
     exe = detail.execution
     color = summary.status_color(exe.status)
     lines = [
-        f"[b]status[/]    [{color}]{summary.status_label(exe.status)}[/]",
-        f"[b]outcome[/]   {exe.outcome or '—'}",
-        f"[b]active[/]    {summary.short_path(exe.active_path, width=60)}",
-        f"[b]version[/]   {exe.version}",
-        f"[b]id[/]        {exe.id}",
+        f"[{color}]{summary.status_label(exe.status)}[/]   [b]{exe.id}[/]",
+        "machine  [b]"
+        + summary.machine(exe.definition_id, exe.definition_version)
+        + "[/]"
+        + (f"  [dim]digest {exe.definition_digest}[/]" if exe.definition_digest else ""),
     ]
-    if exe.definition_fqn:
-        lines.append(f"[b]invoke[/]    {exe.definition_fqn}")
+    tree_bits = []
+    if exe.routing_key and exe.routing_key != exe.definition_id:
+        tree_bits.append(f"tree [b]{exe.routing_key}[/]")
     if exe.parent_id:
-        lines.append(f"[b]parent[/]    {exe.parent_id}")
-    if exe.error:
-        lines.append(f"[b red]error[/]     {summary.truncate(exe.error, width=80)}")
+        tree_bits.append(f"parent [b]{exe.parent_id}[/] [dim](u)[/]")
+    if tree_bits:
+        lines.append("   ".join(tree_bits))
+    bits = []
+    if exe.outcome:
+        bits.append(f"outcome [b]{exe.outcome}[/]")
+    bits.append(
+        f"created {summary.age(exe.created_at, now)} ago · written {summary.age(exe.updated_at, now)} ago"
+    )
+    lines.append("   ".join(bits))
     return "\n".join(lines)
+
+
+def error_markup(detail: ExecutionDetail) -> str:
+    """The execution's error, whole (a dead letter's reason, a `DefinitionChanged`, …)."""
+    return f"[b red]error[/]\n{escape(detail.execution.error or '')}"
 
 
 def context_markup(detail: ExecutionDetail) -> str:
@@ -141,7 +153,9 @@ def context_markup(detail: ExecutionDetail) -> str:
     ctx = detail.execution.context
     if not ctx:
         return "[dim](empty context)[/]"
-    return "\n".join(f"[cyan]{k}[/] = {summary.truncate(v, width=70)}" for k, v in ctx.items())
+    return "\n".join(
+        f"[cyan]{escape(str(k))}[/] = {escape(summary.truncate(v, width=70))}" for k, v in ctx.items()
+    )
 
 
 def pending_markup(detail: ExecutionDetail, now: float) -> str:
@@ -168,4 +182,4 @@ def history_markup(detail: ExecutionDetail) -> str:
     hist = detail.execution.history
     if not hist:
         return "[dim](no history)[/]"
-    return "\n".join(f"[magenta]{k}[/] → {v}" for k, v in hist.items())
+    return "\n".join(f"[magenta]{escape(k or '(machine)')}[/] → {escape(v)}" for k, v in hist.items())

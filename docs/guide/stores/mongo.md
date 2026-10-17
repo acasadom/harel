@@ -452,6 +452,10 @@ It returns True if the Execution was deleted. If no row exists under the id at a
 
 `ids_with_prefix(prefix)` finds `{"_id": {"$regex": "^" + re.escape(prefix)}}` — an anchored
 regex, which the `_id` index serves.
+## Pending work
+
+`pending_work(id)` reads the execution's own document for its `timers` and `spawns`, and finds the outbox entries addressed to it — they live in the documents of the executions that emitted them — through the index on `outbox.target_id`, which the store creates (`create_schema`).
+
 ## Published definitions
 
 The published machine versions live in their own collection, `harel_definitions`: one document
