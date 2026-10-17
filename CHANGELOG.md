@@ -72,6 +72,13 @@
 
 ### Fixed
 
+- **A worker's loop no longer stops on a failed step.** The sync `Worker.run` ended at the first
+  exception any step raised — a store or transport outage, a machine version the worker can't run
+  (`DefinitionNotLoaded`), a transport that can't route (`NotImplementedError`) — and the message
+  it held came back only when its lease expired. It now logs it and nacks the message to come back
+  after `suspend_recheck`, as `AsyncWorker.run` did. Both loops now also carry on, after
+  `suspend_recheck`, past a claim or a timer sweep that raises, which stopped `AsyncWorker.run`
+  too.
 - **A machine changed under a running execution** — a state it is parked in renamed or removed —
   no longer sends the engine looking for a node that isn't there (a `KeyError`, which a worker
   logged and retried for ever). The runner checks first and fails the execution with a clear

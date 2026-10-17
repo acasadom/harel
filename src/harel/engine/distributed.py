@@ -37,8 +37,12 @@ from harel.engine.hosting import (  # noqa: F401 (re-exported)
     _register_submachines,
     _resolve_machine,
     check_execution,
+    log_handling_failed,
+    log_loop_step_failed,
+    log_nack_failed,
 )
 from harel.engine.resolve import MachineResolver
+from harel.engine.transport import Lease
 from harel.spec.states import Event
 
 
@@ -76,6 +80,7 @@ class Worker:
         self.transport = transport
         self.definitions = definitions
         self.worker_id = worker_id
+        self.suspend_recheck = suspend_recheck
         self.execution = execution
         if execution == "inline":
             self._inline: Optional[WorkerLogic] = WorkerLogic(
@@ -182,12 +187,62 @@ class Worker:
 
         return facade.run(self._async.fire_due_timers)
 
+    def _claim(self) -> Optional[Lease]:
+        if self._inline is not None:
+            return self._serve_inline(self._inline.claim_flow())
+        from harel.engine.aio import facade
+
+        return facade.run(self._async._claim)
+
+    def _handle(self, lease: Lease) -> None:
+        if self._inline is not None:
+            combined = getattr(self.store, "load_for_event", None) is not None
+            self._serve_inline(self._inline.handle_flow(lease, combined_load=combined))
+            return
+        from harel.engine.aio import facade
+
+        facade.run(self._async._handle, lease)
+
+    def _nack(self, lease: Lease, delay: float) -> None:
+        if self._inline is not None:
+            self.transport.nack(lease, delay=delay)
+            return
+        from harel.engine.aio import facade
+
+        facade.run(self._async.transport.nack, lease, delay=delay)
+
     def run(self, stop: threading.Event, idle_sleep: float = 0.005) -> None:
+        """Loop until `stop` is set, one message at a time; when the queue is empty, sweep the
+        due timers. Like `AsyncWorker.run`: a message whose handling raises is logged with its
+        traceback and nacked to come back after `suspend_recheck` seconds (if the nack fails
+        too, it comes back when its lease expires), and a claim or a timer sweep that raises is
+        logged and the loop carries on after `suspend_recheck` seconds — nothing stops it but
+        `stop`."""
         while not stop.is_set():
-            if self.step():
+            try:
+                lease = self._claim()
+            except Exception:
+                log_loop_step_failed(self.worker_id, "claim", self.suspend_recheck)
+                stop.wait(self.suspend_recheck)
                 continue
-            if self.fire_due_timers() == 0:
-                stop.wait(idle_sleep)
+            if lease is None:
+                try:
+                    fired = self.fire_due_timers()
+                except Exception:
+                    log_loop_step_failed(self.worker_id, "fire the due timers", self.suspend_recheck)
+                    stop.wait(self.suspend_recheck)
+                    continue
+                if fired == 0:
+                    stop.wait(idle_sleep)
+                continue
+            try:
+                self._handle(lease)
+            except Exception:
+                log_handling_failed(self.worker_id, lease, self.suspend_recheck)
+                try:
+                    self._nack(lease, self.suspend_recheck)
+                except Exception:
+                    log_nack_failed(self.worker_id, lease)
 
 
 class DistributedRunner:

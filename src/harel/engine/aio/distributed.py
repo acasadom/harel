@@ -12,7 +12,6 @@ from the transport's claim and `StoreConflict`→nack as the CAS fence — and
 from __future__ import annotations
 
 import asyncio
-import logging
 import time
 from typing import Any, Callable, Iterable, Optional
 
@@ -22,12 +21,16 @@ from harel.engine.distributed import _resolve_machine
 from harel.engine.driving import TransportDriverLogic
 from harel.engine.execution import Execution
 from harel.engine.flow import Flow, run_async
-from harel.engine.hosting import SenderLogic, WorkerLogic
+from harel.engine.hosting import (
+    SenderLogic,
+    WorkerLogic,
+    log_handling_failed,
+    log_loop_step_failed,
+    log_nack_failed,
+)
 from harel.engine.resolve import MachineResolver
 from harel.engine.transport import Lease
 from harel.spec.states import Event
-
-logger = logging.getLogger(__name__)
 
 
 class AsyncTransportDriver(TransportDriverLogic, _AsyncRuntimeDriver):
@@ -129,11 +132,13 @@ class AsyncWorker(WorkerLogic):
         Per-group exclusivity (one in-flight per group) is the transport's claim; the
         semaphore caps total concurrency. When the queue is empty, sweep due timers.
 
-        A message whose handling raises (a store or transport outage, an engine bug — an
-        action's own error is the driver's to route, not this) is logged with its traceback
-        and nacked to come back after `suspend_recheck` seconds: soon enough for a transient
-        outage, without spinning on a failure that persists. If the nack fails too, the
-        message comes back when its lease expires."""
+        A message whose handling raises (a store or transport outage, a machine version this
+        worker can't run, an engine bug — an action's own error is the driver's to route, not
+        this) is logged with its traceback and nacked to come back after `suspend_recheck`
+        seconds: soon enough for a transient outage, without spinning on a failure that
+        persists. If the nack fails too, the message comes back when its lease expires. A claim
+        or a timer sweep that raises is logged, and the loop carries on after `suspend_recheck`
+        seconds: nothing stops it but `stop`."""
         sem = asyncio.Semaphore(self.concurrency)
         pending: set[asyncio.Task] = set()
 
@@ -141,41 +146,42 @@ class AsyncWorker(WorkerLogic):
             try:
                 await self._handle(lease)
             except Exception:
-                logger.exception(
-                    "worker %s failed handling %s event %s for execution %s; retrying in %ss",
-                    self.worker_id,
-                    lease.event.kind,
-                    lease.event.id,
-                    lease.group_id,
-                    self.suspend_recheck,
-                )
+                log_handling_failed(self.worker_id, lease, self.suspend_recheck)
                 try:
                     await self.transport.nack(lease, delay=self.suspend_recheck)
                 except Exception:
-                    logger.exception(
-                        "worker %s could not nack %s event %s for execution %s; it is "
-                        "redelivered when its lease expires",
-                        self.worker_id,
-                        lease.event.kind,
-                        lease.event.id,
-                        lease.group_id,
-                    )
+                    log_nack_failed(self.worker_id, lease)
             finally:
                 sem.release()
 
+        async def _pause(seconds: float) -> None:
+            try:
+                await asyncio.wait_for(_wait_event(stop), timeout=seconds)
+            except asyncio.TimeoutError:
+                pass
+
         while not stop.is_set():
             await sem.acquire()
-            lease = await self._claim()
+            try:
+                lease = await self._claim()
+            except Exception:
+                sem.release()
+                log_loop_step_failed(self.worker_id, "claim", self.suspend_recheck)
+                await _pause(self.suspend_recheck)
+                continue
             if lease is None:
                 sem.release()
-                if await self.fire_due_timers() == 0:
+                try:
+                    fired = await self.fire_due_timers()
+                except Exception:
+                    log_loop_step_failed(self.worker_id, "fire the due timers", self.suspend_recheck)
+                    await _pause(self.suspend_recheck)
+                    continue
+                if fired == 0:
                     if pending:
                         await asyncio.wait(pending, timeout=idle_sleep, return_when=asyncio.FIRST_COMPLETED)
                     else:
-                        try:
-                            await asyncio.wait_for(_wait_event(stop), timeout=idle_sleep)
-                        except asyncio.TimeoutError:
-                            pass
+                        await _pause(idle_sleep)
                 continue
             task = asyncio.create_task(_run_one(lease))
             pending.add(task)
