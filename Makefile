@@ -45,6 +45,7 @@ test-stack: ## Run each backend's tests directly against the real stack (needs D
 	    "test/integration/test_transport_routing.py::test_postgres_machine_routing" \
 	    "test/integration/test_transport_routing.py::test_async_postgres_machine_routing" \
 	    "test/integration/test_transport_contract.py::test_postgres_transport_contract" \
+	    "test/integration/test_transport_contract.py::test_async_postgres_transport_contract" \
 	    test/integration/test_schema_stack.py \
 	    test/integration/test_transport_race.py -v || EXIT=1; \
 	echo "=== rqlite ===" && \
@@ -63,6 +64,7 @@ test-stack: ## Run each backend's tests directly against the real stack (needs D
 	    "test/integration/test_transport_routing.py::test_rqlite_machine_routing" \
 	    "test/integration/test_transport_routing.py::test_async_rqlite_machine_routing" \
 	    "test/integration/test_transport_contract.py::test_rqlite_transport_contract" \
+	    "test/integration/test_transport_contract.py::test_async_rqlite_transport_contract" \
 	    test/integration/test_schema_stack.py -v || EXIT=1; \
 	echo "=== mongo ===" && \
 	$$DC -e HAREL_STORE_BACKEND=mongo -e HAREL_TRANSPORT_BACKEND=mongo \
@@ -79,7 +81,8 @@ test-stack: ## Run each backend's tests directly against the real stack (needs D
 	    "test/integration/test_store_definitions.py::test_async_mongo_definitions" \
 	    "test/integration/test_transport_routing.py::test_mongo_machine_routing" \
 	    "test/integration/test_transport_routing.py::test_async_mongo_machine_routing" \
-	    "test/integration/test_transport_contract.py::test_mongo_transport_contract" -v || EXIT=1; \
+	    "test/integration/test_transport_contract.py::test_mongo_transport_contract" \
+	    "test/integration/test_transport_contract.py::test_async_mongo_transport_contract" -v || EXIT=1; \
 	echo "=== dynamodb+sqs ===" && \
 	$$DC -e HAREL_STORE_BACKEND=dynamodb -e HAREL_TRANSPORT_BACKEND=sqs \
 	    test uv run pytest -m stack \
@@ -93,7 +96,23 @@ test-stack: ## Run each backend's tests directly against the real stack (needs D
 	    "test/integration/test_store_outbox.py::test_async_dynamodb_outbox" \
 	    "test/integration/test_store_definitions.py::test_async_dynamodb_definitions" \
 	    "test/integration/test_transport_routing.py::test_sqs_refuses_machine_routing" \
-	    "test/integration/test_transport_contract.py::test_sqs_transport_contract" -v || EXIT=1; \
+	    "test/integration/test_transport_contract.py::test_sqs_transport_contract" \
+	    "test/integration/test_transport_contract.py::test_async_sqs_transport_contract" -v || EXIT=1; \
+	echo "=== redis ===" && \
+	$$DC -e HAREL_STORE_BACKEND=redis -e HAREL_TRANSPORT_BACKEND=redis \
+	    test uv run pytest -m stack \
+	    "test/integration/test_store_listing.py::test_redis_listing" \
+	    "test/integration/test_store_listing.py::test_async_redis_listing" \
+	    "test/integration/test_store_purge.py::test_redis_purge" \
+	    "test/integration/test_store_purge.py::test_async_redis_purge" \
+	    "test/integration/test_store_outbox.py::test_redis_outbox" \
+	    "test/integration/test_store_outbox.py::test_async_redis_outbox" \
+	    "test/integration/test_store_definitions.py::test_redis_definitions" \
+	    "test/integration/test_store_definitions.py::test_async_redis_definitions" \
+	    "test/integration/test_transport_contract.py::test_redis_transport_contract" \
+	    "test/integration/test_transport_contract.py::test_async_redis_transport_contract" \
+	    "test/integration/test_transport_routing.py::test_redis_refuses_machine_routing" \
+	    "test/integration/test_transport_routing.py::test_async_redis_refuses_machine_routing" -v || EXIT=1; \
 	docker compose -f deploy/docker-compose.yml down -v; \
 	exit $$EXIT
 

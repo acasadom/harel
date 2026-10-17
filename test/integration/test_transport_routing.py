@@ -1,5 +1,5 @@
 """Routing claims by machine (`harel.testing.assert_machine_routing_contract`) against the REAL
-networked transports (Postgres / rqlite / Mongo), and the refusal of SQS-on-LocalStack, in the
+networked transports (Postgres / rqlite / Mongo), and the refusal of Redis and SQS-on-LocalStack, in the
 stack, gated by HAREL_TRANSPORT_BACKEND (one backend per compose run; the rest skip). The
 in-process transports are covered in test/unit/engine/test_transport_routing.py.
 
@@ -12,6 +12,7 @@ import pytest
 
 from harel.testing import (
     assert_async_machine_routing_contract,
+    assert_async_refuses_machine_routing,
     assert_machine_routing_contract,
     assert_refuses_machine_routing,
 )
@@ -97,4 +98,26 @@ def test_sqs_refuses_machine_routing():
     region = os.environ.get("HAREL_AWS_REGION", "us-east-1")
     assert_refuses_machine_routing(
         lambda clock: SqsTransport.create(endpoint, f"r{uuid.uuid4().hex[:8]}.fifo", region=region)
+    )
+
+
+def test_redis_refuses_machine_routing():
+    import redis
+
+    from harel.engine.transport import RedisTransport
+
+    url = _env("redis", "HAREL_REDIS_URL")
+    assert_refuses_machine_routing(
+        lambda clock: RedisTransport(redis.Redis.from_url(url), clock=clock, prefix=_fresh())
+    )
+
+
+async def test_async_redis_refuses_machine_routing():
+    import redis.asyncio as aioredis
+
+    from harel.engine.aio_transport import AsyncRedisTransport
+
+    url = _env("redis", "HAREL_REDIS_URL")
+    await assert_async_refuses_machine_routing(
+        lambda clock: AsyncRedisTransport(aioredis.Redis.from_url(url), clock=clock, prefix=_fresh())
     )

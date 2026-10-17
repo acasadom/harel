@@ -1,4 +1,4 @@
-"""`purge` contract against the REAL networked backends (Postgres / rqlite / Mongo /
+"""`purge` contract against the REAL networked backends (Postgres / rqlite / Mongo / Redis /
 DynamoDB-on-LocalStack), sync and async, in the stack.
 
 The in-process backends are covered in test/unit/engine/test_store_purge.py; this runs
@@ -108,6 +108,26 @@ async def test_async_dynamodb_purge():
 
     endpoint = _env("dynamodb", "HAREL_DYNAMODB_ENDPOINT")
     store = await AsyncDynamoDBStore.create(endpoint, os.environ.get("HAREL_AWS_REGION", "us-east-1"))
+    try:
+        await assert_async_purge_contract(store, ns=_ns())
+    finally:
+        await store.close()
+
+
+def test_redis_purge():
+    from harel.engine.store import RedisStore
+
+    store = RedisStore.from_url(_env("redis", "HAREL_REDIS_URL"), prefix="s" + uuid.uuid4().hex[:8])
+    try:
+        assert_purge_contract(store, ns=_ns())
+    finally:
+        store.close()
+
+
+async def test_async_redis_purge():
+    from harel.engine.aio_store import AsyncRedisStore
+
+    store = AsyncRedisStore.from_url(_env("redis", "HAREL_REDIS_URL"), prefix="s" + uuid.uuid4().hex[:8])
     try:
         await assert_async_purge_contract(store, ns=_ns())
     finally:

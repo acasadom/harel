@@ -41,12 +41,13 @@ class AsyncRqliteTransport:
         connect_retries: int = 30,
         retry_delay: float = 1.0,
         *,
+        clock: Callable[[], float] = time.time,
         prefix: str = DEFAULT_PREFIX,
         create_schema: bool = True,
     ) -> "AsyncRqliteTransport":
         """Connect, retrying until rqlite is up and has elected a leader; `prefix` names its
         tables (see `harel.engine.schema`), and with `create_schema=False` they must already
-        exist."""
+        exist. `clock` is what its leases and parks are measured by."""
         import anyio
         import httpx
 
@@ -54,7 +55,7 @@ class AsyncRqliteTransport:
         for _ in range(connect_retries):
             client = httpx.AsyncClient()
             try:
-                transport = cls(client, url, timeout, prefix=prefix)
+                transport = cls(client, url, timeout, clock, prefix=prefix)
                 if create_schema:
                     statements = transport_schema("sqlite", prefix)
                     await transport._execute([q for q in statements if q.startswith("CREATE TABLE")])

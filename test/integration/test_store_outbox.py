@@ -112,3 +112,23 @@ async def test_async_dynamodb_outbox():
         await assert_async_outbox_contract(store, ns=_ns())
     finally:
         await store.close()
+
+
+def test_redis_outbox():
+    from harel.engine.store import RedisStore
+
+    store = RedisStore.from_url(_env("redis", "HAREL_REDIS_URL"), prefix="s" + uuid.uuid4().hex[:8])
+    try:
+        assert_outbox_contract(store, ns=_ns())
+    finally:
+        store.close()
+
+
+async def test_async_redis_outbox():
+    from harel.engine.aio_store import AsyncRedisStore
+
+    store = AsyncRedisStore.from_url(_env("redis", "HAREL_REDIS_URL"), prefix="s" + uuid.uuid4().hex[:8])
+    try:
+        await assert_async_outbox_contract(store, ns=_ns())
+    finally:
+        await store.close()
