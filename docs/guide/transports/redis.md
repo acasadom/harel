@@ -122,6 +122,10 @@ closes the lock-expires-mid-ack window. `nack(delay>0)` **parks**: pushes the sc
 Within a group, `q:{G}` is a list consumed head-first and only one worker holds the lock at a
 time, so order is preserved.
 
+## Backlog
+
+`publish` also pushes the publish time onto `{prefix}:qt:{G}`, one per message, and keeps the group's routing key in the `{prefix}:route` hash (for this only: claims still can't filter by it); `ack` pops the time with the message, and both go when the group drains. `backlog()` walks the groups with messages (`{prefix}:prio` has one entry per group) with `HSCAN`, 1,000 groups per Lua call — Redis runs one script at a time, so a call holds it for its chunk only (a few milliseconds), not for the whole queue — reading each one's queue length, routing key, lock held or not, and its head's time, and sums the chunks. A group the scan returns twice, as `HSCAN` may while the hash grows, counts twice: the totals are a monitor's. A group with messages queued before the times were kept has a shorter `qt` list: its head's time is unknown until those are gone.
+
 ## Routing by machine
 
 Not supported. The ready sets are kept per priority level, and a claim can't pick a machine's

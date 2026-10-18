@@ -26,6 +26,7 @@ a twin under `harel/engine/aio_store/` (same data model, awaited IO):
 | `list_executions(...)` | a page of lightweight summaries, for the monitor and `purge_finished` |
 | `ids_with_prefix(prefix)` | ids of the stored Executions starting with `prefix` — how `purge` finds every descendant of a tree (a child's id extends its parent's), including those the parent no longer lists |
 | `publish_definition(record)` / `load_definition(id, version)` | the published machine versions: a version is stored once — publishing it again returns the one stored first — and read by the runners that haven't loaded it (see [changing a machine](durability.md#changing-a-machine-with-executions-in-flight)) |
+| `record_worker(record)` / `list_workers()` / `forget_worker(id)` | the workers' heartbeats: each running worker's machines and when it was last seen, which the [monitor](monitor.md#queues-and-workers) reads to tell a machine no live worker claims |
 | `pending_work(id)` | what is waiting for one execution — its armed timers, the outbox entries addressed to it, the child spawns it issued — read by its id; the monitor's detail view |
 | `purge(id, expected_version)` | permanently delete one Execution and every row keyed by it (dedupe, trace, timers, outbox entries addressed to it, spawn intents it issued), iff still at `expected_version` — see [purge](control-plane.md#purge) |
 | `close()` | release the connection/client |
@@ -58,6 +59,7 @@ each:
 ```text
 from harel.testing import assert_listing_contract, assert_outbox_contract, assert_purge_contract
 from harel.testing import assert_definitions_contract, assert_pending_work_contract
+from harel.testing import assert_workers_contract
 
 def test_my_store():
     assert_listing_contract(MyStore(), ordered=True)   # ordered=False for an unordered scan
@@ -65,6 +67,7 @@ def test_my_store():
     assert_outbox_contract(MyStore())
     assert_definitions_contract(MyStore())
     assert_pending_work_contract(MyStore())
+    assert_workers_contract(MyStore())
 ```
 
 Each has an `assert_async_*` twin for an async store, and takes `ns=` to prefix the ids it seeds
@@ -135,7 +138,7 @@ stores/dynamodb
 ### What each backend supports
 
 Every backend implements the whole protocol, sync and async, and passes every contract in
-`harel.testing` (listing, purge, outbox, published definitions, pending work) — in CI for the in-process ones,
+`harel.testing` (listing, purge, outbox, published definitions, pending work, workers) — in CI for the in-process ones,
 in the stack (`make test-stack`) against the real servers. They differ in two places only:
 
 | | Dict | SQLite | libSQL | rqlite | Postgres | Mongo | Redis | DynamoDB |
@@ -159,10 +162,10 @@ without colliding:
 
 | backend | what `prefix="harel"` names |
 |---|---|
-| SQLite, libSQL, rqlite, Postgres | tables `harel_executions`, `harel_outbox`, `harel_processed_events`, `harel_spawns`, `harel_timers`, `harel_trace`, `harel_definitions`; the transport's `harel_transport_messages`, `harel_transport_groups`; their indexes; Postgres' functions `harel_commit_cas`, `harel_claim`, `harel_ack` |
-| Redis | every key: `harel:exe:<id>`, `harel:outbox`, `harel:definitions`, …, the transport's `harel:q:<group>`, … |
-| Mongo | collections (under `db_name`): `harel_executions`, `harel_counters`, `harel_definitions`; the transport's `harel_transport_messages`, `harel_transport_locks`, `harel_transport_counters` |
-| DynamoDB | tables `harel_executions`, `harel_outbox`, `harel_spawns`, `harel_timers`, `harel_processed`, `harel_counters`, `harel_trace`, `harel_definitions` |
+| SQLite, libSQL, rqlite, Postgres | tables `harel_executions`, `harel_outbox`, `harel_processed_events`, `harel_spawns`, `harel_timers`, `harel_trace`, `harel_definitions`, `harel_workers`; the transport's `harel_transport_messages`, `harel_transport_groups`; their indexes; Postgres' functions `harel_commit_cas`, `harel_claim`, `harel_ack` |
+| Redis | every key: `harel:exe:<id>`, `harel:outbox`, `harel:definitions`, `harel:workers`, …, the transport's `harel:q:<group>`, … |
+| Mongo | collections (under `db_name`): `harel_executions`, `harel_counters`, `harel_definitions`, `harel_workers`; the transport's `harel_transport_messages`, `harel_transport_locks`, `harel_transport_counters` |
+| DynamoDB | tables `harel_executions`, `harel_outbox`, `harel_spawns`, `harel_timers`, `harel_processed`, `harel_counters`, `harel_trace`, `harel_definitions`, `harel_workers` |
 
 A prefix is an identifier — a letter or `_`, then letters, digits or `_` — of at most 30
 characters (so every name built from it fits Postgres' 63). `harel.engine.schema.Names(prefix)`

@@ -22,6 +22,7 @@ from harel.engine.store._base import (
     Step,
     StoreConflict,
     TimerOp,
+    WorkerRecord,
     _decode_offset,
     _definition_params,
     _definition_row,
@@ -352,6 +353,25 @@ class RqliteStore:
             return self._query(self._n.sql(template), (execution_id,))
 
         return _pending_work(rows(_PENDING_TIMERS_SQL), rows(_PENDING_OUTBOX_SQL), rows(_PENDING_SPAWNS_SQL))
+
+    def record_worker(self, record: WorkerRecord) -> None:
+        self._execute(
+            [
+                [
+                    f"INSERT INTO {self._n.workers} (worker_id, record) VALUES (?, ?) "
+                    "ON CONFLICT(worker_id) DO UPDATE SET record = excluded.record",
+                    record.worker_id,
+                    record.to_json(),
+                ]
+            ]
+        )
+
+    def list_workers(self) -> list[WorkerRecord]:
+        rows = self._query(f"SELECT record FROM {self._n.workers} ORDER BY worker_id", ())
+        return [WorkerRecord.from_json(r[0]) for r in rows]
+
+    def forget_worker(self, worker_id: str) -> None:
+        self._execute([[f"DELETE FROM {self._n.workers} WHERE worker_id = ?", worker_id]])
 
     def ids_with_prefix(self, prefix: str) -> list[str]:
         return [r[0] for r in self._query(self._n.sql(_IDS_WITH_PREFIX_SQL), (_like_prefix(prefix),))]

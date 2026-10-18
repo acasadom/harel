@@ -78,6 +78,10 @@ immediate retry.
 
 `ORDER BY seq` within a group, one consumer at a time → order preserved.
 
+## Backlog
+
+`harel_transport_messages` has a `published_at REAL` column, set by `publish` (an older table gets it when the transport starts, like `routing_key`). `backlog()` is one query: the messages joined to their groups, grouped by `routing_key` — counting them, their distinct groups, the groups with a message leased or parked (`locked_by` set, `lock_expiry` not passed), and the oldest `published_at`.
+
 ## Routing by machine
 
 `harel_transport_groups` has a `routing_key TEXT` column, set by the `INSERT OR IGNORE` of the

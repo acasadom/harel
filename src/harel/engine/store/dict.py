@@ -15,6 +15,7 @@ from harel.engine.store._base import (
     Step,
     StoreConflict,
     TimerOp,
+    WorkerRecord,
     _decode_offset,
     _encode_offset,
     _matches,
@@ -42,6 +43,7 @@ class DictStore:
         # of that stale object must conflict instead of silently re-inserting it
         self._purged: set[str] = set()
         self._definitions: dict[tuple[str, int], DefinitionRecord] = {}
+        self._workers: dict[str, WorkerRecord] = {}
 
     # --- execution trace -------------------------------------------------------------
     # The opt-in execution timeline: the Driver passes one step per event to `commit`,
@@ -158,6 +160,15 @@ class DictStore:
             outbox=[e for e in self._outbox if e.target_id == execution_id],
             spawns=[s for s in self._spawns if s.parent_id == execution_id],
         )
+
+    def record_worker(self, record: WorkerRecord) -> None:
+        self._workers[record.worker_id] = record
+
+    def list_workers(self) -> list[WorkerRecord]:
+        return [self._workers[w] for w in sorted(self._workers)]
+
+    def forget_worker(self, worker_id: str) -> None:
+        self._workers.pop(worker_id, None)
 
     def ids_with_prefix(self, prefix: str) -> list[str]:
         return [i for i in self._by_id if i.startswith(prefix)]

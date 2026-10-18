@@ -156,6 +156,7 @@ def test_inline_transaction_store_meets_the_contracts():
         assert_outbox_contract,
         assert_pending_work_contract,
         assert_purge_contract,
+        assert_workers_contract,
     )
 
     conn = sqlite3.connect(":memory:")
@@ -167,3 +168,4 @@ def test_inline_transaction_store_meets_the_contracts():
     assert_outbox_contract(store)
     assert_definitions_contract(store)
     assert_pending_work_contract(store)
+    assert_workers_contract(store)

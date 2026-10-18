@@ -10,7 +10,9 @@ from harel.engine.transport._base import (
     _CLAIM_LUA,
     _PARKED,
     _PUBLISH_LUA,
+    Backlog,
     Lease,
+    MachineBacklog,
     Transport,
 )
 from harel.engine.transport.inmemory import InMemoryTransport
@@ -25,6 +27,8 @@ from harel.engine.transport.sqs import SqsTransport
 __all__ = [
     "Transport",
     "Lease",
+    "Backlog",
+    "MachineBacklog",
     "_PARKED",
     "_CLAIM_LUA",
     "_ACK_LUA",

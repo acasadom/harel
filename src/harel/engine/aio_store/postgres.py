@@ -7,7 +7,15 @@ from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, Status
 from harel.engine.schema import DEFAULT_PREFIX, Names, store_schema
-from harel.engine.store import DefinitionRecord, OutboxEntry, PendingWork, SpawnEntry, StoreConflict, TimerOp
+from harel.engine.store import (
+    DefinitionRecord,
+    OutboxEntry,
+    PendingWork,
+    SpawnEntry,
+    StoreConflict,
+    TimerOp,
+    WorkerRecord,
+)
 from harel.engine.store._base import (
     _DEFINITION_COLUMNS,
     _IDS_WITH_PREFIX_SQL,
@@ -320,6 +328,30 @@ class AsyncPostgresStore:
                 spawns = await rows(_PENDING_SPAWNS_SQL)
             await conn.commit()
         return _pending_work(timers, outbox, spawns)
+
+    async def record_worker(self, record: WorkerRecord) -> None:
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"INSERT INTO {self._n.workers} (worker_id, record) VALUES (%s, %s) "
+                    "ON CONFLICT (worker_id) DO UPDATE SET record = EXCLUDED.record",
+                    (record.worker_id, record.to_json()),
+                )
+            await conn.commit()
+
+    async def list_workers(self) -> list[WorkerRecord]:
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(f"SELECT record FROM {self._n.workers} ORDER BY worker_id")
+                rows = await cur.fetchall()
+            await conn.commit()
+        return [WorkerRecord.from_json(r[0]) for r in rows]
+
+    async def forget_worker(self, worker_id: str) -> None:
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(f"DELETE FROM {self._n.workers} WHERE worker_id = %s", (worker_id,))
+            await conn.commit()
 
     async def ids_with_prefix(self, prefix: str) -> list[str]:
         async with self._pool.connection() as conn:

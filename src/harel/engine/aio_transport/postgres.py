@@ -9,6 +9,7 @@ from typing import Any, Callable, Optional
 from harel.engine.schema import DEFAULT_PREFIX, Names, transport_schema
 from harel.engine.store._base import _PG_SCHEMA_LOCK
 from harel.engine.transport import Lease
+from harel.engine.transport._base import _PG_BACKLOG_SQL, Backlog, _backlog
 from harel.spec.states import Event
 
 
@@ -61,8 +62,8 @@ class AsyncPostgresTransport:
         async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    f"INSERT INTO {self._n.messages} (group_id, event) VALUES (%s, %s)",
-                    (group_id, event.model_dump_json()),
+                    f"INSERT INTO {self._n.messages} (group_id, event, published_at) VALUES (%s, %s, %s)",
+                    (group_id, event.model_dump_json(), self._clock()),
                 )
                 # ready the group iff new; the no-op update locks its row, as the ack
                 # function does, so a concurrent ack can't delete it under this message
@@ -116,6 +117,14 @@ class AsyncPostgresTransport:
                     (lease.group_id, lease.seq, lease.token, self._clock()),
                 )
             await conn.commit()
+
+    async def backlog(self) -> Backlog:
+        async with self._pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(self._n.sql(_PG_BACKLOG_SQL), (self._clock(),))
+                rows = await cur.fetchall()
+            await conn.commit()
+        return _backlog(rows)
 
     async def nack(self, lease: Lease, delay: float = 0.0) -> None:
         async with self._pool.connection() as conn:

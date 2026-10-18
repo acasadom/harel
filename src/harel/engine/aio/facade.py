@@ -154,6 +154,15 @@ class _AsyncStoreAdapter:
     async def pending_work(self, execution_id):
         return self._s.pending_work(execution_id)
 
+    async def record_worker(self, record):
+        return self._s.record_worker(record)
+
+    async def list_workers(self):
+        return self._s.list_workers()
+
+    async def forget_worker(self, worker_id):
+        return self._s.forget_worker(worker_id)
+
     async def ids_with_prefix(self, prefix):
         return self._s.ids_with_prefix(prefix)
 
@@ -193,6 +202,9 @@ class _AsyncTransportAdapter:
 
     async def nack(self, lease, delay=0.0):
         return self._t.nack(lease, delay)
+
+    async def backlog(self):
+        return self._t.backlog()
 
     async def close(self):
         return self._t.close()

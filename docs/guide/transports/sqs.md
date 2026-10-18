@@ -52,6 +52,10 @@ close():              the boto3 client
   (`high_ratio>0`) would otherwise be a no-op on SQS. Round-robin fairness across groups is still
   provided natively by `MessageGroupId` delivery. Use another transport for priority routing.
 
+## Backlog
+
+SQS can't tell machines, or groups, apart: `backlog()` reads the queue's approximate counts (`ApproximateNumberOfMessages` + `ApproximateNumberOfMessagesNotVisible`) into one total, `by_machine` False, with no age.
+
 ## Routing by machine
 
 Not supported: `receive_message` can't select messages by anything but the queue. A claim given

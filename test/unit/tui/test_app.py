@@ -373,3 +373,38 @@ async def test_children_open_and_u_goes_up_to_the_parent():
         await pilot.press("u")
         await _settle(app, pilot)
         assert app.screen.execution_id == "p"
+
+
+# --- queues & workers ------------------------------------------------------------------
+
+
+async def test_the_queue_screen_marks_unserved_work_and_forgets_a_gone_worker():
+    import time
+
+    from harel.engine.store import WorkerRecord
+    from harel.engine.transport import InMemoryTransport
+    from harel.spec.states import Event
+    from harel.tui.screens import QueuesScreen
+
+    store, transport = _seeded_store(), InMemoryTransport()
+    transport.publish("x", Event(kind="Go"), routing_key="order")
+    now = time.time()
+    store.record_worker(WorkerRecord("pay", ("payment",), now, now, 10.0))
+    store.record_worker(WorkerRecord("old", None, now - 9000, now - 900, 10.0))
+    app = MonitorApp(MonitorModel(store, DefinitionSource(), transport), interval=10.0)
+    async with app.run_test(size=(140, 40)) as pilot:
+        await _settle(app, pilot)
+        await pilot.press("w")
+        await _settle(app, pilot)
+        assert isinstance(app.screen, QueuesScreen)
+        note = str(app.screen.query_one("#queues-note", Static).render())
+        assert "no live worker claims: order" in note
+        workers = app.screen.query_one("#workers", DataTable)
+        workers.focus()
+        workers.move_cursor(row=[r.value for r in workers.rows].index("old"))
+        await pilot.press("x")
+        await pilot.pause()
+        assert isinstance(app.screen, ConfirmModal)
+        await pilot.press("y")
+        await _settle(app, pilot)
+        assert [w.worker_id for w in store.list_workers()] == ["pay"]

@@ -8,6 +8,7 @@ from typing import Any, Callable, Optional
 
 from harel.engine.schema import DEFAULT_PREFIX, Names
 from harel.engine.transport import Lease
+from harel.engine.transport._base import Backlog, _mongo_backlog
 from harel.spec.states import Event
 
 
@@ -83,7 +84,12 @@ class AsyncMongoTransport:
         self, group_id: str, event: Event, priority: int = 0, routing_key: Optional[str] = None
     ) -> None:
         await self._msgs.insert_one(
-            {"_id": await self._next_seq(), "group_id": group_id, "event": event.model_dump_json()}
+            {
+                "_id": await self._next_seq(),
+                "group_id": group_id,
+                "event": event.model_dump_json(),
+                "published_at": self._clock(),
+            }
         )
         # ready the group NOW iff it is new ($setOnInsert): don't make an in-flight/parked
         # group claimable before its lease/park elapses.
@@ -163,6 +169,16 @@ class AsyncMongoTransport:
                 "routing_key": dropped.get("routing_key"),
             }
             await self._locks.update_one({"_id": group_id}, {"$setOnInsert": ready}, upsert=True)
+
+    async def backlog(self) -> Backlog:
+        now = self._clock()
+        locks = {
+            d["_id"]: d async for d in self._locks.find({}, {"routing_key": 1, "token": 1, "available_at": 1})
+        }
+        cursor = self._msgs.aggregate(
+            [{"$group": {"_id": "$group_id", "n": {"$sum": 1}, "oldest": {"$min": "$published_at"}}}]
+        )
+        return _mongo_backlog([g async for g in cursor], locks, now)
 
     async def nack(self, lease: Lease, delay: float = 0.0) -> None:
         if not await self._owns(lease.group_id, lease.token):

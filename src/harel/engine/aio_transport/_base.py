@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Optional, Protocol, runtime_checkable
 
-from harel.engine.transport import Lease
+from harel.engine.transport import Backlog, Lease
 from harel.spec.states import Event
 
 
@@ -28,6 +28,8 @@ class AsyncTransport(Protocol):
     ) -> Optional[Lease]: ...
 
     async def ack(self, lease: Lease) -> None: ...
+
+    async def backlog(self) -> Backlog: ...
 
     async def nack(self, lease: Lease, delay: float = 0.0) -> None: ...
 

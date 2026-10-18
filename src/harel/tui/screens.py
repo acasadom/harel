@@ -98,6 +98,7 @@ class ListScreen(_MonitorScreen):
         Binding("a", "toggle_children", "children"),
         Binding("n", "next_page", "next page"),
         Binding("b", "previous_page", "prev page"),
+        Binding("w", "queues", "queues & workers"),
         Binding("r", "refresh", "refresh"),
         Binding("p", "toggle_poll", "pause/resume"),
         Binding("escape", "clear_filter", "clear filter", show=False),
@@ -243,6 +244,137 @@ class ListScreen(_MonitorScreen):
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         if event.row_key is not None and event.row_key.value:
             self.app.push_screen(DetailScreen(event.row_key.value))
+
+    def action_queues(self) -> None:
+        self.app.push_screen(QueuesScreen())
+
+
+class QueuesScreen(_MonitorScreen):
+    """The work queued, by machine, and the workers: for each machine, how many messages wait,
+    for how many executions, how many of those a worker holds, how long the oldest has waited,
+    and which live workers claim it — a machine with work waiting and none is marked. Below,
+    every worker's heartbeat: the machines it claims, when it started, when it was last seen;
+    `x` forgets the selected one when it is gone (a worker that crashed never removes its own)."""
+
+    BINDINGS = [
+        Binding("escape,h", "back", "back"),
+        Binding("r", "refresh", "refresh"),
+        Binding("x", "forget_worker", "forget gone worker"),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._gone: set[str] = set()
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Static(id="queues-note")
+        yield Label("Queued work, by machine", classes="section")
+        yield DataTable(id="queues", cursor_type="row", zebra_stripes=True)
+        yield Label("Workers", classes="section")
+        yield DataTable(id="workers", cursor_type="row", zebra_stripes=True)
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.sub_title = "queues & workers"
+        self.query_one("#queues", DataTable).add_columns(
+            "MACHINE", "WAITING", "EXECUTIONS", "HELD", "OLDEST WAIT", "WORKERS"
+        )
+        self.query_one("#workers", DataTable).add_columns(
+            "WORKER", "MACHINES", "STARTED", "LAST SEEN", "STATE"
+        )
+        # reading the backlog walks the whole queue: refreshed on its own, slower, interval
+        self.set_interval(self.monitor.queue_interval, self.action_refresh)
+        self.action_refresh()
+
+    def action_refresh(self) -> None:
+        self._fetch()
+
+    @work(exclusive=True, thread=True, group="queues")
+    def _fetch(self) -> None:
+        now = self.monitor.clock()
+        try:
+            view = self.monitor.model.queues(now)
+        except Exception as exc:  # noqa: BLE001 — an unreachable backend is a note, not a crash
+            self.app.call_from_thread(self._apply_error, exc)
+            return
+        self.app.call_from_thread(self._apply, view, now)
+
+    def _apply_error(self, exc: Exception) -> None:
+        self.query_one("#queues-note", Static).update(f"[red]could not read the queues: {exc}[/]")
+
+    def _apply(self, view, now: float) -> None:
+        notes = []
+        if view.unavailable:
+            notes.append(f"[yellow]no backlog: {view.unavailable}[/] — workers only")
+        elif not view.by_machine:
+            notes.append("[dim]this transport counts its whole queue, not by machine[/]")
+        unserved = [r for r in view.rows if r.unserved]
+        if unserved:
+            names = ", ".join(r.machine or "(no machine)" for r in unserved)
+            notes.append(f"[b red]⚠ work waiting that no live worker claims: {names}[/]")
+        self.query_one("#queues-note", Static).update("\n".join(notes))
+
+        def count(n) -> str:
+            return "—" if n is None else str(n)
+
+        table = self.query_one("#queues", DataTable)
+        table.clear()
+        for r in view.rows:
+            machine = r.machine or ("(all)" if not view.by_machine else "(no machine)")
+            workers = (
+                ", ".join(r.workers) if r.workers else ("[b red]none[/]" if r.messages else "[dim]none[/]")
+            )
+            table.add_row(
+                f"[b red]⚠ {machine}[/]" if r.unserved else machine,
+                str(r.messages),
+                count(r.executions),
+                count(r.held),
+                summary.age(r.oldest_published_at, now) if r.oldest_published_at is not None else "—",
+                workers,
+            )
+        table = self.query_one("#workers", DataTable)
+        sel = table.cursor_row
+        table.clear()
+        self._gone = {w.worker_id for w in view.workers if not w.alive(now)}
+        for w in view.workers:
+            alive = w.alive(now)
+            table.add_row(
+                w.worker_id,
+                ", ".join(w.machines) if w.machines is not None else "all",
+                f"{summary.age(w.started_at, now)} ago",
+                f"{summary.age(w.seen_at, now)} ago",
+                "[#5fd75f]live[/]" if alive else "[dim]gone[/]",
+                key=w.worker_id,
+            )
+        if sel is not None and table.row_count:
+            table.move_cursor(row=min(sel, table.row_count - 1))
+
+    def action_forget_worker(self) -> None:
+        table = self.query_one("#workers", DataTable)
+        if not table.row_count:
+            return
+        worker_id = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+        if worker_id not in self._gone:
+            self.notify("only a gone worker is forgotten — a live one keeps beating", severity="warning")
+            return
+
+        def then(ok: Optional[bool]) -> None:
+            if ok:
+                self._forget(worker_id)
+
+        self.app.push_screen(ConfirmModal(f"Forget worker {worker_id}?"), then)
+
+    @work(thread=True, group="control")
+    def _forget(self, worker_id: str) -> None:
+        try:
+            self.monitor.model.forget_worker(worker_id)
+        except Exception as exc:  # noqa: BLE001 — a failure is a toast, not a crash
+            self.app.call_from_thread(self.notify, f"forget failed: {exc}", severity="error")
+        self.app.call_from_thread(self.action_refresh)
+
+    def action_back(self) -> None:
+        self.app.pop_screen()
 
 
 class DetailScreen(_MonitorScreen):

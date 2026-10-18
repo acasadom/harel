@@ -237,6 +237,10 @@ simply no longer present once trimmed). Default window: 200 steps.
 
 `pending_work(id)` filters the in-memory timers, outbox and spawn lists by the id.
 
+## Worker heartbeats
+
+`record_worker` / `list_workers` / `forget_worker` keep the heartbeats in a dict by worker id.
+
 ## Published definitions
 
 `publish_definition` / `load_definition` keep the published machine versions in

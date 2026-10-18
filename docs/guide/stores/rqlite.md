@@ -390,6 +390,10 @@ A stale copy's later commit can't recreate it: an existing Execution is only eve
 
 `pending_work(id)` is three keyed reads: `harel_timers` by `execution_id` (its primary key), `harel_outbox` by `target_id` and `harel_spawns` by `parent_id` — the last two tables hold only what the relay hasn't delivered yet, so they stay small.
 
+## Worker heartbeats
+
+The heartbeats live in `harel_workers (worker_id TEXT PRIMARY KEY, record TEXT)`, the record as JSON: `record_worker` is an upsert (`ON CONFLICT(worker_id) DO UPDATE`), `forget_worker` a delete.
+
 ## Published definitions
 
 The published machine versions (see [published versions](../durability.md#changing-a-machine-with-executions-in-flight))

@@ -27,6 +27,7 @@ from harel.engine.store.base import (
     Step,
     StoreConflict,
     TimerOp,
+    WorkerRecord,
     decode_offset,
     encode_offset,
     like_prefix,
@@ -216,6 +217,22 @@ class ConnectionStore:
         ):
             self._q(f"DELETE FROM {{{table}}} WHERE {column} = ?", (execution_id,))
         return bool(deleted)
+
+    # --- the workers' heartbeats ------------------------------------------------------------
+    def record_worker(self, record: WorkerRecord) -> None:
+        self._q(
+            "INSERT INTO {workers} (worker_id, record) VALUES (?, ?) "
+            "ON CONFLICT(worker_id) DO UPDATE SET record = excluded.record",
+            (record.worker_id, record.to_json()),
+        )
+
+    def list_workers(self) -> list[WorkerRecord]:
+        return [
+            WorkerRecord.from_json(r[0]) for r in self._q("SELECT record FROM {workers} ORDER BY worker_id")
+        ]
+
+    def forget_worker(self, worker_id: str) -> None:
+        self._q("DELETE FROM {workers} WHERE worker_id = ?", (worker_id,))
 
     # --- published machine versions ----------------------------------------------------------
     def publish_definition(self, record: DefinitionRecord) -> DefinitionRecord:

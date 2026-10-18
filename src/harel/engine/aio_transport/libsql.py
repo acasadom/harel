@@ -6,7 +6,7 @@ import asyncio
 from typing import Any, Optional
 
 from harel.engine.schema import DEFAULT_PREFIX
-from harel.engine.transport import Lease
+from harel.engine.transport import Backlog, Lease
 from harel.spec.states import Event
 
 
@@ -66,6 +66,10 @@ class AsyncLibsqlTransport:
     async def ack(self, lease: Lease) -> None:
         async with self._lock:
             await asyncio.to_thread(self._t.ack, lease)
+
+    async def backlog(self) -> Backlog:
+        async with self._lock:
+            return await asyncio.to_thread(self._t.backlog)
 
     async def nack(self, lease: Lease, delay: float = 0.0) -> None:
         async with self._lock:

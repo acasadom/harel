@@ -7,7 +7,15 @@ from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.schema import DEFAULT_PREFIX, Names
-from harel.engine.store import DefinitionRecord, OutboxEntry, PendingWork, SpawnEntry, StoreConflict, TimerOp
+from harel.engine.store import (
+    DefinitionRecord,
+    OutboxEntry,
+    PendingWork,
+    SpawnEntry,
+    StoreConflict,
+    TimerOp,
+    WorkerRecord,
+)
 from harel.engine.store._base import _COMMIT_CAS_LUA, DEFAULT_TRACE_MAX, Step, _matches
 from harel.engine.store.redis import _glob_escape, _text, _timer_owner
 from harel.spec.states import Event
@@ -231,6 +239,18 @@ class AsyncRedisStore:
             outbox=sorted(outbox, key=lambda e: e.seq),
             spawns=sorted(spawns, key=lambda e: e.seq),
         )
+
+    async def record_worker(self, record: WorkerRecord) -> None:
+        await self._r.hset(self._k("workers"), record.worker_id, record.to_json())
+
+    async def list_workers(self) -> list[WorkerRecord]:
+        records = [
+            WorkerRecord.from_json(_text(v)) for v in (await self._r.hgetall(self._k("workers"))).values()
+        ]
+        return sorted(records, key=lambda w: w.worker_id)
+
+    async def forget_worker(self, worker_id: str) -> None:
+        await self._r.hdel(self._k("workers"), worker_id)
 
     async def ids_with_prefix(self, prefix: str) -> list[str]:
         head = self._k("exe:")

@@ -50,6 +50,9 @@ class MonitorApp(App):
     #timeline { height: 45%; border: round $primary; }
     #step { border: round $primary; }
     #filter { dock: top; }
+    #queues-note { padding: 0 1; height: auto; }
+    #queues { height: auto; max-height: 50%; }
+    #workers { height: auto; max-height: 40%; }
     #confirm-box { width: 60; height: auto; padding: 1 2; border: thick $primary; background: $surface; }
     #confirm-box Label { width: 100%; content-align: center middle; margin-bottom: 1; }
     #confirm-buttons { height: auto; align: center middle; }
@@ -64,12 +67,15 @@ class MonitorApp(App):
         model: MonitorModel,
         *,
         interval: float = _DEFAULT_INTERVAL,
+        queue_interval: float = 10.0,
         clock: Callable[[], float] = time.time,
         theme: str = "nord",
     ) -> None:
         super().__init__()
         self.model = model
         self.interval = max(interval, _MIN_INTERVAL)
+        # the queue screen reads the whole backlog: slower than the rest by default
+        self.queue_interval = max(queue_interval, _MIN_INTERVAL)
         self.clock = clock
         self._theme_name = theme
         self.title = "harel monitor"
@@ -86,12 +92,18 @@ class MonitorApp(App):
 def _build_model(args: argparse.Namespace) -> MonitorModel:
     """Build the read model from flags/env: the store via the worker's backend factory,
     and a Definition source from a directory of `.stm` files (if given)."""
-    from harel.worker import build_store
+    from harel.worker import build_store, build_transport
 
     store = build_store()
     defs_dir = args.definitions_dir or Config.from_env().definitions_dir
     source = DefinitionSource.from_dir(defs_dir) if defs_dir else DefinitionSource.empty()
-    return MonitorModel(store, source)
+    # the queue view reads the backlog from the workers' transport, when it can be reached; the
+    # rest of the monitor needs only the store
+    try:
+        transport, note = build_transport(), None
+    except Exception as exc:  # noqa: BLE001 — a missing transport only disables the queue view
+        transport, note = None, f"no transport ({exc})"
+    return MonitorModel(store, source, transport, note)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -111,6 +123,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="auto-refresh interval in seconds (default 1.0; $HAREL_TUI_INTERVAL_MS).",
     )
     parser.add_argument(
+        "--queue-interval",
+        type=float,
+        default=cfg.tui_queue_interval_ms / 1000.0,
+        help="the queue screen's refresh, in seconds (default 10; $HAREL_TUI_QUEUE_INTERVAL_MS): it "
+        "reads the whole backlog, which on a large queue is a heavy read for the backend",
+    )
+    parser.add_argument(
         "--theme",
         default=cfg.tui_theme,
         help="a built-in Textual theme: nord, gruvbox, tokyo-night, dracula, monokai, "
@@ -120,7 +139,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     model = _build_model(args)
-    app = MonitorApp(model, interval=args.interval, theme=args.theme)
+    app = MonitorApp(model, interval=args.interval, queue_interval=args.queue_interval, theme=args.theme)
     try:
         app.run()
     finally:

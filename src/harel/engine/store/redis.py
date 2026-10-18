@@ -17,6 +17,7 @@ from harel.engine.store._base import (
     Step,
     StoreConflict,
     TimerOp,
+    WorkerRecord,
     _matches,
 )
 from harel.spec.states import Event
@@ -245,6 +246,16 @@ class RedisStore:
             outbox=sorted(outbox, key=lambda e: e.seq),
             spawns=sorted(spawns, key=lambda e: e.seq),
         )
+
+    def record_worker(self, record: WorkerRecord) -> None:
+        self._r.hset(self._k("workers"), record.worker_id, record.to_json())
+
+    def list_workers(self) -> list[WorkerRecord]:
+        records = [WorkerRecord.from_json(_text(v)) for v in self._r.hgetall(self._k("workers")).values()]
+        return sorted(records, key=lambda w: w.worker_id)
+
+    def forget_worker(self, worker_id: str) -> None:
+        self._r.hdel(self._k("workers"), worker_id)
 
     def ids_with_prefix(self, prefix: str) -> list[str]:
         head = self._k("exe:")

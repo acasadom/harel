@@ -8,7 +8,7 @@ from typing import Any, Callable, Optional
 
 from harel.engine.schema import DEFAULT_PREFIX, Names, transport_schema
 from harel.engine.store._base import _PG_SCHEMA_LOCK
-from harel.engine.transport._base import Lease
+from harel.engine.transport._base import _PG_BACKLOG_SQL, Backlog, Lease, _backlog
 from harel.spec.states import Event
 
 
@@ -79,8 +79,8 @@ class PostgresTransport:
     ) -> None:
         with self._conn.cursor() as cur:
             cur.execute(
-                f"INSERT INTO {self._n.messages} (group_id, event) VALUES (%s, %s)",
-                (group_id, event.model_dump_json()),
+                f"INSERT INTO {self._n.messages} (group_id, event, published_at) VALUES (%s, %s, %s)",
+                (group_id, event.model_dump_json(), self._clock()),
             )
             # ready the group iff new — a publish into an in-flight or parked group must not
             # reset its lease or priority, so the update changes nothing. It does lock the row,
@@ -134,6 +134,13 @@ class PostgresTransport:
                 (lease.group_id, lease.seq, lease.token, self._clock()),
             )
         self._conn.commit()
+
+    def backlog(self) -> Backlog:
+        with self._conn.cursor() as cur:
+            cur.execute(self._n.sql(_PG_BACKLOG_SQL), (self._clock(),))
+            rows = cur.fetchall()
+        self._conn.commit()
+        return _backlog(rows)
 
     def nack(self, lease: Lease, delay: float = 0.0) -> None:
         with self._conn.cursor() as cur:

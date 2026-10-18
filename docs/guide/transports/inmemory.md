@@ -77,6 +77,10 @@ group is only ever advanced by one consumer at a time, so within a group order i
 See the [transports hub](../transports) for the contract and [distribution](../distribution) for
 running workers.
 
+## Backlog
+
+Each message keeps when it was published; `backlog()` groups the messages by their group's routing key under the lock — a group is held while one of its messages is leased or parked.
+
 ## Routing by machine
 
 Each `_groups` entry also keeps the `routing_key` the publish creating it carried. A claim given

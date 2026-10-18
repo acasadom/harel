@@ -456,6 +456,10 @@ regex, which the `_id` index serves.
 
 `pending_work(id)` reads the execution's own document for its `timers` and `spawns`, and finds the outbox entries addressed to it — they live in the documents of the executions that emitted them — through the index on `outbox.target_id`, which the store creates (`create_schema`).
 
+## Worker heartbeats
+
+The heartbeats live in their own collection, `harel_workers`, one document per worker (`_id` its id, the record as JSON): `record_worker` is a `replace_one(..., upsert=True)`.
+
 ## Published definitions
 
 The published machine versions live in their own collection, `harel_definitions`: one document

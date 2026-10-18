@@ -18,6 +18,7 @@ from harel.engine.store._base import (
     Step,
     StoreConflict,
     TimerOp,
+    WorkerRecord,
     _matches,
 )
 from harel.spec.states import Event
@@ -117,6 +118,7 @@ class DynamoDBStore:
             ("counters", [("id", "S")]),
             ("trace", [("execution_id", "S"), ("idx", "N")]),
             ("definitions", [("definition_id", "S"), ("version", "N")]),
+            ("workers", [("worker_id", "S")]),
         ]
         roles = ["HASH", "RANGE"]
         for name, keys in specs:
@@ -470,6 +472,19 @@ class DynamoDBStore:
                 for r in addressed("spawns", "parent_id")
             ],
         )
+
+    def record_worker(self, record: WorkerRecord) -> None:
+        self._db.put_item(
+            TableName=self._t("workers"),
+            Item=self._raw({"worker_id": record.worker_id, "record": record.to_json()}),
+        )
+
+    def list_workers(self) -> list[WorkerRecord]:
+        records = [WorkerRecord.from_json(r["record"]) for r in self._scan("workers")]
+        return sorted(records, key=lambda w: w.worker_id)
+
+    def forget_worker(self, worker_id: str) -> None:
+        self._db.delete_item(TableName=self._t("workers"), Key=self._raw({"worker_id": worker_id}))
 
     def ids_with_prefix(self, prefix: str) -> list[str]:
         # a hash key can't be range-queried, so this is a filtered Scan of the whole table
