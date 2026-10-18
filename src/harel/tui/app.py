@@ -34,17 +34,20 @@ class MonitorApp(App):
     #source-scroll { height: auto; max-height: 100%; }
     #source { padding: 0 1; }
     #right { width: 58%; padding: 0 1; }
-    #status-header { border: round $primary; padding: 0 1; height: auto; margin-bottom: 1; }
+    #status-header { border: round $primary; padding: 0 1; height: auto; }
     /* one-line buttons: a subtle panel background (not a saturated fill, which made the
        label unreadable) + just the TEXT coloured for the destructive ones */
-    #actions { height: 1; margin-bottom: 1; }
+    #error { border: round $error; padding: 0 1; height: auto; max-height: 12; }
+    #actions { height: 1; margin: 1 0; }
     #actions Button { height: 1; min-width: 0; border: none; padding: 0 2; margin-right: 2; background: $boost; }
     #actions Button:hover { background: $primary; }
     #btn-cancel { color: $warning; }
     #btn-terminate { color: $error; }
+    #btn-redrive { color: $success; }
+    #tabs { height: 1fr; }
     #actions Button:disabled { color: $text-disabled; }
     .section { text-style: bold; color: $accent; margin-top: 1; }
-    #timeline { height: 40%; border: round $primary; }
+    #timeline { height: 45%; border: round $primary; }
     #step { border: round $primary; }
     #filter { dock: top; }
     #confirm-box { width: 60; height: auto; padding: 1 2; border: thick $primary; background: $surface; }

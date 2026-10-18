@@ -1,6 +1,7 @@
-"""The monitor's screens: a list of executions (auto-refreshing), a detail view (the
-statechart tree + data panels + control-plane actions), and a confirm modal for the
-destructive actions. All store I/O runs in thread workers so the UI never blocks."""
+"""The monitor's screens: a list of executions (auto-refreshing, filtered and paged by the
+store), a detail view (the statechart tree, the execution's data in tabs, its children and the
+control-plane actions), and a confirm modal for the destructive actions. All store I/O runs in
+thread workers so the UI never blocks."""
 
 from __future__ import annotations
 
@@ -22,6 +23,8 @@ from textual.widgets import (
     Label,
     OptionList,
     Static,
+    TabbedContent,
+    TabPane,
     Tree,
 )
 from textual.widgets.option_list import Option
@@ -32,8 +35,17 @@ from harel.tui import summary, widgets
 if TYPE_CHECKING:
     from harel.tui.app import MonitorApp
 
-# the statuses the list shows by default (the "live" ones first); the filter narrows further
-_LIST_LIMIT = 200
+_PAGE = 100  # executions per page of the list
+
+# the list's status filter, cycled with `f`: a name and the statuses it asks the store for
+_STATUS_FILTERS: tuple[tuple[str, Optional[list[Status]]], ...] = (
+    ("any", None),
+    ("live", [Status.PENDING, Status.RUNNING, Status.SUSPENDED, Status.CANCELLING]),
+    ("failed", [Status.FAILED]),
+    ("done", [Status.DONE]),
+    ("cancelled", [Status.CANCELLED]),
+)
+_FINISHED = (Status.DONE, Status.CANCELLED)
 
 
 class _MonitorScreen(Screen):
@@ -75,11 +87,17 @@ class ConfirmModal(ModalScreen[bool]):
 
 
 class ListScreen(_MonitorScreen):
-    """The execution list: a DataTable auto-refreshed on a timer. `/` filters by a free
-    substring (id/definition/status), `enter` opens the detail, `p` pauses refresh."""
+    """The execution list: a DataTable auto-refreshed on a timer, a page at a time. The store
+    filters it — by status (`f` cycles any/live/failed/done/cancelled) and to the roots of
+    their trees unless `a` shows the children too — and pages it (`n` next, `b` back); `/`
+    narrows the page shown by a substring of id/machine/status. `enter` opens one."""
 
     BINDINGS = [
         Binding("slash", "filter", "filter"),
+        Binding("f", "cycle_status", "status"),
+        Binding("a", "toggle_children", "children"),
+        Binding("n", "next_page", "next page"),
+        Binding("b", "previous_page", "prev page"),
         Binding("r", "refresh", "refresh"),
         Binding("p", "toggle_poll", "pause/resume"),
         Binding("escape", "clear_filter", "clear filter", show=False),
@@ -90,16 +108,21 @@ class ListScreen(_MonitorScreen):
         self._filter = ""
         self._timer: Optional[Timer] = None
         self._paused = False
+        self._status = 0  # index into _STATUS_FILTERS
+        self._roots_only = True
+        self._cursors: list[Optional[str]] = [None]  # the cursor of each page reached so far
+        self._page = 0
+        self._next: Optional[str] = None  # the store's cursor for the page after this one
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Input(placeholder="filter: id / definition / status…", id="filter")
+        yield Input(placeholder="narrow this page: id / machine / status…", id="filter")
         yield DataTable(id="executions", cursor_type="row", zebra_stripes=True)
         yield Footer()
 
     def on_mount(self) -> None:
         table = self.query_one("#executions", DataTable)
-        table.add_columns("ID", "DEFINITION", "STATUS", "OUTCOME", "ACTIVE", "VER")
+        table.add_columns("ID", "MACHINE", "STATUS", "OUTCOME", "ACTIVE", "WRITTEN")
         table.focus()  # so `enter`/arrows reach the table without a click
         self.query_one("#filter", Input).display = False
         self._timer = self.set_interval(self.monitor.interval, self.action_refresh)
@@ -112,10 +135,16 @@ class ListScreen(_MonitorScreen):
 
     @work(exclusive=True, thread=True, group="list")
     def _fetch_list(self) -> None:
-        page = self.monitor.model.list_executions(limit=_LIST_LIMIT)
-        self.app.call_from_thread(self._apply_list, page.items)
+        page = self.monitor.model.list_executions(
+            status=_STATUS_FILTERS[self._status][1],
+            roots_only=self._roots_only,
+            limit=_PAGE,
+            cursor=self._cursors[self._page],
+        )
+        self.app.call_from_thread(self._apply_list, page.items, page.next_cursor)
 
-    def _apply_list(self, items) -> None:
+    def _apply_list(self, items, next_cursor: Optional[str]) -> None:
+        self._next = next_cursor
         table = self.query_one("#executions", DataTable)
         sel = table.cursor_row
         flt = self._filter.lower()
@@ -127,22 +156,62 @@ class ListScreen(_MonitorScreen):
             or flt in s.definition_id.lower()
             or flt in s.status.value.lower()
         ]
+        now = self.monitor.clock()
         table.clear()
         for s in rows:
             table.add_row(
-                s.id[:12],
-                summary.truncate(s.definition_id, 20),
+                s.id,
+                summary.machine(s.definition_id, s.definition_version),
                 f"[{summary.status_color(s.status)}]{summary.status_label(s.status)}[/]",
                 summary.verdict(s),
                 summary.short_path(s.active_path, 28),
-                str(s.version),
+                summary.age(s.updated_at, now),
                 key=s.id,
             )
         if sel is not None and table.row_count:
             table.move_cursor(row=min(sel, table.row_count - 1))
-        self.sub_title = f"{len(rows)} executions" + (" (paused)" if self._paused else "")
+        bits = [
+            f"{len(rows)} shown",
+            f"page {self._page + 1}" + (" (more: n)" if next_cursor else ""),
+            "roots" if self._roots_only else "roots + children",
+            f"status: {_STATUS_FILTERS[self._status][0]}",
+        ]
+        if self._filter:
+            bits.append(f"narrowed: {self._filter!r}")
+        if self._paused:
+            bits.append("paused")
+        self.sub_title = " · ".join(bits)
 
     # --- actions ---------------------------------------------------------------------
+
+    def _restart(self) -> None:
+        """Back to the first page: a new filter makes the page cursors meaningless."""
+        self._cursors, self._page, self._next = [None], 0, None
+        self.action_refresh()
+
+    def action_cycle_status(self) -> None:
+        self._status = (self._status + 1) % len(_STATUS_FILTERS)
+        self._restart()
+
+    def action_toggle_children(self) -> None:
+        self._roots_only = not self._roots_only
+        self._restart()
+
+    def action_next_page(self) -> None:
+        if self._next is None:
+            self.notify("this is the last page")
+            return
+        del self._cursors[self._page + 1 :]
+        self._cursors.append(self._next)
+        self._page += 1
+        self.action_refresh()
+
+    def action_previous_page(self) -> None:
+        if self._page == 0:
+            self.notify("this is the first page")
+            return
+        self._page -= 1
+        self.action_refresh()
 
     def action_filter(self) -> None:
         inp = self.query_one("#filter", Input)
@@ -177,24 +246,31 @@ class ListScreen(_MonitorScreen):
 
 
 class DetailScreen(_MonitorScreen):
-    """One execution: the statechart tree (active state highlighted) on the left; on the
-    right a navigable **execution timeline** over a per-step detail (event in, transition,
-    actions/guards, context in → out). Navigating a step highlights its node in the tree.
-    A row of control-plane buttons mirrors the keyboard actions, enabled per status."""
+    """One execution. On the left, the statechart tree with the active state highlighted (and
+    the machine's DSL source, folded). On the right, its header — status, machine version,
+    tree and parent, error — the control-plane buttons, and tabs: its **timeline** (when the
+    runners record one), its **context** and history, what is **pending** for it (timers,
+    inbound events, spawns) and its **children** (`enter` opens one; `u` goes up to the
+    parent). Redrive (`d`) brings a failed execution back at the leaf state selected in the
+    tree."""
 
     BINDINGS = [
         Binding("escape,h", "back", "back"),
         Binding("r", "refresh", "refresh"),
+        Binding("u", "parent", "parent"),
         Binding("s", "suspend", "suspend"),
         Binding("R", "resume", "resume"),
         Binding("c", "cancel", "cancel"),
         Binding("t", "terminate", "terminate"),
+        Binding("d", "redrive", "redrive"),
     ]
 
     def __init__(self, execution_id: str) -> None:
         super().__init__()
         self.execution_id = execution_id
         self._can_cancel = True
+        self._can_redrive = False
+        self._parent_id: Optional[str] = None
         self._steps: list = []  # TraceStep list, indexed by the OptionList option index
         self._tree_model = None  # cached so navigating the timeline re-highlights cheaply
 
@@ -208,15 +284,26 @@ class DetailScreen(_MonitorScreen):
                         yield Static(id="source")
             with Vertical(id="right"):
                 yield Static(id="status-header")
+                yield Static(id="error")
                 with Horizontal(id="actions"):
                     yield Button("Suspend", id="btn-suspend")
                     yield Button("Resume", id="btn-resume")
                     yield Button("Cancel", id="btn-cancel")
                     yield Button("Terminate", id="btn-terminate")
-                yield Label("Timeline", classes="section")
-                yield OptionList(id="timeline")
-                with VerticalScroll(id="step"):
-                    yield Static(id="step-detail")
+                    yield Button("Redrive", id="btn-redrive")
+                with TabbedContent(id="tabs"):
+                    with TabPane("Timeline", id="tab-timeline"):
+                        yield OptionList(id="timeline")
+                        with VerticalScroll(id="step"):
+                            yield Static(id="step-detail")
+                    with TabPane("Context", id="tab-context"):
+                        with VerticalScroll():
+                            yield Static(id="context")
+                    with TabPane("Pending", id="tab-pending"):
+                        with VerticalScroll():
+                            yield Static(id="pending")
+                    with TabPane("Children", id="tab-children"):
+                        yield DataTable(id="children", cursor_type="row", zebra_stripes=True)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -224,6 +311,8 @@ class DetailScreen(_MonitorScreen):
         self.query_one("#statechart", Tree).border_title = "statechart"
         self.query_one("#timeline", OptionList).border_title = "timeline (↑/↓ to navigate)"
         self.query_one("#step", VerticalScroll).border_title = "step detail"
+        self.query_one("#children", DataTable).add_columns("CHILD", "KIND", "BRANCH", "STATE")
+        self.query_one("#error", Static).display = False
         self.set_interval(self.monitor.interval, self.action_refresh)
         self.action_refresh()
 
@@ -232,28 +321,56 @@ class DetailScreen(_MonitorScreen):
 
     @work(exclusive=True, thread=True, group="detail")
     def _fetch_detail(self) -> None:
-        detail = self.monitor.model.detail(self.execution_id)
-        can_cancel = self.monitor.model.can_cancel(self.execution_id) if detail else False
-        self.app.call_from_thread(self._apply_detail, detail, can_cancel)
+        model = self.monitor.model
+        detail = model.detail(self.execution_id)
+        can_cancel = model.can_cancel(self.execution_id) if detail else False
+        can_redrive = model.can_redrive(self.execution_id) if detail else False
+        self.app.call_from_thread(self._apply_detail, detail, can_cancel, can_redrive)
 
-    def _apply_detail(self, detail, can_cancel: bool) -> None:
+    def _apply_detail(self, detail, can_cancel: bool, can_redrive: bool) -> None:
         if detail is None:
             self.notify("execution no longer exists", severity="warning")
             self.app.pop_screen()
             return
-        self._can_cancel = can_cancel
+        exe = detail.execution
+        now = self.monitor.clock()
+        self._can_cancel, self._can_redrive, self._parent_id = can_cancel, can_redrive, exe.parent_id
         self._tree_model = detail.tree
-        widgets.populate_statechart(self.query_one("#statechart", Tree), detail.tree)
+        self._populate_tree(self._selected_step_path())
         self.query_one("#source", Static).update(
-            detail.source or "[dim](source unavailable — pass --definitions-dir)[/]"
+            detail.source or "[dim](source unavailable: no file given, and not published in the store)[/]"
         )
-        self.query_one("#status-header", Static).update(widgets.status_header_markup(detail))
-        self._sync_buttons(detail.execution.status)
+        self.query_one("#status-header", Static).update(widgets.status_header_markup(detail, now))
+        error = self.query_one("#error", Static)
+        error.display = bool(exe.error)
+        if exe.error:
+            error.update(widgets.error_markup(detail))
+        self._sync_buttons(exe.status)
+        self.query_one("#context", Static).update(
+            widgets.context_markup(detail) + "\n\n[b]history[/]\n" + widgets.history_markup(detail)
+        )
+        self.query_one("#pending", Static).update(widgets.pending_markup(detail, now))
+        self._apply_children(detail.children)
+        self._apply_timeline(detail.trace)
+        banner = "" if detail.tree.resolved else "  [yellow](data-only: definition unavailable)[/]"
+        self.sub_title = f"{self.execution_id}{banner}"
 
+    def _apply_children(self, children) -> None:
+        table = self.query_one("#children", DataTable)
+        sel = table.cursor_row
+        table.clear()
+        for child in children:
+            state = f"✓ {child.outcome or 'done'}" if child.finished else "…"
+            table.add_row(child.id, child.kind, child.root_path or "—", state, key=child.id)
+        if sel is not None and table.row_count:
+            table.move_cursor(row=min(sel, table.row_count - 1))
+        self.query_one("#tab-children", TabPane).disabled = not children
+
+    def _apply_timeline(self, trace) -> None:
         timeline = self.query_one("#timeline", OptionList)
         keep = timeline.highlighted  # preserve the navigated step across a refresh
         timeline.clear_options()
-        self._steps = list(detail.trace)
+        self._steps = list(trace)
         for step in self._steps:
             timeline.add_option(Option(step.title(), id=str(step.index)))
         if self._steps:
@@ -263,20 +380,41 @@ class DetailScreen(_MonitorScreen):
             self._show_step(timeline.highlighted)
         else:
             self.query_one("#step-detail", Static).update(
-                "[dim](no execution trace — step-by-step recording is a future engine "
-                "feature; this timeline fills in once a trace is present)[/]"
+                "[dim](no timeline — the runners record one when tracing is on: HAREL_TRACE=1, or "
+                "trace=True; the Context tab shows the execution's data either way)[/]"
             )
-        banner = "" if detail.tree.resolved else "  [yellow](data-only: definition unavailable)[/]"
-        self.sub_title = f"{self.execution_id}{banner}"
+
+    def _selected_step_path(self) -> Optional[str]:
+        timeline = self.query_one("#timeline", OptionList)
+        index = timeline.highlighted
+        if index is None or not (0 <= index < len(self._steps)):
+            return None
+        return self._steps[index].to_path
+
+    def _populate_tree(self, selected_step: Optional[str]) -> None:
+        """Re-render the tree, keeping the node the cursor was on (a redrive target)."""
+        tree = self.query_one("#statechart", Tree)
+        if self._tree_model is None:
+            return
+        cursor = tree.cursor_node.data if tree.cursor_node is not None else None
+        widgets.populate_statechart(tree, self._tree_model, selected_step)
+        if cursor is not None:
+            node = widgets.find_node(tree, cursor)
+            if node is not None:
+                tree.move_cursor(node)
 
     def _sync_buttons(self, status) -> None:
-        """Enable each control button only where it applies (Resume needs SUSPENDED,
-        Suspend needs RUNNING, cancel needs a resolvable Definition, …)."""
-        terminal = status in (Status.DONE, Status.CANCELLED, Status.FAILED)
+        """Enable each control button only where it applies: Suspend on a running execution,
+        Resume on a suspended one, Cancel on a live one whose definition resolves, Terminate on
+        any unfinished one — a failed one included, which it closes — and Redrive on a failed
+        one whose definition resolves."""
         self.query_one("#btn-suspend", Button).disabled = status is not Status.RUNNING
         self.query_one("#btn-resume", Button).disabled = status is not Status.SUSPENDED
-        self.query_one("#btn-cancel", Button).disabled = terminal or not self._can_cancel
-        self.query_one("#btn-terminate", Button).disabled = terminal
+        self.query_one("#btn-cancel", Button).disabled = (
+            status in _FINISHED or status is Status.FAILED or not self._can_cancel
+        )
+        self.query_one("#btn-terminate", Button).disabled = status in _FINISHED
+        self.query_one("#btn-redrive", Button).disabled = not self._can_redrive
 
     def _show_step(self, index: Optional[int]) -> None:
         """Render the selected timeline step and highlight its target node in the tree."""
@@ -284,11 +422,14 @@ class DetailScreen(_MonitorScreen):
             return
         step = self._steps[index]
         self.query_one("#step-detail", Static).update(widgets.step_markup(step))
-        if self._tree_model is not None:
-            widgets.populate_statechart(self.query_one("#statechart", Tree), self._tree_model, step.to_path)
+        self._populate_tree(step.to_path)
 
     def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
         self._show_step(event.option_index)
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.row_key is not None and event.row_key.value:
+            self.app.push_screen(DetailScreen(event.row_key.value))
 
     # --- control plane (buttons + keys share the same actions) ------------------------
 
@@ -298,12 +439,19 @@ class DetailScreen(_MonitorScreen):
             "btn-resume": self.action_resume,
             "btn-cancel": self.action_cancel,
             "btn-terminate": self.action_terminate,
+            "btn-redrive": self.action_redrive,
         }.get(event.button.id or "")
         if handler is not None:
             handler()
 
     def action_back(self) -> None:
         self.app.pop_screen()
+
+    def action_parent(self) -> None:
+        if self._parent_id is None:
+            self.notify("this execution is the root of its tree")
+            return
+        self.app.push_screen(DetailScreen(self._parent_id))
 
     def action_suspend(self) -> None:
         self._control("suspend")
@@ -320,6 +468,24 @@ class DetailScreen(_MonitorScreen):
             return
         self._confirm("cancel", f"Cancel {self.execution_id}?")
 
+    def action_redrive(self) -> None:
+        if not self._can_redrive:
+            self.notify(
+                "redrive brings back a failed execution whose definition is available", severity="warning"
+            )
+            return
+        node = self.query_one("#statechart", Tree).cursor_node
+        if node is None or node.data is None or node.allow_expand:
+            self.notify("select a leaf state in the tree to redrive to", severity="warning")
+            return
+        target = node.data
+
+        def then(ok: Optional[bool]) -> None:
+            if ok:
+                self._control("redrive", target)
+
+        self.app.push_screen(ConfirmModal(f"Redrive {self.execution_id} at {target}?"), then)
+
     def _confirm(self, action: str, question: str) -> None:
         def then(ok: Optional[bool]) -> None:
             if ok:
@@ -328,9 +494,9 @@ class DetailScreen(_MonitorScreen):
         self.app.push_screen(ConfirmModal(question), then)
 
     @work(thread=True, group="control")
-    def _control(self, action: str) -> None:
+    def _control(self, action: str, *args: str) -> None:
         try:
-            getattr(self.monitor.model, action)(self.execution_id)
+            getattr(self.monitor.model, action)(self.execution_id, *args)
         except Exception as exc:  # noqa: BLE001 — a control failure is a toast, not a crash
             self.app.call_from_thread(self.notify, f"{action} failed: {exc}", severity="error")
         else:

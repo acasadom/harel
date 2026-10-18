@@ -454,6 +454,10 @@ The async twin runs the same transaction under its connection lock.
 
 `ids_with_prefix(prefix)` — `SELECT id FROM harel_executions WHERE id LIKE ? ESCAPE '\'`, with
 `%`, `_` and `\` in the prefix escaped — is how the control plane finds a tree's descendants.
+## Pending work
+
+`pending_work(id)` is three keyed reads: `harel_timers` by `execution_id` (its primary key), `harel_outbox` by `target_id` and `harel_spawns` by `parent_id` — the last two tables hold only what the relay hasn't delivered yet, so they stay small.
+
 ## Published definitions
 
 The published machine versions (see [published versions](../durability.md#changing-a-machine-with-executions-in-flight))

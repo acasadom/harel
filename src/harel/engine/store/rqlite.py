@@ -10,10 +10,14 @@ from harel.engine.schema import DEFAULT_PREFIX, Names, store_schema
 from harel.engine.store._base import (
     _DEFINITION_COLUMNS,
     _IDS_WITH_PREFIX_SQL,
+    _PENDING_OUTBOX_SQL,
+    _PENDING_SPAWNS_SQL,
+    _PENDING_TIMERS_SQL,
     _PURGE_COMPANIONS_SQL,
     DEFAULT_TRACE_MAX,
     DefinitionRecord,
     OutboxEntry,
+    PendingWork,
     SpawnEntry,
     Step,
     StoreConflict,
@@ -24,6 +28,7 @@ from harel.engine.store._base import (
     _like_prefix,
     _listing_page,
     _listing_sql_sqlite,
+    _pending_work,
 )
 from harel.spec.states import Event
 
@@ -341,6 +346,12 @@ class RqliteStore:
                 ]
             ]
         )
+
+    def pending_work(self, execution_id: str) -> PendingWork:
+        def rows(template: str) -> list:
+            return self._query(self._n.sql(template), (execution_id,))
+
+        return _pending_work(rows(_PENDING_TIMERS_SQL), rows(_PENDING_OUTBOX_SQL), rows(_PENDING_SPAWNS_SQL))
 
     def ids_with_prefix(self, prefix: str) -> list[str]:
         return [r[0] for r in self._query(self._n.sql(_IDS_WITH_PREFIX_SQL), (_like_prefix(prefix),))]

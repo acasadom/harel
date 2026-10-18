@@ -35,6 +35,8 @@ SEED = [
 
 
 FINISHED_AT = 1700000000.5  # projected into the summary as `finished_at`
+UPDATED_AT = 1700000100.25  # projected as `updated_at`
+DEFINITION_VERSION = 3  # projected as `definition_version`
 
 
 def seed(store, ns: str = "") -> tuple[str, str]:
@@ -49,6 +51,8 @@ def seed(store, ns: str = "") -> tuple[str, str]:
                 status=status,
                 parent_id=f"{ns}{parent}" if parent else None,
                 finished_at=FINISHED_AT if status is Status.DONE else None,
+                updated_at=UPDATED_AT,
+                definition_version=DEFINITION_VERSION,
             )
         )
     return d1, d2
@@ -94,6 +98,7 @@ def assert_listing_contract(store, *, ordered: bool, ns: str = "") -> None:
     assert one.definition_id == d1 and one.status == Status.RUNNING and one.parent_id is None
     assert not hasattr(one, "context") and not hasattr(one, "history")
     assert one.finished_at is None
+    assert (one.definition_version, one.updated_at) == (DEFINITION_VERSION, UPDATED_AT)
     done = store.list_executions(definition_id=d1, status=[Status.DONE], limit=10).items
     assert done and all(s.finished_at == FINISHED_AT for s in done)
 
@@ -120,6 +125,8 @@ async def seed_async(store, ns: str = "") -> tuple[str, str]:
                 status=status,
                 parent_id=f"{ns}{parent}" if parent else None,
                 finished_at=FINISHED_AT if status is Status.DONE else None,
+                updated_at=UPDATED_AT,
+                definition_version=DEFINITION_VERSION,
             )
         )
     return d1, d2
@@ -155,6 +162,7 @@ async def assert_async_listing_contract(store, *, ordered: bool, ns: str = "") -
     assert one.definition_id == d1 and one.status == Status.RUNNING and one.parent_id is None
     assert not hasattr(one, "context") and not hasattr(one, "history")
     assert one.finished_at is None
+    assert (one.definition_version, one.updated_at) == (DEFINITION_VERSION, UPDATED_AT)
     done = (await store.list_executions(definition_id=d1, status=[Status.DONE], limit=10)).items
     assert done and all(s.finished_at == FINISHED_AT for s in done)
 

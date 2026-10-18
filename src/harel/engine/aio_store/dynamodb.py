@@ -8,7 +8,7 @@ from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.schema import DEFAULT_PREFIX, Names
-from harel.engine.store import DefinitionRecord, OutboxEntry, SpawnEntry, StoreConflict, TimerOp
+from harel.engine.store import DefinitionRecord, OutboxEntry, PendingWork, SpawnEntry, StoreConflict, TimerOp
 from harel.engine.store._base import DEFAULT_TRACE_MAX, Step, _decode_offset, _encode_offset, _matches
 from harel.engine.store.dynamodb import _PURGE_PARTITIONS
 from harel.spec.states import Event
@@ -432,6 +432,44 @@ class AsyncDynamoDBStore:
         except self._ClientError as exc:
             if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
                 raise  # the guard didn't match (stale sweep) — a no-op, as intended
+
+    async def pending_work(self, execution_id: str) -> PendingWork:
+        # see the sync `DynamoDBStore.pending_work`
+        kwargs: dict[str, Any] = {
+            "TableName": self._t("timers"),
+            "KeyConditionExpression": "execution_id = :e",
+            "ExpressionAttributeValues": {":e": {"S": execution_id}},
+        }
+        timers: list[tuple[str, float]] = []
+        while True:
+            resp = await self._db.query(**kwargs)
+            timers += [(r["path"], float(r["fire_at"])) for r in map(self._item, resp.get("Items", []))]
+            if not resp.get("LastEvaluatedKey"):
+                break
+            kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+
+        async def addressed(table: str, attr: str) -> list[dict]:
+            rows = await self._scan(
+                table,
+                FilterExpression="#a = :v",
+                ExpressionAttributeNames={"#a": attr},
+                ExpressionAttributeValues={":v": {"S": execution_id}},
+            )
+            return sorted(rows, key=lambda r: int(r["seq"]))
+
+        return PendingWork(
+            timers=sorted(timers, key=lambda t: (t[1], t[0])),
+            outbox=[
+                OutboxEntry(int(r["seq"]), r.get("target_id"), Event.model_validate_json(r["event"]))
+                for r in await addressed("outbox", "target_id")
+            ],
+            spawns=[
+                SpawnEntry(
+                    int(r["seq"]), r["parent_id"], r["child_id"], r["root_path"], json.loads(r["context"])
+                )
+                for r in await addressed("spawns", "parent_id")
+            ],
+        )
 
     async def ids_with_prefix(self, prefix: str) -> list[str]:
         rows = await self._scan(

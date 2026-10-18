@@ -8,7 +8,7 @@ from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.schema import DEFAULT_PREFIX, Names
-from harel.engine.store import DefinitionRecord, OutboxEntry, SpawnEntry, StoreConflict, TimerOp
+from harel.engine.store import DefinitionRecord, OutboxEntry, PendingWork, SpawnEntry, StoreConflict, TimerOp
 from harel.engine.store._base import DEFAULT_TRACE_MAX, Step, _decode_offset, _encode_offset, _matches
 from harel.spec.states import Event
 
@@ -45,7 +45,11 @@ class AsyncMongoStore:
         retry_delay: float = 1.0,
         *,
         prefix: str = DEFAULT_PREFIX,
+        create_schema: bool = True,
     ) -> "AsyncMongoStore":
+        """Connect, retrying until Mongo answers. With `create_schema` (the default) it creates
+        its one index — `outbox.target_id`, which `pending_work` reads by; with `False` the
+        index is expected to exist."""
         import anyio
         import motor.motor_asyncio
         from pymongo.errors import PyMongoError
@@ -55,7 +59,10 @@ class AsyncMongoStore:
             try:
                 client: Any = motor.motor_asyncio.AsyncIOMotorClient(url)
                 await client.admin.command("ping")
-                return cls(client, db_name, prefix=prefix)
+                store = cls(client, db_name, prefix=prefix)
+                if create_schema:
+                    await store._exes.create_index("outbox.target_id", sparse=True)
+                return store
             except PyMongoError as exc:
                 last = exc
                 await anyio.sleep(retry_delay)
@@ -251,6 +258,27 @@ class AsyncMongoStore:
     async def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None:
         key = f"timers.{self._enc(path)}"
         await self._exes.update_one({"_id": execution_id, key: fire_at}, {"$unset": {key: ""}})
+
+    async def pending_work(self, execution_id: str) -> PendingWork:
+        # see the sync `MongoStore.pending_work`
+        own = await self._exes.find_one({"_id": execution_id}, {"timers": 1, "spawns": 1}) or {}
+        timers = [(self._dec(enc), float(at)) for enc, at in (own.get("timers") or {}).items()]
+        spawns = [
+            SpawnEntry(s["seq"], s["parent_id"], s["child_id"], s["root_path"], dict(s["context"]))
+            for s in own.get("spawns", [])
+        ]
+        outbox = []
+        async for doc in self._exes.find({"outbox.target_id": execution_id}, {"outbox": 1}):
+            outbox += [
+                OutboxEntry(e["seq"], e["target_id"], Event.model_validate_json(e["event"]))
+                for e in doc.get("outbox", [])
+                if e["target_id"] == execution_id
+            ]
+        return PendingWork(
+            timers=sorted(timers, key=lambda t: (t[1], t[0])),
+            outbox=sorted(outbox, key=lambda e: e.seq),
+            spawns=sorted(spawns, key=lambda e: e.seq),
+        )
 
     async def ids_with_prefix(self, prefix: str) -> list[str]:
         query = {"_id": {"$regex": "^" + re.escape(prefix)}}

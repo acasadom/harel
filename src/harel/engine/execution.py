@@ -136,6 +136,8 @@ class ExecutionSummary(pydantic.BaseModel):
     version: int = 0
     parent_id: Optional[str] = None  # None => a root; set => an orthogonal region / invoke child
     finished_at: Optional[float] = None
+    definition_version: Optional[int] = None  # the machine version it runs (None: from before versions)
+    updated_at: Optional[float] = None  # its latest commit
 
     @classmethod
     def of(cls, exe: "Execution") -> "ExecutionSummary":
@@ -149,6 +151,8 @@ class ExecutionSummary(pydantic.BaseModel):
             version=exe.version,
             parent_id=exe.parent_id,
             finished_at=exe.finished_at,
+            definition_version=exe.definition_version,
+            updated_at=exe.updated_at,
         )
 
     @classmethod
@@ -164,6 +168,8 @@ class ExecutionSummary(pydantic.BaseModel):
             version=version,
             parent_id=raw.get("parent_id"),
             finished_at=raw.get("finished_at"),
+            definition_version=raw.get("definition_version"),
+            updated_at=raw.get("updated_at"),
         )
 
 

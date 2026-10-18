@@ -10,11 +10,15 @@ from harel.engine.schema import DEFAULT_PREFIX, Names, store_schema
 from harel.engine.store._base import (
     _DEFINITION_COLUMNS,
     _IDS_WITH_PREFIX_SQL,
+    _PENDING_OUTBOX_SQL,
+    _PENDING_SPAWNS_SQL,
+    _PENDING_TIMERS_SQL,
     _PG_SCHEMA_LOCK,
     _PURGE_COMPANIONS_SQL,
     DEFAULT_TRACE_MAX,
     DefinitionRecord,
     OutboxEntry,
+    PendingWork,
     SpawnEntry,
     Step,
     StoreConflict,
@@ -25,6 +29,8 @@ from harel.engine.store._base import (
     _like_prefix,
     _listing_page,
     _listing_sql_pg,
+    _pending_work,
+    _pg_params,
 )
 from harel.spec.states import Event
 
@@ -291,6 +297,21 @@ class PostgresStore:
                 (execution_id, path, fire_at),
             )
         self._conn.commit()
+
+    def pending_work(self, execution_id: str) -> PendingWork:
+        with self._conn.cursor() as cur:
+
+            def rows(template: str) -> list:
+                cur.execute(_pg_params(self._n.sql(template)), (execution_id,))
+                return cur.fetchall()
+
+            timers, outbox, spawns = (
+                rows(_PENDING_TIMERS_SQL),
+                rows(_PENDING_OUTBOX_SQL),
+                rows(_PENDING_SPAWNS_SQL),
+            )
+        self._conn.commit()
+        return _pending_work(timers, outbox, spawns)
 
     def ids_with_prefix(self, prefix: str) -> list[str]:
         with self._conn.cursor() as cur:

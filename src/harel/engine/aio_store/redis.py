@@ -7,7 +7,7 @@ from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.schema import DEFAULT_PREFIX, Names
-from harel.engine.store import DefinitionRecord, OutboxEntry, SpawnEntry, StoreConflict, TimerOp
+from harel.engine.store import DefinitionRecord, OutboxEntry, PendingWork, SpawnEntry, StoreConflict, TimerOp
 from harel.engine.store._base import _COMMIT_CAS_LUA, DEFAULT_TRACE_MAX, Step, _matches
 from harel.engine.store.redis import _glob_escape, _text, _timer_owner
 from harel.spec.states import Event
@@ -208,6 +208,29 @@ class AsyncRedisStore:
         score = await self._r.zscore(self._k("timers"), member)
         if score is not None and float(score) == fire_at:
             await self._r.zrem(self._k("timers"), member)
+
+    async def pending_work(self, execution_id: str) -> PendingWork:
+        # see the sync `RedisStore.pending_work`
+        timers = []
+        async for member, score in self._r.zscan_iter(
+            self._k("timers"), match=_glob_escape(execution_id) + "\x00*"
+        ):
+            timers.append((_text(member).partition("\x00")[2], float(score)))
+        outbox = [
+            OutboxEntry(int(seq), p["t"], Event.model_validate_json(p["e"]))
+            for seq, p in ((s, json.loads(v)) for s, v in (await self._r.hgetall(self._k("outbox"))).items())
+            if p["t"] == execution_id
+        ]
+        spawns = [
+            SpawnEntry(int(seq), p["p"], p["c"], p["r"], p["x"])
+            for seq, p in ((s, json.loads(v)) for s, v in (await self._r.hgetall(self._k("spawns"))).items())
+            if p["p"] == execution_id
+        ]
+        return PendingWork(
+            timers=sorted(timers, key=lambda t: (t[1], t[0])),
+            outbox=sorted(outbox, key=lambda e: e.seq),
+            spawns=sorted(spawns, key=lambda e: e.seq),
+        )
 
     async def ids_with_prefix(self, prefix: str) -> list[str]:
         head = self._k("exe:")
