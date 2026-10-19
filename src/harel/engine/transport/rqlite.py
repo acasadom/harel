@@ -7,7 +7,15 @@ import uuid
 from typing import Callable, Optional
 
 from harel.engine.schema import DEFAULT_PREFIX, Names
-from harel.engine.transport._base import _PARKED, Lease, _routing_filter, _sqlite_create_schema
+from harel.engine.transport._base import (
+    _PARKED,
+    _SQLITE_BACKLOG_SQL,
+    Backlog,
+    Lease,
+    _backlog,
+    _routing_filter,
+    _sqlite_create_schema,
+)
 from harel.spec.states import Event
 
 
@@ -38,7 +46,7 @@ class RqliteTransport:
         self._clock = clock
         self._session = requests.Session()
         if create_schema:
-            _sqlite_create_schema(prefix, lambda sql: self._execute([sql]), self._group_columns)
+            _sqlite_create_schema(prefix, lambda sql: self._execute([sql]), self._columns)
 
     @classmethod
     def from_url(
@@ -86,8 +94,8 @@ class RqliteTransport:
             raise RuntimeError(f"rqlite query error: {result['error']}")
         return result.get("values") or []
 
-    def _group_columns(self) -> list[str]:
-        return [row[1] for row in self._query(f"PRAGMA table_info({self._n.groups})", ())]
+    def _columns(self, table: str) -> list[str]:
+        return [row[1] for row in self._query(f"PRAGMA table_info({table})", ())]
 
     def publish(
         self, group_id: str, event: Event, priority: int = 0, routing_key: Optional[str] = None
@@ -95,9 +103,10 @@ class RqliteTransport:
         self._execute(
             [
                 [
-                    f"INSERT INTO {self._n.messages} (group_id, event) VALUES (?, ?)",
+                    f"INSERT INTO {self._n.messages} (group_id, event, published_at) VALUES (?, ?, ?)",
                     group_id,
                     event.model_dump_json(),
+                    self._clock(),
                 ],
                 [
                     f"INSERT OR IGNORE INTO {self._n.groups} (group_id, priority, routing_key) VALUES (?, ?, ?)",
@@ -163,6 +172,9 @@ class RqliteTransport:
             ],
             transaction=True,
         )
+
+    def backlog(self) -> Backlog:
+        return _backlog(self._query(self._n.sql(_SQLITE_BACKLOG_SQL), (self._clock(),)))
 
     def nack(self, lease: Lease, delay: float = 0.0) -> None:
         if delay > 0:

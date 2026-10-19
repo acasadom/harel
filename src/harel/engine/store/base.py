@@ -9,7 +9,8 @@ change). Check a backend against the protocol with `harel.testing`.
 - `Step` — the description of a commit every writer passes to `commit(..., step=)`;
 - `OutboxEntry`, `SpawnEntry`, `TimerOp` — what `pending_outbox`, `pending_spawns` return and
   `commit` receives; `DefinitionRecord` — a published machine version (`publish_definition`,
-  `load_definition`); `PendingWork` — what `pending_work` returns; `ExecutionSummary`, `ExecutionPage` — what `list_executions` returns.
+  `load_definition`); `PendingWork` — what `pending_work` returns; `WorkerRecord` — a worker's heartbeat
+  (`record_worker`, `list_workers`); `ExecutionSummary`, `ExecutionPage` — what `list_executions` returns.
 - `StoreConflict` — `commit`/`save` lost the version CAS; `ExecutionAlreadyExists`.
 - `encode_offset(offset)` / `decode_offset(cursor)` — an opaque pagination cursor over an
   integer offset (a missing or garbled cursor decodes to 0).
@@ -36,6 +37,7 @@ from harel.engine.store._base import (
     Step,
     StoreConflict,
     TimerOp,
+    WorkerRecord,
 )
 from harel.engine.store._base import _decode_offset as decode_offset
 from harel.engine.store._base import _encode_offset as encode_offset
@@ -57,6 +59,7 @@ __all__ = [
     "StoreConflict",
     "Step",
     "TimerOp",
+    "WorkerRecord",
     "decode_offset",
     "encode_offset",
     "like_prefix",

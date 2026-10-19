@@ -81,3 +81,62 @@ def test_redrive_brings_a_failed_execution_back_at_a_leaf():
     model.redrive("e1", b)
     assert store.load("e1").status is Status.RUNNING
     assert not model.can_redrive("e1")
+
+
+# --- the queue view ----------------------------------------------------------------------
+
+
+def _queued(now):
+    from harel.engine.store import WorkerRecord
+    from harel.engine.transport import InMemoryTransport
+
+    store, transport = DictStore(), InMemoryTransport(clock=lambda: now - 60)
+    for i in range(3):
+        transport.publish(f"o{i}", Event(kind="Go"), routing_key="order")
+    transport.publish("p0", Event(kind="Go"), routing_key="payment")
+    store.record_worker(WorkerRecord("pay", ("payment", "refunds"), now - 100, now - 1, 10.0))
+    store.record_worker(WorkerRecord("old", None, now - 9000, now - 900, 10.0))  # gone
+    return store, transport
+
+
+def test_the_queue_view_counts_by_machine_and_names_the_live_workers_claiming_it():
+    now = 10_000.0
+    store, transport = _queued(now)
+    view = MonitorModel(store, DefinitionSource(), transport).queues(now)
+    rows = {r.machine: r for r in view.rows}
+    assert (rows["order"].messages, rows["order"].executions, rows["order"].oldest_published_at) == (
+        3,
+        3,
+        now - 60,
+    )
+    assert rows["order"].workers == () and rows["order"].unserved  # "old" is gone
+    assert rows["payment"].workers == ("pay",) and not rows["payment"].unserved
+    assert (rows["refunds"].messages, rows["refunds"].workers) == (
+        0,
+        ("pay",),
+    )  # a dedicated worker's capacity
+    assert [w.worker_id for w in view.workers] == ["old", "pay"]
+
+
+def test_a_queue_view_without_a_transport_shows_the_workers_and_why():
+    now = 10_000.0
+    store, _ = _queued(now)
+    view = MonitorModel(store, DefinitionSource(), transport_note="no transport (HAREL_REDIS_URL)").queues(
+        now
+    )
+    assert view.rows == [] and "HAREL_REDIS_URL" in view.unavailable and len(view.workers) == 2
+
+
+def test_a_transport_that_counts_its_whole_queue_is_served_by_any_live_worker():
+    from harel.engine.transport import Backlog, MachineBacklog
+
+    class _Total:
+        def backlog(self):
+            return Backlog([MachineBacklog(None, 7)], by_machine=False)
+
+    now = 10_000.0
+    store, _ = _queued(now)
+    view = MonitorModel(store, DefinitionSource(), _Total()).queues(now)
+    assert not view.by_machine
+    [row] = view.rows
+    assert (row.machine, row.messages, row.workers) == (None, 7, ("pay",))

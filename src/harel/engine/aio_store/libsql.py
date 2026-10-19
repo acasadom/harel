@@ -7,7 +7,7 @@ from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, Status
 from harel.engine.schema import DEFAULT_PREFIX
-from harel.engine.store import DefinitionRecord, OutboxEntry, PendingWork, SpawnEntry, TimerOp
+from harel.engine.store import DefinitionRecord, OutboxEntry, PendingWork, SpawnEntry, TimerOp, WorkerRecord
 from harel.engine.store._base import Step
 from harel.spec.states import Event
 
@@ -152,6 +152,18 @@ class AsyncLibsqlStore:
     async def pending_work(self, execution_id: str) -> PendingWork:
         async with self._lock:
             return await asyncio.to_thread(self._s.pending_work, execution_id)
+
+    async def record_worker(self, record: WorkerRecord) -> None:
+        async with self._lock:
+            await asyncio.to_thread(self._s.record_worker, record)
+
+    async def list_workers(self) -> list[WorkerRecord]:
+        async with self._lock:
+            return await asyncio.to_thread(self._s.list_workers)
+
+    async def forget_worker(self, worker_id: str) -> None:
+        async with self._lock:
+            await asyncio.to_thread(self._s.forget_worker, worker_id)
 
     async def ids_with_prefix(self, prefix: str) -> list[str]:
         async with self._lock:

@@ -23,6 +23,7 @@ from harel.engine.store._base import (
     Step,
     StoreConflict,
     TimerOp,
+    WorkerRecord,
     _decode_offset,
     _definition_params,
     _definition_row,
@@ -312,6 +313,27 @@ class PostgresStore:
             )
         self._conn.commit()
         return _pending_work(timers, outbox, spawns)
+
+    def record_worker(self, record: WorkerRecord) -> None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO {self._n.workers} (worker_id, record) VALUES (%s, %s) "
+                "ON CONFLICT (worker_id) DO UPDATE SET record = EXCLUDED.record",
+                (record.worker_id, record.to_json()),
+            )
+        self._conn.commit()
+
+    def list_workers(self) -> list[WorkerRecord]:
+        with self._conn.cursor() as cur:
+            cur.execute(f"SELECT record FROM {self._n.workers} ORDER BY worker_id")
+            rows = cur.fetchall()
+        self._conn.commit()
+        return [WorkerRecord.from_json(r[0]) for r in rows]
+
+    def forget_worker(self, worker_id: str) -> None:
+        with self._conn.cursor() as cur:
+            cur.execute(f"DELETE FROM {self._n.workers} WHERE worker_id = %s", (worker_id,))
+        self._conn.commit()
 
     def ids_with_prefix(self, prefix: str) -> list[str]:
         with self._conn.cursor() as cur:

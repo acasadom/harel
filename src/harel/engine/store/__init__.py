@@ -21,6 +21,7 @@ from harel.engine.store._base import (
     Step,
     StoreConflict,
     TimerOp,
+    WorkerRecord,
 )
 from harel.engine.store.dict import DictStore
 from harel.engine.store.dynamodb import DynamoDBStore
@@ -41,6 +42,7 @@ __all__ = [
     "StoreConflict",
     "Step",
     "TimerOp",
+    "WorkerRecord",
     "DictStore",
     "SqliteStore",
     "LibsqlStore",

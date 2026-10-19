@@ -6,7 +6,15 @@ import copy
 from typing import Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
-from harel.engine.store import DefinitionRecord, OutboxEntry, PendingWork, SpawnEntry, StoreConflict, TimerOp
+from harel.engine.store import (
+    DefinitionRecord,
+    OutboxEntry,
+    PendingWork,
+    SpawnEntry,
+    StoreConflict,
+    TimerOp,
+    WorkerRecord,
+)
 from harel.engine.store._base import DEFAULT_TRACE_MAX, Step, _decode_offset, _encode_offset, _matches
 from harel.spec.states import Event
 
@@ -31,6 +39,7 @@ class AsyncDictStore:
         self._spawn_seq = 0
         self._purged: set[str] = set()  # see DictStore._purged
         self._definitions: dict[tuple[str, int], DefinitionRecord] = {}
+        self._workers: dict[str, WorkerRecord] = {}
 
     def _record_trace(self, execution_id: str, entry: dict) -> None:
         idx = self._trace_idx.get(execution_id, 0)
@@ -142,6 +151,15 @@ class AsyncDictStore:
             outbox=[e for e in self._outbox if e.target_id == execution_id],
             spawns=[s for s in self._spawns if s.parent_id == execution_id],
         )
+
+    async def record_worker(self, record: WorkerRecord) -> None:
+        self._workers[record.worker_id] = record
+
+    async def list_workers(self) -> list[WorkerRecord]:
+        return [self._workers[w] for w in sorted(self._workers)]
+
+    async def forget_worker(self, worker_id: str) -> None:
+        self._workers.pop(worker_id, None)
 
     async def ids_with_prefix(self, prefix: str) -> list[str]:
         return [i for i in self._by_id if i.startswith(prefix)]

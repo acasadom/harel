@@ -212,6 +212,51 @@ class SpawnEntry:
     context: dict
 
 
+@dataclass(frozen=True)
+class WorkerRecord:
+    """A worker's heartbeat, as the store keeps it: which `machines` it claims work for (None:
+    every machine), when it started, when it was last seen, and every how many seconds it
+    beats — a record not seen for a few beats is a worker gone (crashed, or stopped without
+    forgetting itself)."""
+
+    worker_id: str
+    machines: Optional[tuple[str, ...]]
+    started_at: float
+    seen_at: float
+    heartbeat: float
+
+    def to_json(self) -> str:
+        return json.dumps(
+            {
+                "worker_id": self.worker_id,
+                "machines": list(self.machines) if self.machines is not None else None,
+                "started_at": self.started_at,
+                "seen_at": self.seen_at,
+                "heartbeat": self.heartbeat,
+            }
+        )
+
+    @classmethod
+    def from_json(cls, raw: str) -> "WorkerRecord":
+        d = json.loads(raw)
+        machines = d.get("machines")
+        return cls(
+            d["worker_id"],
+            tuple(machines) if machines is not None else None,
+            float(d["started_at"]),
+            float(d["seen_at"]),
+            float(d["heartbeat"]),
+        )
+
+    def alive(self, now: float, beats: float = 3.0) -> bool:
+        """Seen within the last `beats` heartbeats."""
+        return now - self.seen_at <= beats * self.heartbeat
+
+    def covers(self, machine: Optional[str]) -> bool:
+        """Whether it claims the work of executions whose tree started from `machine`."""
+        return self.machines is None or machine in self.machines
+
+
 @dataclass
 class PendingWork:
     """What is waiting for one Execution and not done yet: its armed timers (`(path, fire_at)`,
@@ -465,6 +510,18 @@ class ExecutionStore(Protocol):
         """What is waiting for `execution_id` and not done yet: its armed timers, the outbox
         entries addressed to it, and the child spawns it issued — read by its id, for a
         monitor showing one execution."""
+        ...
+
+    def record_worker(self, record: WorkerRecord) -> None:
+        """Store a worker's heartbeat, replacing the one it stored before."""
+        ...
+
+    def list_workers(self) -> list[WorkerRecord]:
+        """Every worker's last heartbeat, by `worker_id` — the stale ones included."""
+        ...
+
+    def forget_worker(self, worker_id: str) -> None:
+        """Remove a worker's heartbeat (a worker stopping). No-op if there is none."""
         ...
 
     def ids_with_prefix(self, prefix: str) -> list[str]:

@@ -69,6 +69,7 @@ class Worker:
         *,
         execution: str = "background",
         machines: Optional[Iterable[str]] = None,
+        heartbeat: float = 10.0,
         action_modules: Iterable[str] = (),
         actions: Optional[dict] = None,
         guards: Optional[dict] = None,
@@ -94,6 +95,7 @@ class Worker:
                 high_ratio=high_ratio,
                 priority_threshold=priority_threshold,
                 machines=machines,
+                heartbeat=heartbeat,
                 action_modules=action_modules,
                 actions=actions,
                 guards=guards,
@@ -118,6 +120,7 @@ class Worker:
             actions,
             guards,
             machines,
+            heartbeat,
         )
 
     @staticmethod
@@ -138,6 +141,7 @@ class Worker:
         actions=None,
         guards=None,
         machines=None,
+        heartbeat=10.0,
     ):
         from harel.engine.aio import facade
 
@@ -158,6 +162,7 @@ class Worker:
                 high_ratio=high_ratio,
                 priority_threshold=priority_threshold,
                 machines=machines,
+                heartbeat=heartbeat,
                 action_modules=action_modules,
                 actions=actions,
                 guards=guards,
@@ -211,38 +216,69 @@ class Worker:
 
         facade.run(self._async.transport.nack, lease, delay=delay)
 
+    def _serve_logic(self, name: str) -> None:
+        """Run `WorkerLogic.<name>_flow` (a heartbeat, or forgetting it) in either mode."""
+        if self._inline is not None:
+            self._serve_inline(getattr(self._inline, f"{name}_flow")())
+            return
+        from harel.engine.aio import facade
+
+        async def run():
+            return await self._async._serve(getattr(self._async, f"{name}_flow")())
+
+        facade.run(run)
+
+    def _beat(self) -> None:
+        logic = self._inline if self._inline is not None else self._async
+        try:
+            self._serve_logic("heartbeat")
+        except Exception:
+            logic.heartbeat_failed()
+            log_loop_step_failed(self.worker_id, "record its heartbeat", logic.heartbeat)
+
     def run(self, stop: threading.Event, idle_sleep: float = 0.005) -> None:
         """Loop until `stop` is set, one message at a time; when the queue is empty, sweep the
         due timers. Like `AsyncWorker.run`: a message whose handling raises is logged with its
         traceback and nacked to come back after `suspend_recheck` seconds (if the nack fails
         too, it comes back when its lease expires), and a claim or a timer sweep that raises is
         logged and the loop carries on after `suspend_recheck` seconds — nothing stops it but
-        `stop`."""
-        while not stop.is_set():
-            try:
-                lease = self._claim()
-            except Exception:
-                log_loop_step_failed(self.worker_id, "claim", self.suspend_recheck)
-                stop.wait(self.suspend_recheck)
-                continue
-            if lease is None:
+        `stop`. It records the worker's heartbeat when it starts and every `heartbeat` seconds,
+        and removes it when it stops."""
+        try:
+            self._beat()
+            while not stop.is_set():
+                logic = self._inline if self._inline is not None else self._async
+                if logic.heartbeat_due():
+                    self._beat()
                 try:
-                    fired = self.fire_due_timers()
+                    lease = self._claim()
                 except Exception:
-                    log_loop_step_failed(self.worker_id, "fire the due timers", self.suspend_recheck)
+                    log_loop_step_failed(self.worker_id, "claim", self.suspend_recheck)
                     stop.wait(self.suspend_recheck)
                     continue
-                if fired == 0:
-                    stop.wait(idle_sleep)
-                continue
-            try:
-                self._handle(lease)
-            except Exception:
-                log_handling_failed(self.worker_id, lease, self.suspend_recheck)
+                if lease is None:
+                    try:
+                        fired = self.fire_due_timers()
+                    except Exception:
+                        log_loop_step_failed(self.worker_id, "fire the due timers", self.suspend_recheck)
+                        stop.wait(self.suspend_recheck)
+                        continue
+                    if fired == 0:
+                        stop.wait(idle_sleep)
+                    continue
                 try:
-                    self._nack(lease, self.suspend_recheck)
+                    self._handle(lease)
                 except Exception:
-                    log_nack_failed(self.worker_id, lease)
+                    log_handling_failed(self.worker_id, lease, self.suspend_recheck)
+                    try:
+                        self._nack(lease, self.suspend_recheck)
+                    except Exception:
+                        log_nack_failed(self.worker_id, lease)
+        finally:
+            try:
+                self._serve_logic("forget")
+            except Exception:
+                log_loop_step_failed(self.worker_id, "forget its heartbeat", None)
 
 
 class DistributedRunner:
@@ -381,6 +417,7 @@ class DistributedRunner:
         priority_threshold: int = 1,
         *,
         machines: Optional[Iterable[str]] = None,
+        heartbeat: float = 10.0,
     ) -> Worker:
         return Worker(
             self.store,
@@ -397,6 +434,7 @@ class DistributedRunner:
             trace=self._trace,
             execution=self.execution,
             machines=machines,
+            heartbeat=heartbeat,
             action_modules=self.action_modules,
             actions=self.actions,
             guards=self.guards,

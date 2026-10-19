@@ -21,7 +21,7 @@ import re
 from dataclasses import dataclass
 from functools import cached_property
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 DEFAULT_PREFIX = "harel"
 
 # an SQL identifier; at most 30 characters, so the longest name built from it (an index) stays
@@ -76,6 +76,11 @@ class Names:
         return f"{self.prefix}_definitions"
 
     @property
+    def workers(self) -> str:
+        """The workers' heartbeats."""
+        return f"{self.prefix}_workers"
+
+    @property
     def counters(self) -> str:
         """The outbox/spawn sequence allocator (the document stores)."""
         return f"{self.prefix}_counters"
@@ -115,7 +120,7 @@ class Names:
     @cached_property
     def _placeholders(self) -> dict[str, str]:
         keys = (
-            "executions outbox processed_events spawns timers trace definitions groups messages "
+            "executions outbox processed_events spawns timers trace definitions workers groups messages "
             "commit_cas claim ack prefix"
         )
         return {k: getattr(self, k) for k in keys.split()}
@@ -145,14 +150,23 @@ def transport_schema(dialect: str, prefix: str = DEFAULT_PREFIX) -> list[str]:
     return [names.sql(t) for t in (_PG_TRANSPORT if dialect == "postgres" else _SQLITE_TRANSPORT)]
 
 
-def sqlite_transport_upgrade(columns: list[str], prefix: str = DEFAULT_PREFIX) -> list[str]:
-    """What brings a SQLite-dialect transport's `groups` table, with `columns`, up to this
-    schema: the `ALTER TABLE` adding `routing_key` to one created before SCHEMA_VERSION 5."""
-    return (
-        []
-        if "routing_key" in columns
-        else [f"ALTER TABLE {Names(prefix).groups} ADD COLUMN routing_key TEXT"]
-    )
+# the columns a SQLite-dialect transport table gained since it was first created: (table, column, type)
+_SQLITE_TRANSPORT_ADDED = (
+    ("groups", "routing_key", "TEXT"),  # SCHEMA_VERSION 5
+    ("messages", "published_at", "REAL"),  # SCHEMA_VERSION 6
+)
+
+
+def sqlite_transport_upgrade(columns: dict[str, list[str]], prefix: str = DEFAULT_PREFIX) -> list[str]:
+    """What brings a SQLite-dialect transport's tables up to this schema, given each one's
+    columns (`{"groups": [...], "messages": [...]}`): the `ALTER TABLE`s adding a column an
+    earlier SCHEMA_VERSION didn't have."""
+    names = Names(prefix)
+    return [
+        f"ALTER TABLE {getattr(names, table)} ADD COLUMN {column} {kind}"
+        for table, column, kind in _SQLITE_TRANSPORT_ADDED
+        if column not in columns.get(table, [])
+    ]
 
 
 def sql_schema(dialect: str, prefix: str = DEFAULT_PREFIX) -> list[str]:
@@ -183,15 +197,17 @@ _SQLITE_STORE = (
     "CREATE TABLE IF NOT EXISTS {definitions} "
     "(definition_id TEXT NOT NULL, version INTEGER NOT NULL, digest TEXT NOT NULL, "
     "source TEXT NOT NULL, published_at REAL, PRIMARY KEY (definition_id, version))",
+    "CREATE TABLE IF NOT EXISTS {workers} (worker_id TEXT PRIMARY KEY, record TEXT NOT NULL)",
 )
 
-# A `groups` table created before SCHEMA_VERSION 5 lacks `routing_key`: SQLite has no
-# `ADD COLUMN IF NOT EXISTS`, so the backends add it (`sqlite_transport_upgrade`) between these
-# tables and the indexes. A migration tool owning such a table runs that ALTER once.
+# A table created by an earlier SCHEMA_VERSION lacks a column added since — `groups.routing_key`
+# (5), `messages.published_at` (6): SQLite has no `ADD COLUMN IF NOT EXISTS`, so the backends add
+# them (`sqlite_transport_upgrade`) between these tables and the indexes. A migration tool owning
+# such a table runs those ALTERs once.
 _SQLITE_TRANSPORT = (
     "CREATE TABLE IF NOT EXISTS {messages} "
     "(seq INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT NOT NULL, event TEXT NOT NULL, "
-    "locked_by TEXT, lock_expiry REAL)",
+    "locked_by TEXT, lock_expiry REAL, published_at REAL)",
     "CREATE TABLE IF NOT EXISTS {groups} "
     "(group_id TEXT PRIMARY KEY, last_claimed_at REAL NOT NULL DEFAULT 0.0, "
     "priority INT NOT NULL DEFAULT 0, routing_key TEXT)",
@@ -220,6 +236,7 @@ _PG_STORE = (
     "CREATE TABLE IF NOT EXISTS {definitions} "
     "(definition_id TEXT NOT NULL, version INT NOT NULL, digest TEXT NOT NULL, "
     "source TEXT NOT NULL, published_at DOUBLE PRECISION, PRIMARY KEY (definition_id, version))",
+    "CREATE TABLE IF NOT EXISTS {workers} (worker_id TEXT PRIMARY KEY, record TEXT NOT NULL)",
     # The state-only commit fast path, the analog of Redis' CAS script: for an event that only
     # advances state (no emits/spawns/timers/trace) it does the version-CAS + write (+ dedupe) in
     # ONE server-side round-trip. Returns true on commit, false on a version conflict (no RAISE,
@@ -247,7 +264,10 @@ END; $$ LANGUAGE plpgsql""",
 
 _PG_TRANSPORT = (
     "CREATE TABLE IF NOT EXISTS {messages} "
-    "(seq BIGSERIAL PRIMARY KEY, group_id TEXT NOT NULL, event TEXT NOT NULL)",
+    "(seq BIGSERIAL PRIMARY KEY, group_id TEXT NOT NULL, event TEXT NOT NULL, "
+    "published_at DOUBLE PRECISION)",
+    # a table created before SCHEMA_VERSION 6
+    "ALTER TABLE {messages} ADD COLUMN IF NOT EXISTS published_at DOUBLE PRECISION",
     "CREATE INDEX IF NOT EXISTS {prefix}_transport_messages_by_group ON {messages} (group_id, seq)",
     "CREATE TABLE IF NOT EXISTS {groups} "
     "(group_id TEXT PRIMARY KEY, locked_by TEXT, lock_expiry DOUBLE PRECISION, "

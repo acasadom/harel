@@ -47,6 +47,7 @@ pages it, so it reaches every execution however many there are:
 | `a` | show the children too (orthogonal regions, fan-out instances, invoked machines); by default only the roots of their trees |
 | `n` / `b` | next / previous page |
 | `/` | narrow the page shown by a substring of id, machine or status (`escape` clears it) |
+| `w` | the queues and the workers (below) |
 | `r` / `p` | refresh now / pause or resume the auto-refresh |
 | `enter` | open the selected execution |
 
@@ -93,6 +94,33 @@ shows its reason in a toast.
 > **in the same `commit` transaction** as the state advance (no extra round-trip, and `load` is
 > unaffected). Kept as a ring of the last `HAREL_TRACE_MAX` steps (default 200), by every store
 > backend. Without it the Timeline tab says so; everything else works regardless.
+
+## Queues and workers
+
+`w` from the list opens the work queued and who is there to do it:
+
+- **Queued work, by machine** — for each machine (the root machine of its executions' trees), how
+  many messages wait, for how many executions, how many of those a worker holds (leased now, or
+  parked: a suspended execution's, or one retried after a failure), how long the oldest has
+  waited, and which **live workers** claim it. A machine with work waiting that no live worker
+  claims is marked, and named at the top — the case [dedicated workers](distribution.md#dedicating-workers-to-machines)
+  can leave when every worker is given `machines`. A machine a live worker is dedicated to shows
+  even with nothing queued, so its capacity is visible.
+- **Workers** — every worker's heartbeat: the machines it claims (`all` for one given none), when
+  it started and when it was last seen. A worker records one when it starts and every `heartbeat`
+  seconds (10 by default), and removes it when it stops; one not seen for three beats is shown
+  **gone**. A worker that crashed never removed its own: `x` forgets the selected one, once gone.
+
+Reading the backlog walks every group with work queued, so the screen refreshes on its own,
+slower interval — 10 seconds by default (`--queue-interval`, `HAREL_TUI_QUEUE_INTERVAL_MS`) — and
+on `r`. With 20,000 groups queued it takes about 20–30 ms on SQLite and Postgres and 90 ms on
+Redis, which reads it in chunks of 1,000 groups so no single call holds the server more than a
+few milliseconds.
+
+The backlog comes from the **transport** the workers use, built from the same `HAREL_TRANSPORT_*`
+environment; without one the screen says so and shows the workers only. SQS counts its whole
+queue, approximately, not by machine — the screen says that too. A message queued before the
+transport kept publish times (`SCHEMA_VERSION` 6) has no age.
 
 ## Theming
 

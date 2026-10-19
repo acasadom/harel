@@ -129,6 +129,10 @@ another worker has taken.
 
 `ORDER BY seq` within a group, one consumer per group at a time → per-group order preserved.
 
+## Backlog
+
+`harel_transport_messages` has a `published_at` column (`ADD COLUMN IF NOT EXISTS` brings an older table up to date), set by `publish`. `backlog()` is one query: the messages joined to their groups, grouped by `routing_key` — counting them, their distinct groups, the groups leased or parked (the lease is on the group row), and the oldest `published_at`.
+
 ## Routing by machine
 
 `harel_transport_groups` has a `routing_key TEXT` column (`ALTER TABLE … ADD COLUMN IF NOT

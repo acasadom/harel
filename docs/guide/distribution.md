@@ -302,7 +302,10 @@ start which machines it claims for.
   dedicated machines' work included: it is the safety net when the dedicated workers are down or
   busy. To keep a machine's work off the general workers, give every worker its `machines`.
 - **Nothing claims a machine no worker covers** when every worker is given `machines`: its
-  executions wait. A worker warns at start about a machine it is given but has no file for.
+  executions wait. A worker warns at start about a machine it is given but has no file for, and
+  the [monitor](monitor.md#queues-and-workers) marks a machine with work waiting that no live
+  worker claims: each running worker records a heartbeat in the store — its machines, when it was
+  last seen — every `heartbeat` seconds (`worker(heartbeat=10.0)`), and removes it when it stops.
 - **Transports.** The in-memory, SQLite, libSQL, rqlite, Postgres and Mongo transports route
   claims; Redis and SQS can't, and a worker given `machines` on them fails at its first claim
   (`NotImplementedError`) rather than claim every machine's work. See

@@ -84,6 +84,7 @@ class AsyncWorker(WorkerLogic):
         priority_threshold: int = 1,
         *,
         machines: Optional[Iterable[str]] = None,
+        heartbeat: float = 10.0,
         action_modules: Iterable[str] = (),
         actions: Optional[dict] = None,
         guards: Optional[dict] = None,
@@ -99,6 +100,7 @@ class AsyncWorker(WorkerLogic):
             high_ratio=high_ratio,
             priority_threshold=priority_threshold,
             machines=machines,
+            heartbeat=heartbeat,
             action_modules=action_modules,
             actions=actions,
             guards=guards,
@@ -138,7 +140,8 @@ class AsyncWorker(WorkerLogic):
         seconds: soon enough for a transient outage, without spinning on a failure that
         persists. If the nack fails too, the message comes back when its lease expires. A claim
         or a timer sweep that raises is logged, and the loop carries on after `suspend_recheck`
-        seconds: nothing stops it but `stop`."""
+        seconds: nothing stops it but `stop`. It records the worker's heartbeat when it starts
+        and every `heartbeat` seconds, and removes it when it stops."""
         sem = asyncio.Semaphore(self.concurrency)
         pending: set[asyncio.Task] = set()
 
@@ -160,34 +163,52 @@ class AsyncWorker(WorkerLogic):
             except asyncio.TimeoutError:
                 pass
 
-        while not stop.is_set():
-            await sem.acquire()
+        async def _beat() -> None:
             try:
-                lease = await self._claim()
+                await self._serve(self.heartbeat_flow())
             except Exception:
-                sem.release()
-                log_loop_step_failed(self.worker_id, "claim", self.suspend_recheck)
-                await _pause(self.suspend_recheck)
-                continue
-            if lease is None:
-                sem.release()
+                self.heartbeat_failed()
+                log_loop_step_failed(self.worker_id, "record its heartbeat", self.heartbeat)
+
+        try:
+            await _beat()
+            while not stop.is_set():
+                if self.heartbeat_due():
+                    await _beat()
+                await sem.acquire()
                 try:
-                    fired = await self.fire_due_timers()
+                    lease = await self._claim()
                 except Exception:
-                    log_loop_step_failed(self.worker_id, "fire the due timers", self.suspend_recheck)
+                    sem.release()
+                    log_loop_step_failed(self.worker_id, "claim", self.suspend_recheck)
                     await _pause(self.suspend_recheck)
                     continue
-                if fired == 0:
-                    if pending:
-                        await asyncio.wait(pending, timeout=idle_sleep, return_when=asyncio.FIRST_COMPLETED)
-                    else:
-                        await _pause(idle_sleep)
-                continue
-            task = asyncio.create_task(_run_one(lease))
-            pending.add(task)
-            task.add_done_callback(pending.discard)
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+                if lease is None:
+                    sem.release()
+                    try:
+                        fired = await self.fire_due_timers()
+                    except Exception:
+                        log_loop_step_failed(self.worker_id, "fire the due timers", self.suspend_recheck)
+                        await _pause(self.suspend_recheck)
+                        continue
+                    if fired == 0:
+                        if pending:
+                            await asyncio.wait(
+                                pending, timeout=idle_sleep, return_when=asyncio.FIRST_COMPLETED
+                            )
+                        else:
+                            await _pause(idle_sleep)
+                    continue
+                task = asyncio.create_task(_run_one(lease))
+                pending.add(task)
+                task.add_done_callback(pending.discard)
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+        finally:
+            try:
+                await self._serve(self.forget_flow())
+            except Exception:
+                log_loop_step_failed(self.worker_id, "forget its heartbeat", None)
 
 
 async def _wait_event(stop: asyncio.Event) -> None:
@@ -301,6 +322,7 @@ class AsyncDistributedRunner(SenderLogic):
         priority_threshold: int = 1,
         *,
         machines: Optional[Iterable[str]] = None,
+        heartbeat: float = 10.0,
     ) -> AsyncWorker:
         return AsyncWorker(
             self.store,
@@ -316,6 +338,7 @@ class AsyncDistributedRunner(SenderLogic):
             high_ratio=high_ratio,
             priority_threshold=priority_threshold,
             machines=machines,
+            heartbeat=heartbeat,
             action_modules=self.action_modules,
             actions=self.actions,
             guards=self.guards,

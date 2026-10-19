@@ -17,6 +17,16 @@
 - **A file declaring a machine twice is an error** (`DslError`); before, the last one won.
 - **A store backend outside harel implements `pending_work(execution_id)`** (see *Added*), checked
   by `harel.testing.assert_pending_work_contract`.
+- **A store backend outside harel implements `record_worker`, `list_workers` and
+  `forget_worker`** (the workers' heartbeats, see *Added*), checked by
+  `harel.testing.assert_workers_contract`; **a transport implements `backlog()`**, checked by
+  `assert_backlog_contract`.
+- **`SCHEMA_VERSION` 6:** a `workers` table (collection, key, DynamoDB table) in the store, and a
+  `published_at` column on the transport's messages. A backend built with `create_schema=True`
+  creates or adds them when it starts — a SQLite-dialect transport by `ALTER TABLE`, now given
+  each table's columns (`schema.sqlite_transport_upgrade(columns_by_table, prefix)`); where a
+  migration tool owns the schema, apply `sql_schema(dialect, prefix)` again, plus those
+  `ALTER TABLE`s on a SQLite-dialect transport.
 - **`MongoStore` creates an index** — on `outbox.target_id`, which `pending_work` reads by — and
   takes `create_schema` like the other backends with a schema; with `create_schema=False` the
   index is expected to exist.
@@ -78,6 +88,19 @@
     in the tree.
   - *Cost:* a refresh of the detail reads that execution only (`pending_work`), not every timer,
     outbox entry and spawn in the store.
+- **Queues and workers in the monitor** (`w`): the work queued by machine — waiting messages, the
+  executions they are for, those a worker holds, the oldest wait — and which live workers claim
+  each machine, with a machine that has work waiting and none marked; and every worker's
+  heartbeat (its machines, when it started, when it was last seen), `x` forgetting a gone one.
+  Every running worker records a heartbeat in the store every `heartbeat` seconds
+  (`worker(heartbeat=10.0)`) and removes it when it stops (`ExecutionStore.record_worker` /
+  `list_workers` / `forget_worker`, `WorkerRecord`). Transports keep each message's publish time
+  and report `Transport.backlog()` (`Backlog`, `MachineBacklog`): by machine on every transport
+  but SQS, which gives one approximate total. The monitor builds the workers' transport from the
+  `HAREL_TRANSPORT_*` environment, and runs without the queue view when it can't; the queue screen
+  refreshes every 10 seconds (`--queue-interval`, `HAREL_TUI_QUEUE_INTERVAL_MS`), since reading the
+  backlog walks the whole queue — Redis in chunks of 1,000 groups per call, so it is never held for
+  the whole of it.
 - **`ExecutionStore.pending_work(execution_id)`** returns what is waiting for one execution — its
   armed timers, the outbox entries addressed to it, the child spawns it issued (`PendingWork`) —
   read by its id, on every backend. `ExecutionSummary` (`list_executions`) carries the
@@ -94,6 +117,10 @@
 
 ### Fixed
 
+- **Workers opening one SQLite file at once no longer fail to start.** The SQLite store and
+  transport switch the file to WAL mode when they open it, which takes an exclusive lock SQLite
+  doesn't wait for: a worker starting while another opened the file died with "database is
+  locked". They now retry the switch for a few seconds.
 - **A worker's loop no longer stops on a failed step.** The sync `Worker.run` ended at the first
   exception any step raised — a store or transport outage, a machine version the worker can't run
   (`DefinitionNotLoaded`), a transport that can't route (`NotImplementedError`) — and the message

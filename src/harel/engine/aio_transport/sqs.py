@@ -7,7 +7,7 @@ from contextlib import AsyncExitStack
 from typing import Any, Optional
 
 from harel.engine.transport import Lease
-from harel.engine.transport._base import _refuse_routing
+from harel.engine.transport._base import _COUNTS, Backlog, _refuse_routing, _sqs_backlog
 from harel.engine.transport.sqs import _NO_MIN_PRIORITY, _NO_PRIORITY  # shared reject messages
 from harel.spec.states import Event
 
@@ -106,6 +106,11 @@ class AsyncSqsTransport:
 
     async def ack(self, lease: Lease) -> None:
         await self._sqs.delete_message(QueueUrl=self._queue_url, ReceiptHandle=lease.token)
+
+    async def backlog(self) -> Backlog:
+        # see the sync `SqsTransport.backlog`
+        resp = await self._sqs.get_queue_attributes(QueueUrl=self._queue_url, AttributeNames=_COUNTS)
+        return _sqs_backlog(resp["Attributes"])
 
     async def nack(self, lease: Lease, delay: float = 0.0) -> None:
         # SQS's native park: hide the message for `delay` seconds (0 = available now)

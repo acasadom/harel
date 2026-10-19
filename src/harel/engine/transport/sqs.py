@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Any, Optional
 
-from harel.engine.transport._base import Lease, _refuse_routing
+from harel.engine.transport._base import _COUNTS, Backlog, Lease, _refuse_routing, _sqs_backlog
 from harel.spec.states import Event
 
 # SQS FIFO has no per-group priority and receive() can't filter by it, so priority /
@@ -110,6 +110,11 @@ class SqsTransport:
 
     def ack(self, lease: Lease) -> None:
         self._sqs.delete_message(QueueUrl=self._queue_url, ReceiptHandle=lease.token)
+
+    def backlog(self) -> Backlog:
+        # SQS counts the queue, approximately, and can't tell machines (or groups) apart
+        attrs = self._sqs.get_queue_attributes(QueueUrl=self._queue_url, AttributeNames=_COUNTS)["Attributes"]
+        return _sqs_backlog(attrs)
 
     def nack(self, lease: Lease, delay: float = 0.0) -> None:
         # SQS's native park: hide the message for `delay` seconds (0 = available now)

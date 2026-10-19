@@ -161,3 +161,56 @@ async def test_the_async_loop_survives_a_claim_that_raises(caplog):
     await task
     assert (await store.load(exe.id)).status is Status.RUNNING
     assert "could not claim" in caplog.text
+
+
+# --- the heartbeat ---------------------------------------------------------------------------
+
+
+def test_a_running_worker_has_its_heartbeat_in_the_store(execution):
+    runner, store, _ = _runner(execution)
+    worker = runner.worker("w-1", machines={"m"}, heartbeat=0.01)
+    seen = []
+
+    def recorded():
+        seen.extend(store.list_workers())
+        return bool(seen)
+
+    assert _run_until(worker, recorded)
+    [record] = seen[:1]
+    assert (record.worker_id, record.machines, record.heartbeat) == ("w-1", ("m",), 0.01)
+    assert store.list_workers() == []  # forgotten once stopped
+
+
+def test_a_heartbeat_that_fails_doesnt_stop_the_loop(execution, caplog):
+    runner, store, _ = _runner(execution)
+
+    def boom(record):
+        raise _Outage("store outage on record_worker")
+
+    store.record_worker = boom
+    exe = runner.create("m")
+    with caplog.at_level(logging.ERROR):
+        assert _run_until(
+            runner.worker(heartbeat=0.01), lambda: store._by_id[exe.id].status is Status.RUNNING
+        )
+    assert "could not record its heartbeat" in caplog.text
+
+
+async def test_the_async_loop_beats_and_forgets_too():
+    defn = definition_from_dsl(FLAT, "m")
+    store = AsyncDictStore()
+    worker = AsyncWorker(store, AsyncInMemoryTransport(), {defn.id: defn}, worker_id="w-a", heartbeat=0.01)
+    stop = asyncio.Event()
+    task = asyncio.create_task(worker.run(stop, idle_sleep=0.001))
+    for _ in range(200):
+        if await store.list_workers():
+            break
+        await asyncio.sleep(0.005)
+    [record] = await store.list_workers()
+    assert (record.worker_id, record.machines) == ("w-a", None)
+    first = record.seen_at
+    await asyncio.sleep(0.05)
+    assert (await store.list_workers())[0].seen_at > first  # it keeps beating
+    stop.set()
+    await task
+    assert await store.list_workers() == []

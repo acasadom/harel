@@ -7,7 +7,15 @@ from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, Status
 from harel.engine.schema import DEFAULT_PREFIX, Names, store_schema
-from harel.engine.store import DefinitionRecord, OutboxEntry, PendingWork, SpawnEntry, StoreConflict, TimerOp
+from harel.engine.store import (
+    DefinitionRecord,
+    OutboxEntry,
+    PendingWork,
+    SpawnEntry,
+    StoreConflict,
+    TimerOp,
+    WorkerRecord,
+)
 from harel.engine.store._base import (
     _DEFINITION_COLUMNS,
     _IDS_WITH_PREFIX_SQL,
@@ -337,6 +345,25 @@ class AsyncRqliteStore:
         return _pending_work(
             await rows(_PENDING_TIMERS_SQL), await rows(_PENDING_OUTBOX_SQL), await rows(_PENDING_SPAWNS_SQL)
         )
+
+    async def record_worker(self, record: WorkerRecord) -> None:
+        await self._execute(
+            [
+                [
+                    f"INSERT INTO {self._n.workers} (worker_id, record) VALUES (?, ?) "
+                    "ON CONFLICT(worker_id) DO UPDATE SET record = excluded.record",
+                    record.worker_id,
+                    record.to_json(),
+                ]
+            ]
+        )
+
+    async def list_workers(self) -> list[WorkerRecord]:
+        rows = await self._query(f"SELECT record FROM {self._n.workers} ORDER BY worker_id", ())
+        return [WorkerRecord.from_json(r[0]) for r in rows]
+
+    async def forget_worker(self, worker_id: str) -> None:
+        await self._execute([[f"DELETE FROM {self._n.workers} WHERE worker_id = ?", worker_id]])
 
     async def ids_with_prefix(self, prefix: str) -> list[str]:
         return [r[0] for r in await self._query(self._n.sql(_IDS_WITH_PREFIX_SQL), (_like_prefix(prefix),))]

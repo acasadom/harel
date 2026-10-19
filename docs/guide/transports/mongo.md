@@ -101,6 +101,10 @@ taken. `nack(delay>0)` parks the group until the delay passes.
 
 The head of a group is the smallest `_id`; one consumer per group at a time → order preserved.
 
+## Backlog
+
+Each message document keeps a `published_at`. `backlog()` counts the messages per group with an aggregation (with the oldest `published_at`) and reads the group lock documents for their `routing_key` and lease, then sums by routing key.
+
 ## Routing by machine
 
 A group's lock document keeps the `routing_key` the publish creating it carried (`$setOnInsert`;

@@ -7,6 +7,7 @@ import sqlite3
 from pathlib import Path
 from typing import Iterable, Optional, Union
 
+from harel.engine._sqlite import enable_wal
 from harel.engine.execution import Execution, ExecutionPage, Status
 from harel.engine.schema import DEFAULT_PREFIX, Names, store_schema
 from harel.engine.store._base import (
@@ -24,6 +25,7 @@ from harel.engine.store._base import (
     Step,
     StoreConflict,
     TimerOp,
+    WorkerRecord,
     _decode_offset,
     _definition_params,
     _definition_row,
@@ -52,8 +54,7 @@ class SqliteStore:
         they must already exist."""
         self._n = Names(prefix)
         self._conn = sqlite3.connect(str(path), check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")  # readers don't block the single writer
-        self._conn.execute("PRAGMA busy_timeout=5000")  # wait for the write-lock instead of erroring
+        enable_wal(self._conn)
         if create_schema:
             for sql in store_schema("sqlite", prefix):
                 self._conn.execute(sql)
@@ -243,6 +244,22 @@ class SqliteStore:
             return self._conn.execute(self._n.sql(template), (execution_id,)).fetchall()
 
         return _pending_work(rows(_PENDING_TIMERS_SQL), rows(_PENDING_OUTBOX_SQL), rows(_PENDING_SPAWNS_SQL))
+
+    def record_worker(self, record: WorkerRecord) -> None:
+        self._conn.execute(
+            f"INSERT INTO {self._n.workers} (worker_id, record) VALUES (?, ?) "
+            "ON CONFLICT(worker_id) DO UPDATE SET record = excluded.record",
+            (record.worker_id, record.to_json()),
+        )
+        self._conn.commit()
+
+    def list_workers(self) -> list[WorkerRecord]:
+        rows = self._conn.execute(f"SELECT record FROM {self._n.workers} ORDER BY worker_id").fetchall()
+        return [WorkerRecord.from_json(r[0]) for r in rows]
+
+    def forget_worker(self, worker_id: str) -> None:
+        self._conn.execute(f"DELETE FROM {self._n.workers} WHERE worker_id = ?", (worker_id,))
+        self._conn.commit()
 
     def ids_with_prefix(self, prefix: str) -> list[str]:
         return [

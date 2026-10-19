@@ -7,7 +7,15 @@ from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
 from harel.engine.schema import DEFAULT_PREFIX, Names
-from harel.engine.transport._base import _PARKED, Lease, _sqlite_claim, _sqlite_create_schema
+from harel.engine.transport._base import (
+    _PARKED,
+    _SQLITE_BACKLOG_SQL,
+    Backlog,
+    Lease,
+    _backlog,
+    _sqlite_claim,
+    _sqlite_create_schema,
+)
 from harel.spec.states import Event
 
 
@@ -45,18 +53,18 @@ class LibsqlTransport:
                 kwargs["sync_interval"] = sync_interval
         self._conn = libsql.connect(str(database), **kwargs)
         if create_schema:
-            _sqlite_create_schema(prefix, self._conn.execute, self._group_columns)
+            _sqlite_create_schema(prefix, self._conn.execute, self._columns)
         self._clock = clock
 
-    def _group_columns(self) -> list[str]:
-        return [row[1] for row in self._conn.execute(f"PRAGMA table_info({self._n.groups})").fetchall()]
+    def _columns(self, table: str) -> list[str]:
+        return [row[1] for row in self._conn.execute(f"PRAGMA table_info({table})").fetchall()]
 
     def publish(
         self, group_id: str, event: Event, priority: int = 0, routing_key: Optional[str] = None
     ) -> None:
         self._conn.execute(
-            f"INSERT INTO {self._n.messages} (group_id, event) VALUES (?, ?)",
-            (group_id, event.model_dump_json()),
+            f"INSERT INTO {self._n.messages} (group_id, event, published_at) VALUES (?, ?, ?)",
+            (group_id, event.model_dump_json(), self._clock()),
         )
         self._conn.execute(
             f"INSERT OR IGNORE INTO {self._n.groups} (group_id, priority, routing_key) VALUES (?, ?, ?)",
@@ -104,6 +112,9 @@ class LibsqlTransport:
         except Exception:
             self._conn.execute("ROLLBACK")
             raise
+
+    def backlog(self) -> Backlog:
+        return _backlog(self._conn.execute(self._n.sql(_SQLITE_BACKLOG_SQL), (self._clock(),)).fetchall())
 
     def nack(self, lease: Lease, delay: float = 0.0) -> None:
         if delay > 0:

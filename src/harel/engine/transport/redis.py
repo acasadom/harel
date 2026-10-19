@@ -7,7 +7,18 @@ import uuid
 from typing import Any, Callable, Optional
 
 from harel.engine.schema import DEFAULT_PREFIX, Names
-from harel.engine.transport._base import _ACK_LUA, _CLAIM_LUA, _PUBLISH_LUA, Lease, _refuse_routing
+from harel.engine.transport._base import (
+    _ACK_LUA,
+    _BACKLOG_CHUNK,
+    _BACKLOG_LUA,
+    _CLAIM_LUA,
+    _PUBLISH_LUA,
+    Backlog,
+    Lease,
+    _redis_backlog,
+    _refuse_routing,
+    _text,
+)
 from harel.spec.states import Event
 
 
@@ -55,6 +66,7 @@ class RedisTransport:
         self._claim_script = client.register_script(_CLAIM_LUA)  # atomic server-side claim
         self._ack_script = client.register_script(_ACK_LUA)  # atomic server-side ack
         self._publish_script = client.register_script(_PUBLISH_LUA)  # atomic tier-routed publish
+        self._backlog_script = client.register_script(_BACKLOG_LUA)  # the work queued, by machine
 
     @classmethod
     def from_url(cls, url: str, *, prefix: str = DEFAULT_PREFIX) -> "RedisTransport":
@@ -87,9 +99,20 @@ class RedisTransport:
     def publish(
         self, group_id: str, event: Event, priority: int = 0, routing_key: Optional[str] = None
     ) -> None:
-        # one atomic round-trip: push the payload, fix the group's priority on first publish,
-        # and ready it (score 0, NX) in its priority tier's ZSET (`ready:{priority}`).
-        self._publish_script(keys=[], args=[self._prefix, group_id, event.model_dump_json(), priority])
+        # one atomic round-trip: push the payload and its publish time, fix the group's priority
+        # and routing key on first publish, and ready it (score 0, NX) in its priority tier's
+        # ZSET (`ready:{priority}`). The routing key is kept for `backlog`: claims can't use it.
+        self._publish_script(
+            keys=[],
+            args=[
+                self._prefix,
+                group_id,
+                event.model_dump_json(),
+                priority,
+                routing_key or "",
+                repr(self._clock()),
+            ],
+        )
 
     def claim(
         self,
@@ -123,6 +146,17 @@ class RedisTransport:
     def _tier(self, group_id: str) -> int:
         """The group's priority tier (its `ready:{prio}` ZSET), read from the prio hash."""
         return int(self._decode(self._r.hget(self._k_prio(), group_id)) or 0)
+
+    def backlog(self) -> Backlog:
+        # the groups with messages, a bounded chunk per call (`_BACKLOG_LUA`): Redis serves the
+        # other clients between them instead of being held for the whole scan
+        cursor: str = "0"
+        chunks: list[list] = []
+        while True:
+            reply = self._backlog_script(keys=[], args=[self._prefix, cursor, _BACKLOG_CHUNK])
+            cursor, chunks = _text(reply[0]), [*chunks, reply[1:]]
+            if cursor == "0":
+                return _redis_backlog(chunks)
 
     def nack(self, lease: Lease, delay: float = 0.0) -> None:
         if not self._owns(lease.group_id, lease.token):

@@ -7,7 +7,15 @@ from __future__ import annotations
 from typing import Iterable, Optional, Protocol, runtime_checkable
 
 from harel.engine.execution import Execution, ExecutionPage, Status
-from harel.engine.store import DefinitionRecord, OutboxEntry, PendingWork, SpawnEntry, Step, TimerOp
+from harel.engine.store import (
+    DefinitionRecord,
+    OutboxEntry,
+    PendingWork,
+    SpawnEntry,
+    Step,
+    TimerOp,
+    WorkerRecord,
+)
 from harel.spec.states import Event
 
 
@@ -58,6 +66,12 @@ class AsyncExecutionStore(Protocol):
     async def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None: ...
 
     async def pending_work(self, execution_id: str) -> PendingWork: ...
+
+    async def record_worker(self, record: WorkerRecord) -> None: ...
+
+    async def list_workers(self) -> list[WorkerRecord]: ...
+
+    async def forget_worker(self, worker_id: str) -> None: ...
 
     async def ids_with_prefix(self, prefix: str) -> list[str]: ...
 

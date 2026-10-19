@@ -469,6 +469,10 @@ periodic retention job; worth knowing on a very large table.
 
 `pending_work(id)` is a `Query` on the `timers` table (its partition is the execution) and a filtered `Scan` of `outbox` (by `target_id`) and `spawns` (by `parent_id`) — the same trade-off as the relay's reads: those tables drain and stay near-empty.
 
+## Worker heartbeats
+
+The heartbeats live in their own table, `harel_workers` (`worker_id` S, HASH), the record as JSON: `record_worker` is a `PutItem`, `list_workers` a `Scan` (a row per running worker).
+
 ## Published definitions
 
 The published machine versions live in their own table, `harel_definitions` —

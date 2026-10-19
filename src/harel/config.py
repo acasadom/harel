@@ -63,6 +63,7 @@ class Config:
     machines: Optional[frozenset[str]] = None  # HAREL_MACHINES (comma-separated; None -> all)
     # --- monitoring TUI ---
     tui_interval_ms: int = 1000  # HAREL_TUI_INTERVAL_MS (auto-refresh)
+    tui_queue_interval_ms: int = 10000  # HAREL_TUI_QUEUE_INTERVAL_MS (the queue screen's refresh)
     tui_theme: str = "nord"  # HAREL_TUI_THEME
     # --- execution trace (opt-in timeline) ---
     trace: bool = False  # HAREL_TRACE (record a per-event timeline step in commit)
@@ -106,6 +107,7 @@ class Config:
             concurrency=int(e.get("HAREL_CONCURRENCY", "256")),
             machines=_names(e.get("HAREL_MACHINES")),
             tui_interval_ms=int(e.get("HAREL_TUI_INTERVAL_MS", "1000")),
+            tui_queue_interval_ms=int(e.get("HAREL_TUI_QUEUE_INTERVAL_MS", "10000")),
             tui_theme=e.get("HAREL_TUI_THEME", "nord"),
             trace=e.get("HAREL_TRACE", "").lower() in ("1", "true", "yes", "on"),
             trace_max=int(e.get("HAREL_TRACE_MAX", "200")),

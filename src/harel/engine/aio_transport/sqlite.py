@@ -6,9 +6,10 @@ import asyncio
 import time
 from typing import Any, Callable, Optional
 
+from harel.engine._sqlite import aenable_wal
 from harel.engine.schema import DEFAULT_PREFIX, Names, sqlite_transport_upgrade, transport_schema
-from harel.engine.transport import _PARKED, Lease
-from harel.engine.transport._base import _sqlite_claim
+from harel.engine.transport import _PARKED, Backlog, Lease
+from harel.engine.transport._base import _SQLITE_BACKLOG_SQL, _backlog, _sqlite_claim
 from harel.spec.states import Event
 
 
@@ -44,15 +45,17 @@ class AsyncSqliteTransport:
         import aiosqlite
 
         conn = await aiosqlite.connect(str(path), isolation_level=None)  # autocommit; BEGIN by hand
-        await conn.execute("PRAGMA journal_mode=WAL")
-        await conn.execute("PRAGMA busy_timeout=5000")
+        await aenable_wal(conn)
         if create_schema:
             for sql in transport_schema("sqlite", prefix):
                 if not sql.startswith("CREATE TABLE"):
                     continue
                 await conn.execute(sql)
-            cur = await conn.execute(f"PRAGMA table_info({Names(prefix).groups})")
-            for sql in sqlite_transport_upgrade([row[1] for row in await cur.fetchall()], prefix):
+            names, existing = Names(prefix), {}
+            for table in ("groups", "messages"):
+                cur = await conn.execute(f"PRAGMA table_info({getattr(names, table)})")
+                existing[table] = [row[1] for row in await cur.fetchall()]
+            for sql in sqlite_transport_upgrade(existing, prefix):
                 await conn.execute(sql)
             for sql in transport_schema("sqlite", prefix):
                 if not sql.startswith("CREATE TABLE"):
@@ -64,8 +67,8 @@ class AsyncSqliteTransport:
     ) -> None:
         async with self._lock:
             await self._conn.execute(
-                f"INSERT INTO {self._n.messages} (group_id, event) VALUES (?, ?)",
-                (group_id, event.model_dump_json()),
+                f"INSERT INTO {self._n.messages} (group_id, event, published_at) VALUES (?, ?, ?)",
+                (group_id, event.model_dump_json(), self._clock()),
             )
             await self._conn.execute(
                 f"INSERT OR IGNORE INTO {self._n.groups} (group_id, priority, routing_key) VALUES (?, ?, ?)",
@@ -121,6 +124,11 @@ class AsyncSqliteTransport:
             except BaseException:
                 await self._conn.execute("ROLLBACK")
                 raise
+
+    async def backlog(self) -> Backlog:
+        async with self._lock:
+            cur = await self._conn.execute(self._n.sql(_SQLITE_BACKLOG_SQL), (self._clock(),))
+            return _backlog(await cur.fetchall())
 
     async def nack(self, lease: Lease, delay: float = 0.0) -> None:
         async with self._lock:

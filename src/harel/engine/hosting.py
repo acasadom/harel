@@ -33,7 +33,7 @@ from harel.engine.resolve import (
     find_definition,
     register_definition,
 )
-from harel.engine.store import Step, StoreConflict
+from harel.engine.store import Step, StoreConflict, WorkerRecord
 from harel.spec.states import Event
 
 logger = logging.getLogger(__name__)
@@ -543,9 +543,13 @@ def log_nack_failed(worker_id: str, lease: Any) -> None:
     )
 
 
-def log_loop_step_failed(worker_id: str, what: str, retry_in: float) -> None:
-    """A worker's loop failed to claim, or to sweep the due timers: it carries on after a pause."""
-    logger.exception("worker %s could not %s; retrying in %ss", worker_id, what, retry_in)
+def log_loop_step_failed(worker_id: str, what: str, retry_in: Optional[float]) -> None:
+    """A worker's loop failed a step of its own — to claim, to sweep the due timers, to record
+    its heartbeat: it carries on, trying again after `retry_in` seconds (None: it won't)."""
+    if retry_in is None:
+        logger.exception("worker %s could not %s", worker_id, what)
+    else:
+        logger.exception("worker %s could not %s; retrying in %ss", worker_id, what, retry_in)
 
 
 class WorkerLogic(_DefinitionLookup):
@@ -566,12 +570,16 @@ class WorkerLogic(_DefinitionLookup):
         priority_threshold: int = 1,
         *,
         machines: Optional[Iterable[str]] = None,
+        heartbeat: float = 10.0,
         action_modules: Iterable[str] = (),
         actions: Optional[dict] = None,
         guards: Optional[dict] = None,
     ) -> None:
         """`machines`, when given, are the only machines this worker claims work for — the
-        executions whose tree started from one of them (their `routing_key`); None claims all."""
+        executions whose tree started from one of them (their `routing_key`); None claims all.
+        A running worker records a heartbeat in the store every `heartbeat` seconds (its
+        machines and when it was last seen), which a monitor reads to tell which machines no
+        live worker covers."""
         self.definitions = definitions
         self.machines = frozenset(machines) if machines is not None else None
         if self.machines is not None and not self.machines:
@@ -587,6 +595,31 @@ class WorkerLogic(_DefinitionLookup):
         self._trace = trace  # opt-in execution timeline, threaded to each per-execution driver
         self.high_ratio = high_ratio
         self.priority_threshold = priority_threshold
+        self.heartbeat = heartbeat
+        self._started_at: Optional[float] = None
+        self._next_beat = 0.0
+
+    def heartbeat_due(self) -> bool:
+        return self._clock() >= self._next_beat
+
+    def heartbeat_failed(self) -> None:
+        """A heartbeat that failed is tried again a whole interval later, not at every turn."""
+        self._next_beat = self._clock() + self.heartbeat
+
+    def heartbeat_flow(self) -> Flow:
+        """Record this worker's heartbeat: its machines, when it started and now."""
+        now = self._clock()
+        if self._started_at is None:
+            self._started_at = now
+        machines = tuple(sorted(self.machines)) if self.machines is not None else None
+        yield from store(
+            "record_worker", WorkerRecord(self.worker_id, machines, self._started_at, now, self.heartbeat)
+        )
+        self._next_beat = now + self.heartbeat
+
+    def forget_flow(self) -> Flow:
+        """Remove this worker's heartbeat (it is stopping)."""
+        yield from store("forget_worker", self.worker_id)
 
     def _transport_logic_flow(self, exe: Execution) -> Flow:
         logic = _HostedTransportDriverLogic(

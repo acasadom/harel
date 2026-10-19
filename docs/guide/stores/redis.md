@@ -388,6 +388,10 @@ escaped.
 
 `pending_work(id)` finds the execution's timers in the `timers` sorted set with a `ZSCAN` matching its members (the set is ordered by fire time, so the match is server-side over the whole set, not sent), and reads the `outbox` and `spawns` hashes whole — they hold only what the relay hasn't delivered yet — keeping the entries for the id.
 
+## Worker heartbeats
+
+The heartbeats live in one hash, `harel:workers`, a field per worker holding the record's JSON: `record_worker` is an `HSET`, `forget_worker` an `HDEL`.
+
 ## Published definitions
 
 The published machine versions live in one hash, `harel:definitions`, one field per version

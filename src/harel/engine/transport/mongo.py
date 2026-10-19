@@ -7,7 +7,7 @@ import uuid
 from typing import Any, Callable, Optional
 
 from harel.engine.schema import DEFAULT_PREFIX, Names
-from harel.engine.transport._base import Lease
+from harel.engine.transport._base import Backlog, Lease, _mongo_backlog
 from harel.spec.states import Event
 
 
@@ -100,7 +100,12 @@ class MongoTransport:
         self, group_id: str, event: Event, priority: int = 0, routing_key: Optional[str] = None
     ) -> None:
         self._msgs.insert_one(
-            {"_id": self._next_seq(), "group_id": group_id, "event": event.model_dump_json()}
+            {
+                "_id": self._next_seq(),
+                "group_id": group_id,
+                "event": event.model_dump_json(),
+                "published_at": self._clock(),
+            }
         )
         # ready the group NOW iff it is new ($setOnInsert): a publish into an in-flight or
         # parked group must not make it claimable before its lease/park elapses.
@@ -182,6 +187,14 @@ class MongoTransport:
                 "routing_key": dropped.get("routing_key"),
             }
             self._locks.update_one({"_id": group_id}, {"$setOnInsert": ready}, upsert=True)
+
+    def backlog(self) -> Backlog:
+        now = self._clock()
+        locks = {d["_id"]: d for d in self._locks.find({}, {"routing_key": 1, "token": 1, "available_at": 1})}
+        per_group = self._msgs.aggregate(
+            [{"$group": {"_id": "$group_id", "n": {"$sum": 1}, "oldest": {"$min": "$published_at"}}}]
+        )
+        return _mongo_backlog(per_group, locks, now)
 
     def nack(self, lease: Lease, delay: float = 0.0) -> None:
         if not self._owns(lease.group_id, lease.token):

@@ -31,6 +31,7 @@ each backend is a sibling module under `harel/engine/transport/`, with a twin un
 | `publish(group_id, event, priority=0, routing_key=None)` | enqueue `event` in `group_id`'s FIFO; the publish that creates the group sets its priority and its routing key (the machine its execution's tree started from) |
 | `claim(worker_id, visibility, min_priority=0, routing_keys=None)` | lease the oldest message of some group with **nothing in flight**, for `visibility` seconds, considering only groups with `priority >= min_priority` and, given `routing_keys`, a routing key among them; `None` if nothing deliverable |
 | `ack(lease)` | the message was handled — remove it, freeing its group |
+| `backlog()` | the work queued now, by machine: waiting messages, the executions they are for, those held (leased or parked), the oldest publish time — for the [monitor](monitor.md#queues-and-workers), not the hot path |
 | `nack(lease, delay=0)` | return it to the queue: `delay=0` re-claimable now (retry); `delay>0` **parks** it (and blocks its group) until `delay` passes |
 | `close()` | release the connection/client |
 
@@ -77,11 +78,13 @@ A transport outside harel builds on `harel.engine.transport.base` (`Transport`,
 `harel.testing`:
 
 ```text
-from harel.testing import assert_machine_routing_contract, assert_transport_contract
+from harel.testing import assert_backlog_contract, assert_machine_routing_contract
+from harel.testing import assert_transport_contract
 
 def test_my_transport():
     assert_transport_contract(lambda clock: MyTransport(clock=clock))
     assert_machine_routing_contract(lambda clock: MyTransport(clock=clock))
+    assert_backlog_contract(lambda clock: MyTransport(clock=clock))
 ```
 
 `make(clock)` returns a fresh, empty transport for each check. Pass `timing=False` if it keeps
@@ -137,6 +140,7 @@ something, it refuses it with an error rather than ignore it:
 | priority (`priority`, `min_priority`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | refuses |
 | routing by machine (`routing_keys`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | refuses | refuses |
 | deadlines by the injected clock | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | server TTLs | queue visibility |
+| `backlog()` by machine, with the oldest wait | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | one approximate total |
 
 - **SQS** can't select what it receives — no per-group priority, no filter: it refuses both
   (`ValueError` for a priority, `NotImplementedError` for `routing_keys`). A queue per priority or

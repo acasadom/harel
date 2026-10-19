@@ -17,6 +17,7 @@ from harel.engine.store._base import (
     Step,
     StoreConflict,
     TimerOp,
+    WorkerRecord,
     _decode_offset,
     _encode_offset,
     _matches,
@@ -63,6 +64,7 @@ class MongoStore:
         self._exes = self._db[names.executions]
         self._counters = self._db[names.counters]
         self._defs = self._db[names.definitions]
+        self._workers = self._db[names.workers]
         self._after = ReturnDocument.AFTER
         self._DuplicateKeyError = DuplicateKeyError
         self.trace_max = DEFAULT_TRACE_MAX
@@ -312,6 +314,17 @@ class MongoStore:
             outbox=sorted(outbox, key=lambda e: e.seq),
             spawns=sorted(spawns, key=lambda e: e.seq),
         )
+
+    def record_worker(self, record: WorkerRecord) -> None:
+        self._workers.replace_one(
+            {"_id": record.worker_id}, {"_id": record.worker_id, "record": record.to_json()}, upsert=True
+        )
+
+    def list_workers(self) -> list[WorkerRecord]:
+        return [WorkerRecord.from_json(d["record"]) for d in self._workers.find({}).sort("_id", 1)]
+
+    def forget_worker(self, worker_id: str) -> None:
+        self._workers.delete_one({"_id": worker_id})
 
     def ids_with_prefix(self, prefix: str) -> list[str]:
         query = {"_id": {"$regex": "^" + re.escape(prefix)}}

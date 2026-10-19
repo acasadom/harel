@@ -7,8 +7,8 @@ import uuid
 from typing import Any, Callable, Optional
 
 from harel.engine.schema import DEFAULT_PREFIX, Names
-from harel.engine.transport import _ACK_LUA, _CLAIM_LUA, _PUBLISH_LUA, Lease
-from harel.engine.transport._base import _refuse_routing
+from harel.engine.transport import _ACK_LUA, _CLAIM_LUA, _PUBLISH_LUA, Backlog, Lease
+from harel.engine.transport._base import _BACKLOG_CHUNK, _BACKLOG_LUA, _redis_backlog, _refuse_routing, _text
 from harel.spec.states import Event
 
 
@@ -33,6 +33,7 @@ class AsyncRedisTransport:
         self._claim_script = client.register_script(_CLAIM_LUA)
         self._ack_script = client.register_script(_ACK_LUA)
         self._publish_script = client.register_script(_PUBLISH_LUA)
+        self._backlog_script = client.register_script(_BACKLOG_LUA)
 
     @classmethod
     def from_url(cls, url: str, *, prefix: str = DEFAULT_PREFIX) -> "AsyncRedisTransport":
@@ -65,7 +66,17 @@ class AsyncRedisTransport:
         self, group_id: str, event: Event, priority: int = 0, routing_key: Optional[str] = None
     ) -> None:
         # one atomic round-trip: push + fix priority on first publish + ready in its tier's ZSET
-        await self._publish_script(keys=[], args=[self._prefix, group_id, event.model_dump_json(), priority])
+        await self._publish_script(
+            keys=[],
+            args=[
+                self._prefix,
+                group_id,
+                event.model_dump_json(),
+                priority,
+                routing_key or "",
+                repr(self._clock()),
+            ],
+        )
 
     async def claim(
         self,
@@ -99,6 +110,16 @@ class AsyncRedisTransport:
     async def _tier(self, group_id: str) -> int:
         """The group's priority tier (its `ready:{prio}` ZSET), read from the prio hash."""
         return int(self._decode(await self._r.hget(self._k_prio(), group_id)) or 0)
+
+    async def backlog(self) -> Backlog:
+        # see the sync `RedisTransport.backlog`
+        cursor: str = "0"
+        chunks: list[list] = []
+        while True:
+            reply = await self._backlog_script(keys=[], args=[self._prefix, cursor, _BACKLOG_CHUNK])
+            cursor, chunks = _text(reply[0]), [*chunks, reply[1:]]
+            if cursor == "0":
+                return _redis_backlog(chunks)
 
     async def nack(self, lease: Lease, delay: float = 0.0) -> None:
         if not await self._owns(lease.group_id, lease.token):

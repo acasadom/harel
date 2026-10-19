@@ -207,3 +207,15 @@ def test_the_workers_run_a_version_only_the_store_has(stack, tmp_path):
     done = _await(lambda: (e := store.load(exe.id)) is not None and e.status is Status.DONE)
     assert done, "the worker stack did not run the published version in time"
     assert store.load(exe.id).definition_version == 3
+
+
+def test_the_worker_fleet_beats_in_the_store_and_the_backlog_reads(stack):
+    """The compose workers record their heartbeats in the shared store; the transport they use
+    reports its backlog — what the monitor's queue view reads."""
+    store, transport = build_store(), build_transport()
+    # at least one: `docker compose run` brings the worker service's dependencies back to one replica
+    alive = _await(lambda: any(w.alive(time.time()) for w in store.list_workers()), timeout=30)
+    assert alive, "the compose workers should be beating"
+    assert all(w.machines is None for w in store.list_workers())  # unfiltered workers
+    backlog = transport.backlog()
+    assert backlog.by_machine and all(b.messages >= 0 for b in backlog.machines)

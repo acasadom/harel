@@ -7,8 +7,8 @@ import uuid
 from typing import Any, Callable, Optional
 
 from harel.engine.schema import DEFAULT_PREFIX, Names, sqlite_transport_upgrade, transport_schema
-from harel.engine.transport import _PARKED, Lease
-from harel.engine.transport._base import _routing_filter
+from harel.engine.transport import _PARKED, Backlog, Lease
+from harel.engine.transport._base import _SQLITE_BACKLOG_SQL, _backlog, _routing_filter
 from harel.spec.states import Event
 
 
@@ -59,8 +59,17 @@ class AsyncRqliteTransport:
                 if create_schema:
                     statements = transport_schema("sqlite", prefix)
                     await transport._execute([q for q in statements if q.startswith("CREATE TABLE")])
-                    info = await transport._query(f"PRAGMA table_info({Names(prefix).groups})", ())
-                    upgrade = sqlite_transport_upgrade([row[1] for row in info], prefix)
+                    names = Names(prefix)
+                    existing = {
+                        table: [
+                            row[1]
+                            for row in await transport._query(
+                                f"PRAGMA table_info({getattr(names, table)})", ()
+                            )
+                        ]
+                        for table in ("groups", "messages")
+                    }
+                    upgrade = sqlite_transport_upgrade(existing, prefix)
                     await transport._execute(
                         upgrade + [q for q in statements if not q.startswith("CREATE TABLE")]
                     )
@@ -102,9 +111,10 @@ class AsyncRqliteTransport:
         await self._execute(
             [
                 [
-                    f"INSERT INTO {self._n.messages} (group_id, event) VALUES (?, ?)",
+                    f"INSERT INTO {self._n.messages} (group_id, event, published_at) VALUES (?, ?, ?)",
                     group_id,
                     event.model_dump_json(),
+                    self._clock(),
                 ],
                 [
                     f"INSERT OR IGNORE INTO {self._n.groups} (group_id, priority, routing_key) VALUES (?, ?, ?)",
@@ -170,6 +180,9 @@ class AsyncRqliteTransport:
             ],
             transaction=True,
         )
+
+    async def backlog(self) -> Backlog:
+        return _backlog(await self._query(self._n.sql(_SQLITE_BACKLOG_SQL), (self._clock(),)))
 
     async def nack(self, lease: Lease, delay: float = 0.0) -> None:
         if delay > 0:
