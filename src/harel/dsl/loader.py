@@ -371,15 +371,18 @@ def _tokens(src: str) -> list[str]:
     return [t for t in _TOKEN.findall(src) if not t.startswith(("#", "//"))]
 
 
-def _shared_digest_parts(text: str, base: Optional[Path], seen: set[Path]) -> list[str]:
+def _digest_parts(text: str, base: Optional[Path], seen: set[Path], *, whole: bool = False) -> list[str]:
     """The normalized declarations of `text` every machine of the file depends on (imports,
-    bindings, guards, events, fragments), followed by those of each imported file, in turn. An
-    import counts by its alias and what the file holds, not by its path: a published version is
-    rebuilt from its files laid out elsewhere."""
+    bindings, guards, events, fragments), followed by each imported file, in turn. An imported
+    file counts `whole` — its machines too, since any of them may be invoked, and a machine
+    edited there must force a bump on its importers. An import counts by its alias and what the
+    file holds, not by its path: a published version is rebuilt from its files laid out
+    elsewhere."""
     prog = parse(text)
     imports = set(prog.import_spans)
+    spans = sorted([*prog.shared_spans, *prog.machine_spans.values()]) if whole else prog.shared_spans
     parts = []
-    for start, end in prog.shared_spans:
+    for start, end in spans:
         tokens = _tokens(text[start:end])
         if (start, end) in imports:  # where the file is doesn't count — its content does, below
             tokens = [t for t in tokens if not t.startswith('"')]
@@ -389,15 +392,15 @@ def _shared_digest_parts(text: str, base: Optional[Path], seen: set[Path]) -> li
         if resolved in seen or not resolved.exists():
             continue
         seen.add(resolved)
-        parts += _shared_digest_parts(resolved.read_text(), resolved.parent, seen)
+        parts += _digest_parts(resolved.read_text(), resolved.parent, seen, whole=True)
     return parts
 
 
 def machine_version(text: str, name: str, *, base_path: Optional[Path] = None) -> tuple[int, str]:
     """Machine `name`'s declared version (1 when it declares none) and the digest of its DSL
-    source: its own block, plus the declarations of its file and of the files it imports.
-    Comments and layout don't count, nor does the `version` clause or the other machines of
-    the file. The digest stands for the DSL only — not the code of the actions it binds."""
+    source: its own block, plus the declarations of its file and the whole of each file it
+    imports. Comments and layout don't count, nor does its own `version` clause or the other
+    machines of its file. The digest stands for the DSL only — not the code of the actions it binds."""
     prog = parse(text)
     if name not in prog.machine_spans:
         raise DslError(f"no machine named {name!r}")
@@ -406,7 +409,7 @@ def machine_version(text: str, name: str, *, base_path: Optional[Path] = None) -
     if len(own) > 3 and own[2] == "version":  # machine <name> version <n> { ...
         del own[2:4]
     h = hashlib.sha256()
-    for part in [" ".join(own), *_shared_digest_parts(text, base_path, set())]:
+    for part in [" ".join(own), *_digest_parts(text, base_path, set())]:
         h.update(part.encode())
         h.update(b"\0")
     return prog.versions.get(name, 1), h.hexdigest()[:16]

@@ -169,9 +169,10 @@ hasn't got).
 ### What harel checks
 
 - **A version edited without a bump.** The digest covers the machine's block and what its file
-  shares with it — imports (by alias and content, not by where the file lives), events, guards,
-  `bind`s, fragments — but not comments, layout or the file's other machines, nor the code of the
-  actions. Publishing such a version is refused (above). A runner whose own copy differs from the
+  shares with it — events, guards, `bind`s, fragments, and each imported file whole, its machines
+  included (by alias and content, not by where the file lives) — but not comments, layout or its
+  own file's other machines, nor the code of the actions. Editing a machine in an imported file
+  therefore needs a bump of every machine that imports it. Publishing such a version is refused (above). A runner whose own copy differs from the
   one an execution started on runs it on the published one, and logs a warning; if no published
   one matches either, the execution fails (`FAILED`) with a `DefinitionChanged` error —
   `process()` raises it instead under `on_action_error="raise"`, and the event that found it is

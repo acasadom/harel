@@ -272,16 +272,20 @@ class DriverLogic:
 
     def _create_spawn_flow(self, entry) -> Flow:
         """Create and start one pending child Execution, idempotently: if the child already
-        exists (a crash-and-retry re-runs the fork), skip — its progress is kept. An
-        orthogonal region shares this driver's Definition; a submachine `invoke` child runs
-        another, named by the `__invoke_fqn__` riding in its context."""
+        exists (a crash-and-retry re-runs the fork), skip — its progress is kept. The spawn
+        outbox holds every execution's pending children, so the child is built from its
+        parent's Definition (machine and version), not this driver's: an orthogonal region
+        runs the parent's own, a submachine `invoke` child the one named by the
+        `__invoke_fqn__` riding in its context."""
         if (yield from store("load", entry.child_id)) is not None:
             return
+        parent = (yield from store("load", entry.parent_id)) if entry.parent_id is not None else None
+        parent_defn = (yield from self._definition_flow(parent)) if parent is not None else self.defn
         context = dict(entry.context)
         fqn = context.pop("__invoke_fqn__", None)
         if fqn is not None:
             # an inline target (or one its file imports) is the spawning version's own
-            own = self.defn.submachines.get(fqn)
+            own = parent_defn.submachines.get(fqn)
             if own is not None:
                 child_defn = own
             elif self.resolve_machine is None:
@@ -292,11 +296,10 @@ class DriverLogic:
             # machine) starts with only what the fork passes down
             context = with_defaults(child_defn.context_schema, context)
         else:
-            child_defn = self.defn
+            child_defn = parent_defn
         # a child (orthogonal region / invoke / fan-out instance) inherits the parent's
         # priority — a high-priority workflow's regions carry the actual work, so they must
         # be claimed at that priority too
-        parent = (yield from store("load", entry.parent_id)) if entry.parent_id is not None else None
         child = Execution(
             id=entry.child_id,
             definition_id=child_defn.id,
