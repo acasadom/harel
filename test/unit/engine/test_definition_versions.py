@@ -25,7 +25,8 @@ from harel.engine.aio_store import AsyncDictStore
 from harel.engine.aio_transport import AsyncInMemoryTransport
 from harel.engine.distributed import DistributedRunner
 from harel.engine.durable import DurableRunner
-from harel.engine.execution import Status
+from harel.engine.execution import Execution, Status
+from harel.engine.runtime import _SyncDriver
 from harel.engine.store import DefinitionRecord
 from harel.engine.transport import InMemoryTransport
 from harel.published import (
@@ -122,6 +123,20 @@ def test_an_imported_file_counts(tmp_path):
     lib.write_text("event Go { n: int? }\n")
     after = machine_version(main_src, "order", base_path=tmp_path)
     assert before[0] == after[0] == 1 and before[1] != after[1]
+
+
+def test_a_machine_of_an_imported_file_counts(tmp_path):
+    """An `invoke` of an imported machine runs it as the importer's version ships it, so editing
+    that machine — or bumping its version — must change the importer's digest too."""
+    lib = tmp_path / "lib.stm"
+    pay = "machine pay {{ initial A state A {{}} final B {} from A to B on Go }}\n"
+    lib.write_text("event Go {}\n" + pay.format("done"))
+    main_src = 'import "lib.stm" as lib\n' + V1.replace("event Go {}\n", "")
+    before = machine_version(main_src, "order", base_path=tmp_path)
+    lib.write_text("event Go {}\n" + pay.format("success"))
+    assert machine_version(main_src, "order", base_path=tmp_path)[1] != before[1]
+    lib.write_text("event Go {}\n" + pay.format("done").replace("machine pay", "machine pay version 2"))
+    assert machine_version(main_src, "order", base_path=tmp_path)[1] != before[1]
 
 
 def test_an_inline_submachine_carries_its_parents_version():
@@ -340,6 +355,46 @@ def test_regions_run_on_their_parents_version():
         child = store.load(child_id)
         assert (child.definition_version, child.definition_digest) == (1, v1.digest)
     assert runner.process(exe.id, Event(kind="Go")).outcome == "success"  # v1's verdict
+
+
+class _NoFlushDriver(_SyncDriver):
+    """Commits the fork but never creates the children: they wait in the spawn outbox."""
+
+    def _flush(self) -> None:
+        pass
+
+
+def test_a_region_left_in_the_spawn_outbox_runs_on_its_parents_version():
+    """The relay drains every execution's pending children, so the driver that creates one
+    may hold another version than the child's parent: the child must take its parent's."""
+    store = DictStore()
+    v1 = _v(REGIONS.replace("{v}", "1"), "split")
+    parent = Execution(definition_id=v1.id)
+    _NoFlushDriver(v1, store).start(parent)
+    assert len(store.pending_spawns()) == 2
+
+    v2 = _v(REGIONS.replace("{v}", "2").replace("final Done success", "final Done done"), "split")
+    runner = DurableRunner(store, definition_registry([v1, v2]))
+    runner.recover("split")
+    for child_id in store.load(parent.id).children:
+        child = store.load(child_id)
+        assert (child.definition_version, child.definition_digest) == (1, v1.digest)
+    assert runner.process(parent.id, Event(kind="Go")).outcome == "success"  # v1's verdict
+
+
+def test_a_region_left_in_the_spawn_outbox_runs_on_its_parents_machine():
+    store = DictStore()
+    split = _v(REGIONS.replace("{v}", "1"), "split")
+    parent = Execution(definition_id=split.id)
+    _NoFlushDriver(split, store).start(parent)
+
+    other = _v(REGIONS.replace("{v}", "1").replace("split", "other").replace("A1", "X1"), "other")
+    runner = DurableRunner(store, definition_registry([split, other]))
+    runner.recover("other")
+    assert store.pending_spawns() == []
+    for child_id in store.load(parent.id).children:
+        assert store.load(child_id).definition_id == "split"
+    assert runner.process(parent.id, Event(kind="Go")).status is Status.DONE
 
 
 INVOKER = """

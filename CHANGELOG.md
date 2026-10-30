@@ -49,7 +49,7 @@
   or the one `create(..., version=1)` asks for — and an existing one keeps the version it was
   created with to the end, along with its regions, fan-out instances and inline `invoke`s. Each
   execution records its version's source digest — the machine, what its file shares with it and
-  the files it imports, without comments or layout — so a machine edited without a new version
+  the whole of each file it imports (its machines too), without comments or layout — so a machine edited without a new version
   can't drive the executions that started on another source: they fail with `DefinitionChanged`.
   An execution from before versions runs as version 1.
 - **The store keeps every published machine version.** A worker publishes the machines of its
@@ -117,6 +117,11 @@
 
 ### Fixed
 
+- **A region or `invoke` child is built from its parent's machine.** The relay creates the
+  pending children of every execution, not only those of the one it just drove, yet it built each
+  child from the machine of the driver running the relay: with several machines forking under one
+  worker (an `AsyncWorker` at `concurrency` > 1), a region could start on another machine and fail
+  with a `KeyError` on its state. The child now takes its parent's machine and version.
 - **Workers opening one SQLite file at once no longer fail to start.** The SQLite store and
   transport switch the file to WAL mode when they open it, which takes an exclusive lock SQLite
   doesn't wait for: a worker starting while another opened the file died with "database is

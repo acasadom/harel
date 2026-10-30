@@ -477,13 +477,15 @@ the same.
 - the machine's own block, without its `version` clause;
 - the declarations its file shares with every machine in it — `bind`, `guard`, `event`,
   `fragment`, `import` — in file order;
-- for each import, the same declarations of the imported file, transitively. An import counts by
-  its alias and that content, **not its path**: a published version is rebuilt from its files laid
+- for each import, the whole imported file — its machines too, since the importer can `invoke`
+  them and its published version carries them — transitively. An import counts by its alias and
+  that content, **not its path**: a published version is rebuilt from its files laid
   out in a scratch directory, and must hash the same.
 
 It hashes the DSL text, not the compiled `Definition`: the compiled model is harel's own and
 changes between harel releases, which would read as every machine having changed. The other
-machines of a file don't count, so editing one doesn't force a bump on its neighbours. The code
+machines of a file don't count, so editing one doesn't force a bump on its neighbours; a machine
+in an imported file does, so editing it forces a bump on its importers. The code
 of the actions doesn't count either — it isn't versioned.
 
 ### Where versions live
