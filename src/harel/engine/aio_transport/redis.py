@@ -114,7 +114,7 @@ class AsyncRedisTransport:
     async def backlog(self) -> Backlog:
         # see the sync `RedisTransport.backlog`
         cursor: str = "0"
-        chunks: list[list] = []
+        chunks: list[list[Any]] = []
         while True:
             reply = await self._backlog_script(keys=[], args=[self._prefix, cursor, _BACKLOG_CHUNK])
             cursor, chunks = _text(reply[0]), [*chunks, reply[1:]]

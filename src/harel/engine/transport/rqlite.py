@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from harel.engine.schema import DEFAULT_PREFIX, Names
 from harel.engine.transport._base import (
@@ -74,17 +74,17 @@ class RqliteTransport:
                 _time.sleep(retry_delay)
         raise last if last is not None else RuntimeError("rqlite connect failed")
 
-    def _execute(self, statements: list, transaction: bool = False) -> list:
+    def _execute(self, statements: list[Any], transaction: bool = False) -> list[dict[str, Any]]:
         url = f"{self._base}/db/execute" + ("?transaction" if transaction else "")
         resp = self._session.post(url, json=statements, timeout=self._timeout)
         resp.raise_for_status()
-        results = resp.json()["results"]
+        results: list[dict[str, Any]] = resp.json()["results"]
         for res in results:
             if "error" in res:
                 raise RuntimeError(f"rqlite execute error: {res['error']}")
         return results
 
-    def _query(self, sql: str, params: tuple) -> list:
+    def _query(self, sql: str, params: tuple[Any, ...]) -> list[Any]:
         resp = self._session.post(
             f"{self._base}/db/query", params={"level": "strong"}, json=[[sql, *params]], timeout=self._timeout
         )

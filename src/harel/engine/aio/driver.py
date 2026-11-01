@@ -14,10 +14,14 @@ import logging
 import time
 from typing import Any, Callable, Optional
 
+from harel import engine
 from harel.definition.model import Definition
+from harel.engine.aio_store import AsyncExecutionStore
 from harel.engine.driving import DriverLogic, FailOnActionError
 from harel.engine.execution import Execution
-from harel.engine.flow import Flow, run_async
+from harel.engine.flow import Flow, T, run_async
+from harel.engine.runtime import Drive
+from harel.engine.store import SpawnEntry
 from harel.spec.states import Event
 
 logger = logging.getLogger(__name__)
@@ -30,7 +34,7 @@ class AsyncDriver(DriverLogic):
     def __init__(
         self,
         defn: Definition,
-        store: Any,
+        store: AsyncExecutionStore,
         clock: Callable[[], float] = time.time,
         definitions: Optional[dict[str, Definition]] = None,
         resolve_machine: Optional[Callable[[str], Definition]] = None,
@@ -43,19 +47,21 @@ class AsyncDriver(DriverLogic):
         """What this driver's flows do IO on."""
         return {"store": self.store}
 
-    async def _serve(self, flow: Flow) -> Any:
+    async def _serve(self, flow: Flow[T]) -> T:
         return await run_async(flow, self._ports())
 
     # --- the flows, awaited --------------------------------------------------
     async def _run(
-        self, exe: Execution, gen, event_id: Optional[str] = None, event: Optional[Event] = None
+        self, exe: Execution, gen: engine.Step, event_id: Optional[str] = None, event: Optional[Event] = None
     ) -> bool:
         return await self._serve(self._run_flow(exe, gen, event_id, event))
 
-    async def _drive(self, exe: Execution, gen, original_exc: Optional[Exception] = None):
+    async def _drive(
+        self, exe: Execution, gen: engine.Step, original_exc: Optional[Exception] = None
+    ) -> Drive:
         return await self._serve(self._drive_flow(exe, gen, original_exc))
 
-    async def _create_spawn(self, entry) -> None:
+    async def _create_spawn(self, entry: SpawnEntry) -> None:
         await self._serve(self._create_spawn_flow(entry))
 
     async def _flush(self) -> None:

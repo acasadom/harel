@@ -107,7 +107,7 @@ class AsyncMongoStore:
         """See `MongoStore.list_executions`: definition_id filtered server-side, the rest
         client-side from the `data` JSON."""
         status = set(status) if status is not None else None
-        query: dict = {} if definition_id is None else {"definition_id": definition_id}
+        query: dict[str, Any] = {} if definition_id is None else {"definition_id": definition_id}
         off = _decode_offset(cursor)
         items: list[ExecutionSummary] = []
         scanned = 0
@@ -144,25 +144,25 @@ class AsyncMongoStore:
         emits: list[tuple[Optional[str], Event]],
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
-        spawns: tuple[tuple[str, str, dict], ...] = (),
-        trace: Optional[dict] = None,
+        spawns: tuple[tuple[str, str, dict[str, Any]], ...] = (),
+        trace: Optional[dict[str, Any]] = None,
         step: Optional[Step] = None,
     ) -> list[int]:
-        outbox_entries: list[dict] = []
+        outbox_entries: list[dict[str, Any]] = []
         if emits:
             base = await self._next_seq("outbox", len(emits))
             outbox_entries = [
                 {"seq": base + i, "target_id": t, "event": e.model_dump_json()}
                 for i, (t, e) in enumerate(emits)
             ]
-        spawn_entries: list[dict] = []
+        spawn_entries: list[dict[str, Any]] = []
         if spawns:
             base = await self._next_seq("spawn", len(spawns))
             spawn_entries = [
                 {"seq": base + i, "parent_id": exe.id, "child_id": cid, "root_path": rp, "context": dict(ctx)}
                 for i, (cid, rp, ctx) in enumerate(spawns)
             ]
-        trace_step: Optional[dict] = None
+        trace_step: Optional[dict[str, Any]] = None
         if trace is not None:
             trace_step = {**trace, "index": await self._next_seq("trace:" + exe.id, 1) - 1}
 
@@ -224,13 +224,13 @@ class AsyncMongoStore:
             await self._exes.find_one({"_id": execution_id, "processed": event_id}, {"_id": 1})
         ) is not None
 
-    async def append_trace(self, execution_id: str, entry: dict) -> None:
+    async def append_trace(self, execution_id: str, entry: dict[str, Any]) -> None:
         idx = entry.get("index", await self._next_seq("trace:" + execution_id, 1) - 1)
         step = {**entry, "index": idx}
         push = {"$each": [step], **({"$slice": -self.trace_max} if self.trace_max else {})}
         await self._exes.update_one({"_id": execution_id}, {"$push": {"trace": push}}, upsert=True)
 
-    async def read_trace(self, execution_id: str) -> list[dict]:
+    async def read_trace(self, execution_id: str) -> list[dict[str, Any]]:
         doc = await self._exes.find_one({"_id": execution_id}, {"trace": 1})
         return list(doc.get("trace", [])) if doc is not None else []
 

@@ -24,9 +24,26 @@ import atexit
 import functools
 import inspect
 import threading
-from typing import Any
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional, TypeVar
 
 from anyio.from_thread import BlockingPortal, start_blocking_portal
+
+if TYPE_CHECKING:
+    from harel.engine.execution import Execution
+    from harel.engine.store import (
+        DefinitionRecord,
+        ExecutionStore,
+        OutboxEntry,
+        PendingWork,
+        SpawnEntry,
+        Step,
+        TimerOp,
+        WorkerRecord,
+    )
+    from harel.engine.transport import Backlog, Lease, Transport
+    from harel.spec.states import Event
+
+T = TypeVar("T")
 
 _portal_cm: Any = None
 _portal: BlockingPortal | None = None
@@ -68,7 +85,7 @@ def _close_portal() -> None:
             _portal = None
 
 
-def run(coro_fn, *args, **kwargs):
+def run(coro_fn: Callable[..., Awaitable[T]], *args: Any, **kwargs: Any) -> T:
     """Run `coro_fn(*args, **kwargs)` on the shared loop and block until it completes (sync
     bridge). `BlockingPortal.call` takes only positional args, so kwargs ride via partial.
     Refused from inside a running event loop, on every call: blocking there would freeze that
@@ -95,7 +112,7 @@ class _AsyncStoreAdapter:
     durable ones do — acceptable for the single-threaded embedded facade path (the concurrency
     win is the async Worker, not this facade)."""
 
-    def __init__(self, store: Any) -> None:
+    def __init__(self, store: ExecutionStore) -> None:
         self._s = store
 
     @property
@@ -107,13 +124,22 @@ class _AsyncStoreAdapter:
         if hasattr(self._s, "trace_max"):
             self._s.trace_max = value
 
-    async def load(self, execution_id):
+    async def load(self, execution_id: str) -> Optional[Execution]:
         return self._s.load(execution_id)
 
-    async def save(self, exe):
-        return self._s.save(exe)
+    async def save(self, exe: Execution) -> None:
+        self._s.save(exe)
 
-    async def commit(self, exe, emits, processed_event_id=None, timers=(), spawns=(), trace=None, step=None):
+    async def commit(
+        self,
+        exe: Execution,
+        emits: list[tuple[Optional[str], Event]],
+        processed_event_id: Optional[str] = None,
+        timers: tuple[TimerOp, ...] = (),
+        spawns: tuple[tuple[str, str, dict[str, Any]], ...] = (),
+        trace: Optional[dict[str, Any]] = None,
+        step: Optional[Step] = None,
+    ) -> list[int]:
         return self._s.commit(
             exe,
             emits,
@@ -124,90 +150,99 @@ class _AsyncStoreAdapter:
             step=step,
         )
 
-    async def read_trace(self, execution_id):
+    async def read_trace(self, execution_id: str) -> list[dict[str, Any]]:
         return self._s.read_trace(execution_id)
 
-    async def append_trace(self, execution_id, entry):
-        return self._s.append_trace(execution_id, entry)
+    async def append_trace(self, execution_id: str, entry: dict[str, Any]) -> None:
+        # not part of the store protocol: the demo/test seam the in-memory stores have
+        getattr(self._s, "append_trace")(execution_id, entry)
 
-    async def is_processed(self, execution_id, event_id):
+    async def is_processed(self, execution_id: str, event_id: str) -> bool:
         return self._s.is_processed(execution_id, event_id)
 
-    async def pending_outbox(self):
+    async def pending_outbox(self) -> list[OutboxEntry]:
         return self._s.pending_outbox()
 
-    async def ack_outbox(self, seq):
-        return self._s.ack_outbox(seq)
+    async def ack_outbox(self, seq: int) -> None:
+        self._s.ack_outbox(seq)
 
-    async def pending_spawns(self):
+    async def pending_spawns(self) -> list[SpawnEntry]:
         return self._s.pending_spawns()
 
-    async def ack_spawn(self, seq):
-        return self._s.ack_spawn(seq)
+    async def ack_spawn(self, seq: int) -> None:
+        self._s.ack_spawn(seq)
 
-    async def due_timers(self, now):
+    async def due_timers(self, now: float) -> list[tuple[str, str, float]]:
         return self._s.due_timers(now)
 
-    async def delete_timer(self, execution_id, path, fire_at):
-        return self._s.delete_timer(execution_id, path, fire_at)
+    async def delete_timer(self, execution_id: str, path: str, fire_at: float) -> None:
+        self._s.delete_timer(execution_id, path, fire_at)
 
-    async def pending_work(self, execution_id):
+    async def pending_work(self, execution_id: str) -> PendingWork:
         return self._s.pending_work(execution_id)
 
-    async def record_worker(self, record):
-        return self._s.record_worker(record)
+    async def record_worker(self, record: WorkerRecord) -> None:
+        self._s.record_worker(record)
 
-    async def list_workers(self):
+    async def list_workers(self) -> list[WorkerRecord]:
         return self._s.list_workers()
 
-    async def forget_worker(self, worker_id):
-        return self._s.forget_worker(worker_id)
+    async def forget_worker(self, worker_id: str) -> None:
+        self._s.forget_worker(worker_id)
 
-    async def ids_with_prefix(self, prefix):
+    async def ids_with_prefix(self, prefix: str) -> list[str]:
         return self._s.ids_with_prefix(prefix)
 
-    async def purge(self, execution_id, expected_version):
+    async def purge(self, execution_id: str, expected_version: int) -> bool:
         return self._s.purge(execution_id, expected_version)
 
-    async def publish_definition(self, record):
+    async def publish_definition(self, record: DefinitionRecord) -> DefinitionRecord:
         return self._s.publish_definition(record)
 
-    async def load_definition(self, definition_id, version):
+    async def load_definition(self, definition_id: str, version: int) -> Optional[DefinitionRecord]:
         return self._s.load_definition(definition_id, version)
 
-    async def close(self):
-        return self._s.close()
+    async def close(self) -> None:
+        self._s.close()
 
 
 class _AsyncTransportAdapter:
     """Expose a sync `Transport` through the async `AsyncTransport` interface."""
 
-    def __init__(self, transport: Any) -> None:
+    def __init__(self, transport: Transport) -> None:
         self._t = transport
 
     @property
     def shares_store_transaction(self) -> bool:
         return getattr(self._t, "shares_store_transaction", False)
 
-    async def publish(self, group_id, event, priority=0, routing_key=None):
-        return self._t.publish(group_id, event, priority, routing_key=routing_key)
+    async def publish(
+        self, group_id: str, event: Event, priority: int = 0, routing_key: Optional[str] = None
+    ) -> None:
+        self._t.publish(group_id, event, priority, routing_key=routing_key)
 
-    async def claim(self, worker_id, visibility, min_priority=0, routing_keys=None):
+    async def claim(
+        self,
+        worker_id: str,
+        visibility: float,
+        min_priority: int = 0,
+        routing_keys: Optional[frozenset[str]] = None,
+    ) -> Optional[Lease]:
         if routing_keys is None:  # as the worker asks: a transport without routing still serves it
             return self._t.claim(worker_id, visibility, min_priority)
         return self._t.claim(worker_id, visibility, min_priority, routing_keys=routing_keys)
 
-    async def ack(self, lease):
-        return self._t.ack(lease)
+    async def ack(self, lease: Lease) -> None:
+        self._t.ack(lease)
 
-    async def nack(self, lease, delay=0.0):
-        return self._t.nack(lease, delay)
+    async def nack(self, lease: Lease, delay: float = 0.0) -> None:
+        self._t.nack(lease, delay)
 
-    async def backlog(self):
+    async def backlog(self) -> Backlog:
         return self._t.backlog()
 
-    async def close(self):
-        return self._t.close()
+    async def close(self) -> None:
+        self._t.close()
 
 
 def as_async_store(store: Any) -> Any:

@@ -34,6 +34,7 @@ from harel.engine.resolve import (
     register_definition,
 )
 from harel.engine.store import Step, StoreConflict, WorkerRecord
+from harel.engine.transport import Lease
 from harel.spec.states import Event
 
 logger = logging.getLogger(__name__)
@@ -64,7 +65,7 @@ class _HostedTransportDriverLogic(FailOnActionError, TransportDriverLogic):
     """The transport driver's logic with the dead-letter policy, as a worker runs it."""
 
 
-def _register_submachines(definitions: dict) -> None:
+def _register_submachines(definitions: dict[str, Any]) -> None:
     """Fold every registered Definition's inline `invoke` targets into `definitions`
     by id (= their synthetic FQN) and version, so they resolve without an external resolver."""
     for defn in list(definitions.values()):
@@ -72,7 +73,9 @@ def _register_submachines(definitions: dict) -> None:
             register_definition(definitions, sub)
 
 
-def _resolve_machine(definitions: dict, resolver: Optional[MachineResolver], fqn: str) -> Definition:
+def _resolve_machine(
+    definitions: dict[str, Definition], resolver: Optional[MachineResolver], fqn: str
+) -> Definition:
     """Resolve a submachine FQN and register it in `definitions` (so the child then
     routes by its own id). Inline targets (id == FQN) are already registered; an
     external FQN goes through the resolver. Raises if neither has it."""
@@ -86,7 +89,7 @@ def _resolve_machine(definitions: dict, resolver: Optional[MachineResolver], fqn
 
 
 def _find_local(
-    definitions: dict, resolver: Optional[MachineResolver], exe: Execution
+    definitions: dict[str, Any], resolver: Optional[MachineResolver], exe: Execution
 ) -> Optional[Definition]:
     """The Definition of `exe`'s version this runner holds: in the registry, or — for a submachine
     child whose Definition this worker has not built yet — resolved by its persisted FQN (the
@@ -110,8 +113,8 @@ class _DefinitionLookup:
     definitions: dict[str, Definition]
     resolver: Optional[MachineResolver]
     action_modules: tuple[str, ...] = ()
-    actions: Optional[dict] = None
-    guards: Optional[dict] = None
+    actions: Optional[dict[str, Any]] = None
+    guards: Optional[dict[str, Any]] = None
     _published: Any = None
 
     def _published_definitions(self) -> Any:
@@ -176,7 +179,7 @@ class _DefinitionLookup:
             ) from exc
 
 
-def _new_defn(definitions: dict, definition_id: str, version: Optional[int]) -> Definition:
+def _new_defn(definitions: dict[str, Any], definition_id: str, version: Optional[int]) -> Definition:
     """The Definition a new execution of `definition_id` runs: `version`, else the highest."""
     defn = (
         definitions.get(definition_id)
@@ -212,8 +215,8 @@ class DurableLogic(_DefinitionLookup):
         on_action_error: str = "fail",
         *,
         action_modules: Iterable[str] = (),
-        actions: Optional[dict] = None,
-        guards: Optional[dict] = None,
+        actions: Optional[dict[str, Any]] = None,
+        guards: Optional[dict[str, Any]] = None,
     ) -> None:
         if on_action_error not in ACTION_ERROR_POLICIES:
             raise ValueError(
@@ -242,19 +245,19 @@ class DurableLogic(_DefinitionLookup):
         driver.definition_flow = self._defn_flow
         return driver
 
-    def _loaded_flow(self, execution_id: str) -> Flow:
-        loaded = yield from store("load", execution_id)
+    def _loaded_flow(self, execution_id: str) -> Flow[Execution]:
+        loaded: Optional[Execution] = yield from store("load", execution_id)
         assert loaded is not None
         return loaded
 
     def create_flow(
         self,
         definition_id: str,
-        context: Optional[dict] = None,
+        context: Optional[dict[str, Any]] = None,
         execution_id: Optional[str] = None,
         priority: int = 0,
         version: Optional[int] = None,
-    ) -> Flow:
+    ) -> Flow[Execution]:
         if execution_id is not None and (yield from store("load", execution_id)) is not None:
             from harel.engine.store import ExecutionAlreadyExists
 
@@ -274,7 +277,7 @@ class DurableLogic(_DefinitionLookup):
         yield from driver.start_flow(exe)
         return (yield from self._loaded_flow(exe.id))
 
-    def process_flow(self, execution_id: str, event: Event) -> Flow:
+    def process_flow(self, execution_id: str, event: Event) -> Flow[Execution]:
         exe = yield from store("load", execution_id)
         if exe is None:
             raise KeyError(execution_id)
@@ -283,10 +286,10 @@ class DurableLogic(_DefinitionLookup):
         yield from driver.inject_flow(exe, event)
         return (yield from self._loaded_flow(execution_id))
 
-    def recover_flow(self, definition_id: str) -> Flow:
+    def recover_flow(self, definition_id: str) -> Flow[None]:
         yield from self._driver_logic(self.definitions[definition_id])._flush_flow()
 
-    def fire_due_timers_flow(self) -> Flow:
+    def fire_due_timers_flow(self) -> Flow[int]:
         # one at a time: delivering a timeout commits a CAS write on the execution, and two
         # timers of the same execution (nested composites) must not race
         fired = 0
@@ -308,7 +311,7 @@ class DurableLogic(_DefinitionLookup):
         return fired
 
     # --- control plane ------------------------------------------------------
-    def cancel_flow(self, execution_id: str, reason: Optional[dict] = None) -> Flow:
+    def cancel_flow(self, execution_id: str, reason: Optional[dict[str, Any]] = None) -> Flow[Execution]:
         exe = yield from store("load", execution_id)
         if exe is None:
             raise KeyError(execution_id)
@@ -317,22 +320,24 @@ class DurableLogic(_DefinitionLookup):
         yield from driver._flush_flow()  # deliver the injected Cancel inline (runs the cleanup)
         return (yield from self._loaded_flow(execution_id))
 
-    def terminate_flow(self, execution_id: str) -> Flow:
+    def terminate_flow(self, execution_id: str) -> Flow[Execution]:
         yield from control.terminate_flow(execution_id, clock=self._clock)
         return (yield from self._loaded_flow(execution_id))
 
-    def suspend_flow(self, execution_id: str) -> Flow:
+    def suspend_flow(self, execution_id: str) -> Flow[Execution]:
         yield from control.suspend_flow(execution_id, clock=self._clock)
         return (yield from self._loaded_flow(execution_id))
 
-    def resume_flow(self, execution_id: str) -> Flow:
+    def resume_flow(self, execution_id: str) -> Flow[Execution]:
         yield from control.resume_flow(execution_id, clock=self._clock)
         return (yield from self._loaded_flow(execution_id))
 
-    def purge_flow(self, execution_id: str, archive: Optional[Callable[[dict], Any]] = None) -> Flow:
+    def purge_flow(
+        self, execution_id: str, archive: Optional[Callable[[dict[str, Any]], Any]] = None
+    ) -> Flow[bool]:
         return (yield from control.purge_flow(execution_id, archive=archive))
 
-    def redrive_flow(self, execution_id: str, target_path: str) -> Flow:
+    def redrive_flow(self, execution_id: str, target_path: str) -> Flow[Execution]:
         exe = yield from store("load", execution_id)
         if exe is None:
             raise KeyError(execution_id)
@@ -355,8 +360,8 @@ class SenderLogic(_DefinitionLookup):
         shares_store_transaction: bool = False,
         *,
         action_modules: Iterable[str] = (),
-        actions: Optional[dict] = None,
-        guards: Optional[dict] = None,
+        actions: Optional[dict[str, Any]] = None,
+        guards: Optional[dict[str, Any]] = None,
     ) -> None:
         """`shares_store_transaction`: the transport writes in the store's transaction (see
         `Transport`), so a failed `Start` publish reaches the caller."""
@@ -383,12 +388,12 @@ class SenderLogic(_DefinitionLookup):
     def create_flow(
         self,
         definition_id: str,
-        context: Optional[dict] = None,
+        context: Optional[dict[str, Any]] = None,
         execution_id: Optional[str] = None,
         priority: int = 0,
         start_on_create: bool = True,
         version: Optional[int] = None,
-    ) -> Flow:
+    ) -> Flow[Execution]:
         if execution_id is not None and (yield from store("load", execution_id)) is not None:
             from harel.engine.store import ExecutionAlreadyExists
 
@@ -418,7 +423,9 @@ class SenderLogic(_DefinitionLookup):
             yield from store("save", exe)
         return exe
 
-    def _persist_start_flow(self, exe: Execution, data: Optional[dict] = None, *, cause: str) -> Flow:
+    def _persist_start_flow(
+        self, exe: Execution, data: Optional[dict[str, Any]] = None, *, cause: str
+    ) -> Flow:
         """Commit `exe`'s `Start` into the durable outbox, in the same atomic write as `exe`
         itself, then publish just that entry and ack it. Not the generic relay, which would
         drain every pending entry fleet-wide. A failed publish or ack doesn't raise: the
@@ -463,7 +470,7 @@ class SenderLogic(_DefinitionLookup):
                 exc_info=True,
             )
 
-    def start_flow(self, execution_id: str, data: Optional[dict] = None) -> Flow:
+    def start_flow(self, execution_id: str, data: Optional[dict[str, Any]] = None) -> Flow:
         exe = yield from store("load", execution_id)
         if exe is None:
             raise KeyError(execution_id)
@@ -498,7 +505,7 @@ class SenderLogic(_DefinitionLookup):
             raise KeyError(execution_id)
         return self._transport_logic((yield from self._defn_flow(exe))), exe
 
-    def cancel_flow(self, execution_id: str, reason: Optional[dict] = None) -> Flow:
+    def cancel_flow(self, execution_id: str, reason: Optional[dict[str, Any]] = None) -> Flow:
         logic, exe = yield from self._logic_for_flow(execution_id)
         yield from control.cancel_flow(logic.defn, execution_id, reason=reason, clock=self._clock)
         yield from logic._flush_flow(primary={execution_id: exe})
@@ -512,7 +519,9 @@ class SenderLogic(_DefinitionLookup):
     def resume_flow(self, execution_id: str) -> Flow:
         yield from control.resume_flow(execution_id, clock=self._clock)
 
-    def purge_flow(self, execution_id: str, archive: Optional[Callable[[dict], Any]] = None) -> Flow:
+    def purge_flow(
+        self, execution_id: str, archive: Optional[Callable[[dict[str, Any]], Any]] = None
+    ) -> Flow[bool]:
         return (yield from control.purge_flow(execution_id, archive=archive))
 
     def redrive_flow(self, execution_id: str, target_path: str) -> Flow:
@@ -572,8 +581,8 @@ class WorkerLogic(_DefinitionLookup):
         machines: Optional[Iterable[str]] = None,
         heartbeat: float = 10.0,
         action_modules: Iterable[str] = (),
-        actions: Optional[dict] = None,
-        guards: Optional[dict] = None,
+        actions: Optional[dict[str, Any]] = None,
+        guards: Optional[dict[str, Any]] = None,
     ) -> None:
         """`machines`, when given, are the only machines this worker claims work for — the
         executions whose tree started from one of them (their `routing_key`); None claims all.
@@ -641,7 +650,7 @@ class WorkerLogic(_DefinitionLookup):
         processed = exe is not None and (yield from store("is_processed", execution_id, event_id))
         return exe, processed
 
-    def handle_flow(self, lease, combined_load: bool) -> Flow:
+    def handle_flow(self, lease: Lease, combined_load: bool) -> Flow[bool]:
         exe, processed = yield from self._load_for_event_flow(lease.group_id, lease.event.id, combined_load)
         if exe is None or processed:
             yield from transport("ack", lease)
@@ -680,7 +689,7 @@ class WorkerLogic(_DefinitionLookup):
         yield from transport("ack", lease)
         return True
 
-    def claim_flow(self) -> Flow:
+    def claim_flow(self) -> Flow[Optional[Lease]]:
         """Claim one message, applying the high_ratio/priority_threshold policy: with
         high_ratio>0, try priority>=threshold first, falling back to any priority so the
         worker isn't idle when no high-priority work is available. A worker given `machines`
@@ -688,21 +697,22 @@ class WorkerLogic(_DefinitionLookup):
         # an unfiltered worker claims as before, so a transport without routing still serves it
         routed = {"routing_keys": self.machines} if self.machines is not None else {}
         if self.high_ratio > 0 and random.random() < self.high_ratio:
-            lease = yield from transport(
+            lease: Optional[Lease] = yield from transport(
                 "claim", self.worker_id, self.visibility, self.priority_threshold, **routed
             )
             if lease is not None:
                 return lease
-        return (yield from transport("claim", self.worker_id, self.visibility, **routed))
+        lease = yield from transport("claim", self.worker_id, self.visibility, **routed)
+        return lease
 
-    def step_flow(self, combined_load: bool) -> Flow:
+    def step_flow(self, combined_load: bool) -> Flow[bool]:
         """Process at most one message. Returns False if nothing was claimable."""
         lease = yield from self.claim_flow()
         if lease is None:
             return False
         return (yield from self.handle_flow(lease, combined_load))
 
-    def fire_due_timers_flow(self) -> Flow:
+    def fire_due_timers_flow(self) -> Flow[int]:
         due = yield from store("due_timers", self._clock())
         if not due:
             return 0

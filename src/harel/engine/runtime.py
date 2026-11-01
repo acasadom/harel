@@ -14,29 +14,45 @@ from __future__ import annotations
 import logging
 import time
 from importlib import import_module
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional, TypeVar
 
 from harel import engine
 from harel.definition.events import with_defaults
-from harel.definition.model import ActionRef, Definition
+from harel.definition.model import ActionRef, Definition, Node
 from harel.engine.execution import Execution, Status, stamp
 from harel.engine.resolve import ResolveError
-from harel.engine.store import DictStore, ExecutionStore, Step, TimerOp
+from harel.engine.store import DictStore, ExecutionStore, SpawnEntry, Step, TimerOp
 from harel.spec.states import Event
+
+if TYPE_CHECKING:
+    from harel.engine.aio.driver import AsyncDriver
+    from harel.engine.driving import _InlineDriver
 
 # events the parent Execution handles itself (not broadcast to its regions). A `Timeout` is
 # addressed to the Execution whose state armed the timer — a fork's own `timeout` included.
+T = TypeVar("T")
+
+# what driving one event produced: emits, timer ops, spawns, the actions run, the values `set` wrote
+Drive = tuple[
+    list[tuple[Optional[str], Event]],
+    list[TimerOp],
+    list[tuple[str, str, dict[str, Any]]],
+    list[str],
+    dict[str, Any],
+]
+
 _CONTROL = {"Start", "Reset", "Cancel", "SetState", "Finished", "Timeout"}
 
 logger = logging.getLogger(__name__)
 
 
-def _resolve(action: ActionRef):
+def _resolve(action: ActionRef) -> Callable[..., Any]:
     fn = action.function
     if callable(fn):
         return fn
     module_name, name = fn.rsplit(".", 1)
-    return getattr(import_module(module_name, action.package), name)
+    resolved: Callable[..., Any] = getattr(import_module(module_name, action.package), name)
+    return resolved
 
 
 def _action_name(action: ActionRef) -> str:
@@ -51,8 +67,8 @@ def _trace_step(
     exe: Execution,
     actions: list[str],
     ts: float,
-    assigned: Optional[dict] = None,
-) -> dict:
+    assigned: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
     """Build one execution-trace step: what drove the event, the transition, the actions that
     ran, the context values a `set` wrote (`assigned`, only when there were any — the stated
     reason for those changes), and the resulting context (`context_out` only — the monitor
@@ -97,7 +113,7 @@ class _Proxy:
     to dedupe their side effect; harel itself records nothing (a harel-side record
     would roll back with the failed commit — see `harel.idempotency`)."""
 
-    def __init__(self, context: dict) -> None:
+    def __init__(self, context: dict[str, Any]) -> None:
         self.execution_ctx = context
         self.idempotency_key: Optional[str] = None
 
@@ -140,7 +156,7 @@ class _SyncDriver:
         """The object passed to `exe`'s actions (must expose `execution_ctx`)."""
         return _Proxy(exe.context)
 
-    def _before_action(self, exe: Execution, node) -> None:
+    def _before_action(self, exe: Execution, node: Node) -> None:
         """Called just before an action of `exe` runs (e.g. to reflect state)."""
 
     def _on_action_error(self, exe: Execution, exc: Exception) -> None:
@@ -174,7 +190,7 @@ class _SyncDriver:
         )
 
     def _run(
-        self, exe: Execution, gen, event_id: Optional[str] = None, event: Optional[Event] = None
+        self, exe: Execution, gen: engine.Step, event_id: Optional[str] = None, event: Optional[Event] = None
     ) -> None:
         """Drive `exe` to quiescence for one event, then atomically checkpoint it,
         enqueue its emitted events to the outbox, and record `event_id` as handled
@@ -212,7 +228,7 @@ class _SyncDriver:
 
     def _expression_error(
         self, exe: Execution, exc: Exception, original_exc: Optional[Exception], keys: _ActionKeys
-    ):
+    ) -> Drive:
         """The engine couldn't evaluate a model expression (a `set`): routed exactly like an
         action error — to an `on error` in scope (`_error` + the error event carry it),
         else the runner's policy. It is raised before the transition leaves any state, so
@@ -232,17 +248,15 @@ class _SyncDriver:
     def _drive(
         self,
         exe: Execution,
-        gen,
+        gen: engine.Step,
         original_exc: Optional[Exception] = None,
         keys: Optional[_ActionKeys] = None,
-    ) -> tuple[
-        list[tuple[Optional[str], Event]], list[TimerOp], list[tuple[str, str, dict]], list[str], dict
-    ]:
+    ) -> Drive:
         emits: list[tuple[Optional[str], Event]] = []
         timer_ops: list[TimerOp] = []
-        spawns: list[tuple[str, str, dict]] = []
+        spawns: list[tuple[str, str, dict[str, Any]]] = []
         actions: list[str] = []
-        assigned: dict = {}  # context values a `set` wrote this step (for the trace)
+        assigned: dict[str, Any] = {}  # context values a `set` wrote this step (for the trace)
         proxy = self._proxy(exe)
         if keys is None:
             keys = _ActionKeys(exe.id, "start")
@@ -300,13 +314,9 @@ class _SyncDriver:
                     emits.append((effect.to, effect.event))
                     effect = gen.send(None)
                 elif isinstance(effect, engine.ScheduleTimer):
-                    # delay is either literal or read from context (a dynamic/backoff
-                    # value the state's on_enter just computed, run above this effect)
-                    delay = (
-                        effect.delay
-                        if effect.delay is not None
-                        else float(exe.context.get(effect.context_key, 0.0))
-                    )
+                    # the delay is literal or read from context (a dynamic/backoff value the
+                    # state's on_enter just computed, run above this effect)
+                    delay = effect.seconds(exe.context)
                     fire_at = self._clock() + delay
                     timer_ops.append(TimerOp("schedule", effect.path, fire_at))
                     effect = gen.send(fire_at)
@@ -324,7 +334,7 @@ class _SyncDriver:
             return self._expression_error(exe, exc, original_exc, keys)
         return emits, timer_ops, spawns, actions, assigned
 
-    def _create_spawn(self, entry) -> None:
+    def _create_spawn(self, entry: SpawnEntry) -> None:
         """Create + start one pending child Execution, idempotently: if the child
         already exists (a crash-and-retry re-runs the fork), skip — its progress is
         kept. The child's own emits (e.g. an immediate `Finished`) go to the outbox.
@@ -491,8 +501,8 @@ class Driver:
         self._definitions = definitions
         self.resolve_machine = resolve_machine
         self.execution = execution
-        self._inline: Optional[Any] = None  # a `driving._InlineDriver`
-        self._async: Any = None
+        self._inline: Optional[_InlineDriver] = None
+        self._async: Optional[AsyncDriver] = None
         if execution == "inline":
             self._inline = _InlineDriver(
                 defn, store if store is not None else DictStore(), clock, definitions, resolve_machine, trace
@@ -501,10 +511,17 @@ class Driver:
             self._async = self._portal_build(store, defn, clock, definitions, resolve_machine, trace)
 
     @staticmethod
-    def _portal_build(store, defn, clock, definitions, resolve_machine, trace=False):
+    def _portal_build(
+        store: Optional[ExecutionStore],
+        defn: Definition,
+        clock: Callable[[], float],
+        definitions: Optional[dict[str, Definition]],
+        resolve_machine: Optional[Callable[[str], Definition]],
+        trace: bool = False,
+    ) -> AsyncDriver:
         from harel.engine.aio import facade
 
-        async def build():
+        async def build() -> AsyncDriver:
             from harel.engine.aio.driver import AsyncDriver
             from harel.engine.aio_store import AsyncDictStore
 
@@ -513,7 +530,12 @@ class Driver:
 
         return facade.run(build)
 
-    def _bridge(self, fn: Callable[..., Any], *args: Any) -> Any:
+    @property
+    def _background(self) -> AsyncDriver:
+        assert self._async is not None  # built for `execution="background"`
+        return self._async
+
+    def _bridge(self, fn: Callable[..., Awaitable[T]], *args: Any) -> T:
         from harel.engine.aio import facade
 
         return facade.run(fn, *args)
@@ -522,32 +544,33 @@ class Driver:
         if self._inline is not None:
             self._inline.serve(self._inline.store_flow("save", exe))
             return
-        self._bridge(self._async.store.save, exe)
+        self._bridge(self._background.store.save, exe)
 
     def get(self, execution_id: str) -> Optional[Execution]:
         if self._inline is not None:
-            return self._inline.serve(self._inline.store_flow("load", execution_id))
-        return self._bridge(self._async.store.load, execution_id)
+            loaded: Optional[Execution] = self._inline.serve(self._inline.store_flow("load", execution_id))
+            return loaded
+        return self._bridge(self._background.store.load, execution_id)
 
     def start(self, exe: Execution) -> None:
         if self._inline is not None:
             self._inline.serve(self._inline.start_flow(exe))
             return
-        self._bridge(self._async.start, exe)
+        self._bridge(self._background.start, exe)
 
     def inject(self, exe: Execution, event: Event) -> None:
         if self._inline is not None:
             self._inline.serve(self._inline.inject_flow(exe, event))
             return
-        self._bridge(self._async.inject, exe, event)
+        self._bridge(self._background.inject, exe, event)
 
     def recover(self) -> None:
         if self._inline is not None:
             self._inline.serve(self._inline._flush_flow())
             return
-        self._bridge(self._async.recover)
+        self._bridge(self._background.recover)
 
     def fire_due_timers(self) -> int:
         if self._inline is not None:
             return self._inline.serve(self._inline.fire_due_timers_flow())
-        return self._bridge(self._async.fire_due_timers)
+        return self._bridge(self._background.fire_due_timers)

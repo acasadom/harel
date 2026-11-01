@@ -17,13 +17,13 @@ from typing import Any, Callable, Iterable, Optional
 
 from harel.definition.model import Definition
 from harel.engine.aio.driver import _AsyncRuntimeDriver
-from harel.engine.distributed import _resolve_machine
 from harel.engine.driving import TransportDriverLogic
 from harel.engine.execution import Execution
-from harel.engine.flow import Flow, run_async
+from harel.engine.flow import Flow, T, run_async
 from harel.engine.hosting import (
     SenderLogic,
     WorkerLogic,
+    _resolve_machine,
     log_handling_failed,
     log_loop_step_failed,
     log_nack_failed,
@@ -86,8 +86,8 @@ class AsyncWorker(WorkerLogic):
         machines: Optional[Iterable[str]] = None,
         heartbeat: float = 10.0,
         action_modules: Iterable[str] = (),
-        actions: Optional[dict] = None,
-        guards: Optional[dict] = None,
+        actions: Optional[dict[str, Any]] = None,
+        guards: Optional[dict[str, Any]] = None,
     ) -> None:
         super().__init__(
             definitions,
@@ -109,10 +109,10 @@ class AsyncWorker(WorkerLogic):
         self.transport = transport
         self.concurrency = concurrency
 
-    async def _serve(self, flow: Flow) -> Any:
+    async def _serve(self, flow: Flow[T]) -> T:
         return await run_async(flow, {"store": self.store, "transport": self.transport})
 
-    async def _handle(self, lease) -> bool:
+    async def _handle(self, lease: Lease) -> bool:
         return await self._serve(
             self.handle_flow(lease, combined_load=getattr(self.store, "load_for_event", None) is not None)
         )
@@ -143,9 +143,9 @@ class AsyncWorker(WorkerLogic):
         seconds: nothing stops it but `stop`. It records the worker's heartbeat when it starts
         and every `heartbeat` seconds, and removes it when it stops."""
         sem = asyncio.Semaphore(self.concurrency)
-        pending: set[asyncio.Task] = set()
+        pending: set[asyncio.Task[Any]] = set()
 
-        async def _run_one(lease) -> None:
+        async def _run_one(lease: Lease) -> None:
             try:
                 await self._handle(lease)
             except Exception:
@@ -229,8 +229,8 @@ class AsyncDistributedRunner(SenderLogic):
         trace: bool = False,
         *,
         action_modules: Iterable[str] = (),
-        actions: Optional[dict] = None,
-        guards: Optional[dict] = None,
+        actions: Optional[dict[str, Any]] = None,
+        guards: Optional[dict[str, Any]] = None,
     ) -> None:
         super().__init__(
             definitions,
@@ -245,7 +245,7 @@ class AsyncDistributedRunner(SenderLogic):
         self.store = store
         self.transport = transport
 
-    async def _serve(self, flow: Flow) -> Any:
+    async def _serve(self, flow: Flow[T]) -> T:
         return await run_async(flow, {"store": self.store, "transport": self.transport})
 
     def _transport_driver(self, defn: Definition) -> AsyncTransportDriver:
@@ -264,7 +264,7 @@ class AsyncDistributedRunner(SenderLogic):
     async def create(
         self,
         definition_id: str,
-        context: Optional[dict] = None,
+        context: Optional[dict[str, Any]] = None,
         execution_id: Optional[str] = None,
         priority: int = 0,
         start_on_create: bool = True,
@@ -291,7 +291,7 @@ class AsyncDistributedRunner(SenderLogic):
             self.create_flow(definition_id, context, execution_id, priority, start_on_create, version)
         )
 
-    async def start(self, execution_id: str, data: Optional[dict] = None) -> None:
+    async def start(self, execution_id: str, data: Optional[dict[str, Any]] = None) -> None:
         """Publish a `Start` for `execution_id` — a worker claims it and runs the start
         sequence (its actions run there, not on this caller). A no-op, with a warning, if it
         has already started: the engine only acts on a `Start` while `status` is `PENDING`,
@@ -351,7 +351,7 @@ class AsyncDistributedRunner(SenderLogic):
             raise KeyError(execution_id)
         return self._transport_driver(await self._serve(self._defn_flow(exe))), exe
 
-    async def cancel(self, execution_id: str, *, reason: Optional[dict] = None) -> None:
+    async def cancel(self, execution_id: str, *, reason: Optional[dict[str, Any]] = None) -> None:
         await self._serve(self.cancel_flow(execution_id, reason))
 
     async def terminate(self, execution_id: str) -> None:
@@ -363,7 +363,9 @@ class AsyncDistributedRunner(SenderLogic):
     async def resume(self, execution_id: str) -> None:
         await self._serve(self.resume_flow(execution_id))
 
-    async def purge(self, execution_id: str, *, archive: Optional[Callable[[dict], Any]] = None) -> bool:
+    async def purge(
+        self, execution_id: str, *, archive: Optional[Callable[[dict[str, Any]], Any]] = None
+    ) -> bool:
         """Permanently delete a finished execution tree, archiving it first if `archive`
         is given — see `control.purge`. False if it no longer exists."""
         return await self._serve(self.purge_flow(execution_id, archive))

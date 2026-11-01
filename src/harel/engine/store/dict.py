@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.store._base import (
@@ -34,7 +34,7 @@ class DictStore:
         self._processed: set[tuple[str, str]] = set()
         self._timers: dict[tuple[str, str], float] = {}  # (execution_id, path) -> fire_at
         self._spawns: list[SpawnEntry] = []
-        self._trace: dict[str, list[dict]] = {}  # execution_id -> ordered trace steps (capped ring)
+        self._trace: dict[str, list[dict[str, Any]]] = {}  # execution_id -> ordered trace steps (capped ring)
         self._trace_idx: dict[str, int] = {}  # execution_id -> next monotonic step index
         self.trace_max = DEFAULT_TRACE_MAX
         self._seq = 0
@@ -49,7 +49,7 @@ class DictStore:
     # The opt-in execution timeline: the Driver passes one step per event to `commit`,
     # which records it here (see `_record_trace`). `append_trace` is the demo/test seam.
 
-    def _record_trace(self, execution_id: str, entry: dict) -> None:
+    def _record_trace(self, execution_id: str, entry: dict[str, Any]) -> None:
         idx = self._trace_idx.get(execution_id, 0)
         self._trace_idx[execution_id] = idx + 1
         steps = self._trace.setdefault(execution_id, [])
@@ -59,10 +59,10 @@ class DictStore:
         if self.trace_max and len(steps) > self.trace_max:  # ring: keep only the last N
             del steps[: len(steps) - self.trace_max]
 
-    def append_trace(self, execution_id: str, entry: dict) -> None:
+    def append_trace(self, execution_id: str, entry: dict[str, Any]) -> None:
         self._record_trace(execution_id, entry)
 
-    def read_trace(self, execution_id: str) -> list[dict]:
+    def read_trace(self, execution_id: str) -> list[dict[str, Any]]:
         return list(self._trace.get(execution_id, []))
 
     def load(self, execution_id: str) -> Optional[Execution]:
@@ -105,8 +105,8 @@ class DictStore:
         emits: list[tuple[Optional[str], Event]],
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
-        spawns: tuple[tuple[str, str, dict], ...] = (),
-        trace: Optional[dict] = None,
+        spawns: tuple[tuple[str, str, dict[str, Any]], ...] = (),
+        trace: Optional[dict[str, Any]] = None,
         step: Optional[Step] = None,
     ) -> list[int]:
         self.save(exe)  # CAS first: raises before any emit is enqueued

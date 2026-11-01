@@ -14,10 +14,7 @@ is **UML semantics**: each entered/exited level runs its *own* enter/exit hook
 Orthogonal (Phase 3) is model (i): entering an AND-state forks one
 child `Execution` per region (`SpawnChildren`); the parent stays on the
 orthogonal node and only transitions out once every region reports `Finished`
-(the join, gated in `_drain`). The `EventFilter` operator table matches the
-legacy one except the legacy `lt`==`eq` bug, which is fixed here (`lt` is real
-less-than). Composable filters (all/any/not) and missing-field semantics are
-still deferred to the filters phase.
+(the join, gated in `_drain`).
 """
 
 from __future__ import annotations
@@ -26,16 +23,20 @@ import copy
 import operator
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Generator, Optional, Union
+from typing import Any, Callable, Generator, Optional, Union
 
 from harel.definition.events import value_fits, with_defaults
 from harel.definition.model import (
     ActionRef,
+    Assign,
     Definition,
     EventFilter,
+    Expr,
     Node,
     NodeKind,
+    Predicate,
     Selector,
+    Transition,
     chain,
     is_descendant,
     lca,
@@ -81,7 +82,7 @@ class ChildSpec:
 
     child_id: str
     root_path: str
-    context: dict = field(default_factory=dict)
+    context: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -89,7 +90,7 @@ class SpawnChildren:
     """Deferred effect: the runner creates and starts one child Execution per
     spec, wiring each child's `parent_id`/`child_id` back to this Execution."""
 
-    specs: list
+    specs: list[Any]
 
 
 @dataclass
@@ -105,6 +106,13 @@ class ScheduleTimer:
     delay: Optional[float] = None
     context_key: Optional[str] = None
 
+    def seconds(self, context: dict[str, Any]) -> float:
+        """The delay to arm: the literal one, else the value `context_key` names in `context`
+        (0 when it holds none)."""
+        if self.delay is not None:
+            return self.delay
+        return float(context.get(self.context_key, 0.0)) if self.context_key is not None else 0.0
+
 
 @dataclass
 class CancelTimer:
@@ -119,7 +127,7 @@ class Assigned:
     """Deferred, informational effect: the context values a transition's `set` just wrote
     (the runner records them in the execution trace — the reason the context changed)."""
 
-    values: dict
+    values: dict[str, Any]
 
 
 class DefinitionChanged(RuntimeError):
@@ -165,7 +173,7 @@ Effect = Union[RunAction, RunSelector, Emit, SpawnChildren, ScheduleTimer, Cance
 @dataclass
 class ActionResult:
     value: Any = None
-    emitted: list = field(default_factory=list)
+    emitted: list[Any] = field(default_factory=list)
 
 
 # A step generator yields effects and is sent back an ActionResult (or None).
@@ -173,8 +181,8 @@ class ActionResult:
 # fire time for a `ScheduleTimer`, None for the other deferred effects
 Step = Generator[Effect, Union[ActionResult, float, None], None]
 
-_OP = {
-    "lt": operator.lt,  # legacy had this mapped to operator.eq (a bug); fixed here
+_OP: dict[str, Callable[[Any, Any], Any]] = {
+    "lt": operator.lt,
     "le": operator.le,
     "eq": operator.eq,
     "ne": operator.ne,
@@ -195,18 +203,20 @@ def _compare(op: str, actual: Any, expected: Any) -> bool:
         return False
 
 
-def _eval(pred, scopes: dict) -> bool:
+def _eval(pred: Predicate, scopes: dict[str, Any]) -> bool:
     """Evaluate a composable predicate tree. Each leaf reads its field from the namespace
     it names in `scopes` (`event` -> the event's data, `context` -> the execution context),
     and compares it with its literal or with the field its `value_ref` names. A leaf on a
     field absent there — on either side — or whose values can't be compared, fails (it
     cannot be evaluated) — see `_compare`."""
     if pred.node == "leaf":
+        assert pred.field is not None and pred.op is not None  # a leaf always has both
         data = scopes[pred.source]
         if pred.field not in data:
             return False
         if pred.value_ref is None:
             return _compare(pred.op, data[pred.field], pred.value)
+        assert pred.value_ref.source is not None and pred.value_ref.field is not None  # a `ref`
         other = scopes[pred.value_ref.source]
         return pred.value_ref.field in other and _compare(
             pred.op, data[pred.field], other[pred.value_ref.field]
@@ -220,7 +230,7 @@ def _eval(pred, scopes: dict) -> bool:
     raise ValueError(f"unknown predicate node {pred.node!r}")
 
 
-def _matches(ef: EventFilter, event: Event, context: Optional[dict] = None) -> bool:
+def _matches(ef: EventFilter, event: Event, context: Optional[dict[str, Any]] = None) -> bool:
     if event.kind not in [k.strip() for k in ef.kind.split("|")]:
         return False
     for key, value in ef.predicates.items():
@@ -259,8 +269,12 @@ def _run(node: Node, hook: Hook, event: Optional[Event]) -> Step:
 
 # --- transition resolution by scope (faithful: innermost-first + fallback) ----
 
+# which transitions a lookup accepts, and the (scope, transition) it found
+TransitionTest = Callable[[Transition], bool]
+Match = Optional[tuple[Node, Transition]]
 
-def _nested(scope: Node, rel: list[Node], predicate, allow_parent: bool):
+
+def _nested(scope: Node, rel: list[Node], predicate: TransitionTest, allow_parent: bool) -> Match:
     """Resolve a transition for `rel` (the chain of nodes from a child of `scope`
     down to the active node). Innermost composite wins; outer scopes are a
     fallback only when `allow_parent` (event transitions); automatic lookups pass
@@ -278,7 +292,9 @@ def _nested(scope: Node, rel: list[Node], predicate, allow_parent: bool):
     return None
 
 
-def _resolve_between(defn: Definition, root: Node, active: Node, predicate, allow_parent: bool):
+def _resolve_between(
+    defn: Definition, root: Node, active: Node, predicate: TransitionTest, allow_parent: bool
+) -> Match:
     """Core of `_resolve`, taking `root`/`active` as plain `Node`s instead of
     reading `exe.root_path`/`exe.active_path` — so a check can be evaluated at an
     arbitrary node without pointing a possibly-shared `Execution` there first
@@ -293,14 +309,14 @@ def _resolve_between(defn: Definition, root: Node, active: Node, predicate, allo
     return _nested(root, rel, predicate, allow_parent)
 
 
-def _resolve(defn: Definition, exe: Execution, predicate, allow_parent: bool):
+def _resolve(defn: Definition, exe: Execution, predicate: TransitionTest, allow_parent: bool) -> Match:
     root = defn.index[exe.root_path]
     assert exe.active_path is not None
     active = defn.index[exe.active_path]
     return _resolve_between(defn, root, active, predicate, allow_parent)
 
 
-def _event_pred(event: Event, context: dict):
+def _event_pred(event: Event, context: dict[str, Any]) -> TransitionTest:
     """Matches a transition triggered by `event` whose guard holds, over the event's data
     and the execution `context` (read, never written, while resolving) — and, for a
     `choose`, that it has somewhere to go."""
@@ -311,20 +327,22 @@ def _event_pred(event: Event, context: dict):
     )
 
 
-def _choice_index(t, event_data: dict, context: dict) -> Optional[int]:
+def _choice_index(t: Transition, event_data: dict[str, Any], context: dict[str, Any]) -> Optional[int]:
     """The index of the first branch of a `choose` whose guard holds (None: none does)."""
+    assert t.choice is not None
     scopes = {"event": event_data, "context": context}
     return next((i for i, (guard, _) in enumerate(t.choice.branches) if _eval(guard, scopes)), None)
 
 
-def _choice_branch(t, event_data: dict, context: dict):
+def _choice_branch(t: Transition, event_data: dict[str, Any], context: dict[str, Any]) -> Optional[Node]:
     """The target a `choose` picks: its first branch whose guard holds, else its `default`
     (None if neither — the transition then doesn't fire)."""
+    assert t.choice is not None
     i = _choice_index(t, event_data, context)
     return t.choice.branches[i][1] if i is not None else t.choice.default
 
 
-def _effect(t, event: Optional[Event], context: dict) -> tuple:
+def _effect(t: Transition, event: Optional[Event], context: dict[str, Any]) -> tuple[Assign, ...]:
     """A transition's assignments: its own `set`, then — for a `choose` — the `set` of the
     branch it takes (picked from the same event and context as its target, before either
     changes)."""
@@ -338,11 +356,11 @@ def _effect(t, event: Optional[Event], context: dict) -> tuple:
     return t.assignments + tuple(branch)
 
 
-def _choice_open(t, event_data: dict, context: dict) -> bool:
+def _choice_open(t: Transition, event_data: dict[str, Any], context: dict[str, Any]) -> bool:
     return t.choice is None or _choice_branch(t, event_data, context) is not None
 
 
-def _resolve_at(defn: Definition, path: str, predicate):
+def _resolve_at(defn: Definition, path: str, predicate: TransitionTest) -> Match:
     """Resolve a transition for a `Timeout` at `path`: anchored at the node that
     timed out and **bubbling up** through its ancestors (the source is that node or
     an ancestor — never an inner state). Walking from the timed-out node upward
@@ -360,16 +378,16 @@ def _resolve_at(defn: Definition, path: str, predicate):
     return None
 
 
-def _auto_pred_in(context: dict):
+def _auto_pred_in(context: dict[str, Any]) -> TransitionTest:
     """Matches an automatic transition; a `choose` only if it has somewhere to go."""
     return lambda t: _auto_pred(t) and _choice_open(t, {}, context)
 
 
-def _auto_pred(t) -> bool:
+def _auto_pred(t: Transition) -> bool:
     return t.event_filter is None
 
 
-def _any_pred(t) -> bool:
+def _any_pred(t: Transition) -> bool:
     return True
 
 
@@ -490,7 +508,7 @@ def has_cancel_handler(defn: Definition, exe: Execution, event: Event) -> bool:
     return _safe_teardown(defn, exe, event) is not None
 
 
-def _safe_teardown(defn: Definition, exe: Execution, event: Event):
+def _safe_teardown(defn: Definition, exe: Execution, event: Event) -> Match:
     """The `(scope, transition)` the active configuration would take for a teardown
     event (`Cancel`, `Expired`) — in scope, parent fallback, guard-aware — iff it lands
     directly on a sink (every branch of a selector, checked statically); else None."""
@@ -677,7 +695,7 @@ def _descend(defn: Definition, exe: Execution, node: Node, event: Optional[Event
 
 
 def _target_of(
-    defn: Definition, exe: Execution, scope: Node, t, event
+    defn: Definition, exe: Execution, scope: Node, t: Transition, event: Optional[Event]
 ) -> Generator[Effect, Optional[ActionResult], Node]:
     if t.selector is not None:
         assert exe.active_path is not None
@@ -696,20 +714,27 @@ def _target_of(
     return t.target
 
 
-_ARITH = {"+": operator.add, "-": operator.sub, "*": operator.mul, "/": operator.truediv}
+_ARITH: dict[str, Callable[[Any, Any], Any]] = {
+    "+": operator.add,
+    "-": operator.sub,
+    "*": operator.mul,
+    "/": operator.truediv,
+}
 
 
-def _value_of(expr, scopes: dict) -> Any:
+def _value_of(expr: Expr, scopes: dict[str, Any]) -> Any:
     """Evaluate an assignment's right-hand side (see `definition.model.Expr`). Unlike a
     guard — where "can't be evaluated" just means "doesn't hold" — an assignment has no
     such fallback, so every failure raises `ExpressionError`."""
     if expr.kind == "lit":
         return copy.deepcopy(expr.value)
     if expr.kind == "ref":
+        assert expr.source is not None and expr.field is not None
         data = scopes[expr.source]
         if expr.field not in data:
             raise ExpressionError(f"{expr.source}.{expr.field} is not set")
         return copy.deepcopy(data[expr.field])
+    assert expr.left is not None and expr.right is not None and expr.op is not None  # an `arith`
     left, right = _value_of(expr.left, scopes), _value_of(expr.right, scopes)
     for side in (left, right):
         if isinstance(side, bool) or not isinstance(side, (int, float)):
@@ -719,7 +744,9 @@ def _value_of(expr, scopes: dict) -> Any:
     return _ARITH[expr.op](left, right)
 
 
-def _evaluate(defn: Definition, exe: Execution, assignments: tuple, event: Optional[Event]) -> dict:
+def _evaluate(
+    defn: Definition, exe: Execution, assignments: tuple[Assign, ...], event: Optional[Event]
+) -> dict[str, Any]:
     """The values a transition's `set` writes, every right-hand side evaluated against the
     context and event as they are *before* any of them is applied (so one assignment
     doesn't see another's result), and each checked against the context schema."""
@@ -741,7 +768,11 @@ def _evaluate(defn: Definition, exe: Execution, assignments: tuple, event: Optio
 
 
 def _take(
-    defn: Definition, exe: Execution, target: Node, event: Optional[Event], assignments: tuple = ()
+    defn: Definition,
+    exe: Execution,
+    target: Node,
+    event: Optional[Event],
+    assignments: tuple[Assign, ...] = (),
 ) -> Step:
     """Take a transition with UML LCA semantics: run the **own** `on_exit` of each
     level from the active leaf up to lca(leaf, target) (innermost-first), then the
@@ -799,7 +830,7 @@ def _deferred_kinds(defn: Definition, exe: Execution) -> set[str]:
     return kinds
 
 
-def _next_deferred(defn: Definition, exe: Execution) -> Optional[tuple[Event, tuple]]:
+def _next_deferred(defn: Definition, exe: Execution) -> Optional[tuple[Event, tuple[Node, Transition]]]:
     """Pop the first deferred event (FIFO) that has a matching transition in the current
     configuration. Returns (event, (scope, transition)) so the caller can route without a
     second resolve; None if no deferred event is handleable yet."""
@@ -892,7 +923,7 @@ def _drain(defn: Definition, exe: Execution) -> Step:
                 # carrying its outcome + the `carry`-projected context (the region's
                 # "return value"). `Finished` is a system event with an opaque payload.
                 carried = {k: exe.context[k] for k in root.carry if k in exe.context}
-                data: dict = {"child_id": exe.child_id, "outcome": exe.outcome, **carried}
+                data: dict[str, Any] = {"child_id": exe.child_id, "outcome": exe.outcome, **carried}
                 if exe.deferred:
                     data["__deferred__"] = [e.model_dump() for e in exe.deferred]
                     exe.deferred.clear()

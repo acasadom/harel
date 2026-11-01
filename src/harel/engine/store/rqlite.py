@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, Status
 from harel.engine.schema import DEFAULT_PREFIX, Names, store_schema
@@ -93,19 +93,19 @@ class RqliteStore:
                 time.sleep(retry_delay)
         raise last if last is not None else RuntimeError("rqlite connect failed")
 
-    def _execute(self, statements: list, transaction: bool = False) -> list:
+    def _execute(self, statements: list[Any], transaction: bool = False) -> list[dict[str, Any]]:
         params = {"transaction": ""} if transaction else {}
         resp = self._session.post(
             f"{self._base}/db/execute", params=params, json=statements, timeout=self._timeout
         )
         resp.raise_for_status()
-        results = resp.json()["results"]
+        results: list[dict[str, Any]] = resp.json()["results"]
         for res in results:
             if "error" in res:
                 raise RuntimeError(f"rqlite execute error: {res['error']}")
         return results
 
-    def _query(self, sql: str, params: tuple) -> list:
+    def _query(self, sql: str, params: tuple[Any, ...]) -> list[Any]:
         resp = self._session.post(
             f"{self._base}/db/query", params={"level": "strong"}, json=[[sql, *params]], timeout=self._timeout
         )
@@ -142,8 +142,8 @@ class RqliteStore:
         emits: list[tuple[Optional[str], Event]],
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
-        spawns: tuple[tuple[str, str, dict], ...] = (),
-        trace: Optional[dict] = None,
+        spawns: tuple[tuple[str, str, dict[str, Any]], ...] = (),
+        trace: Optional[dict[str, Any]] = None,
         step: Optional[Step] = None,
     ) -> list[int]:
         old = exe.version
@@ -154,7 +154,7 @@ class RqliteStore:
         # other version updates only WHERE version=old — never an insert, so a stale copy of
         # a purged Execution can't recreate it. Every other write is guarded on the row
         # holding our `data`, so a CAS miss leaves the whole txn a no-op.
-        statements: list = [
+        statements: list[Any] = [
             [
                 f"INSERT OR IGNORE INTO {self._n.executions} (id, definition_id, data, version) VALUES (?, ?, ?, ?)",
                 exe.id,
@@ -279,7 +279,7 @@ class RqliteStore:
         )
         return bool(rows)
 
-    def append_trace(self, execution_id: str, entry: dict) -> None:
+    def append_trace(self, execution_id: str, entry: dict[str, Any]) -> None:
         """The demo/test seam (unguarded): append a step with idx = MAX+1, then cap."""
         self._execute(
             [
@@ -305,7 +305,7 @@ class RqliteStore:
                 ]
             )
 
-    def read_trace(self, execution_id: str) -> list[dict]:
+    def read_trace(self, execution_id: str) -> list[dict[str, Any]]:
         rows = self._query(
             f"SELECT idx, entry FROM {self._n.trace} WHERE execution_id = ? ORDER BY idx", (execution_id,)
         )
@@ -349,7 +349,7 @@ class RqliteStore:
         )
 
     def pending_work(self, execution_id: str) -> PendingWork:
-        def rows(template: str) -> list:
+        def rows(template: str) -> list[Any]:
             return self._query(self._n.sql(template), (execution_id,))
 
         return _pending_work(rows(_PENDING_TIMERS_SQL), rows(_PENDING_OUTBOX_SQL), rows(_PENDING_SPAWNS_SQL))
@@ -378,7 +378,7 @@ class RqliteStore:
 
     def purge(self, execution_id: str, expected_version: int) -> bool:
         results = self._execute(_purge_statements(self._n, execution_id, expected_version), transaction=True)
-        return results[0].get("rows_affected", 0) == 1
+        return int(results[0].get("rows_affected", 0)) == 1
 
     def publish_definition(self, record: DefinitionRecord) -> DefinitionRecord:
         self._execute(
@@ -404,7 +404,7 @@ class RqliteStore:
         self._session.close()
 
 
-def _purge_statements(names: Names, execution_id: str, expected_version: int) -> list:
+def _purge_statements(names: Names, execution_id: str, expected_version: int) -> list[Any]:
     """One transactional request (rqlite has no interactive transactions): the CAS delete,
     then every companion delete guarded on the Execution now being absent — so a version
     mismatch leaves the whole request a no-op, and an already-purged id is still swept."""

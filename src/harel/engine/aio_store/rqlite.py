@@ -84,19 +84,19 @@ class AsyncRqliteStore:
                 await anyio.sleep(retry_delay)
         raise last if last is not None else RuntimeError("rqlite connect failed")
 
-    async def _execute(self, statements: list, transaction: bool = False) -> list:
+    async def _execute(self, statements: list[Any], transaction: bool = False) -> list[dict[str, Any]]:
         params = {"transaction": ""} if transaction else {}
         resp = await self._client.post(
             f"{self._base}/db/execute", params=params, json=statements, timeout=self._timeout
         )
         resp.raise_for_status()
-        results = resp.json()["results"]
+        results: list[dict[str, Any]] = resp.json()["results"]
         for res in results:
             if "error" in res:
                 raise RuntimeError(f"rqlite execute error: {res['error']}")
         return results
 
-    async def _query(self, sql: str, params: tuple) -> list:
+    async def _query(self, sql: str, params: tuple[Any, ...]) -> list[Any]:
         resp = await self._client.post(
             f"{self._base}/db/query",
             params={"level": "strong"},
@@ -147,8 +147,8 @@ class AsyncRqliteStore:
         emits: list[tuple[Optional[str], Event]],
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
-        spawns: tuple[tuple[str, str, dict], ...] = (),
-        trace: Optional[dict] = None,
+        spawns: tuple[tuple[str, str, dict[str, Any]], ...] = (),
+        trace: Optional[dict[str, Any]] = None,
         step: Optional[Step] = None,
     ) -> list[int]:
         old = exe.version
@@ -156,7 +156,7 @@ class AsyncRqliteStore:
         new = exe.version
         data = exe.model_dump_json()
         # insert only a brand-new Execution, otherwise CAS-update — see RqliteStore.commit
-        statements: list = [
+        statements: list[Any] = [
             [
                 f"INSERT OR IGNORE INTO {self._n.executions} (id, definition_id, data, version) VALUES (?, ?, ?, ?)",
                 exe.id,
@@ -272,7 +272,7 @@ class AsyncRqliteStore:
         )
         return bool(rows)
 
-    async def append_trace(self, execution_id: str, entry: dict) -> None:
+    async def append_trace(self, execution_id: str, entry: dict[str, Any]) -> None:
         await self._execute(
             [
                 [
@@ -297,7 +297,7 @@ class AsyncRqliteStore:
                 ]
             )
 
-    async def read_trace(self, execution_id: str) -> list[dict]:
+    async def read_trace(self, execution_id: str) -> list[dict[str, Any]]:
         rows = await self._query(
             f"SELECT idx, entry FROM {self._n.trace} WHERE execution_id = ? ORDER BY idx", (execution_id,)
         )
@@ -339,7 +339,7 @@ class AsyncRqliteStore:
         )
 
     async def pending_work(self, execution_id: str) -> PendingWork:
-        async def rows(template: str) -> list:
+        async def rows(template: str) -> list[Any]:
             return await self._query(self._n.sql(template), (execution_id,))
 
         return _pending_work(
@@ -372,7 +372,7 @@ class AsyncRqliteStore:
         results = await self._execute(
             _purge_statements(self._n, execution_id, expected_version), transaction=True
         )
-        return results[0].get("rows_affected", 0) == 1
+        return int(results[0].get("rows_affected", 0)) == 1
 
     async def publish_definition(self, record: DefinitionRecord) -> DefinitionRecord:
         await self._execute(

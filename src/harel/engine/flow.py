@@ -25,10 +25,18 @@ import asyncio
 import functools
 import inspect
 from dataclasses import dataclass, field
-from typing import Any, Callable, Generator
+from typing import TYPE_CHECKING, Any, Callable, Generator, TypeVar, cast
 
-# a flow: yields requests, receives each result, returns its value
-Flow = Generator[Any, Any, Any]
+if TYPE_CHECKING:
+    # a bare `Flow` is a `Flow[Any]` (a TypeVar default is Python 3.13+, so only for the checker)
+    from typing_extensions import TypeVar as _TypeVar
+
+    T = _TypeVar("T", default=Any)
+else:
+    T = TypeVar("T")
+
+# a flow: yields requests, receives each result, returns its value (a `T`)
+Flow = Generator[Any, Any, T]
 
 
 @dataclass(frozen=True)
@@ -37,8 +45,8 @@ class Call:
 
     port: str
     method: str
-    args: tuple = ()
-    kwargs: dict = field(default_factory=dict)
+    args: tuple[Any, ...] = ()
+    kwargs: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -49,7 +57,7 @@ class CallAction:
     fn: Callable[..., Any]
     proxy: Any
     event: Any
-    inputs: dict
+    inputs: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -57,7 +65,7 @@ class Parallel:
     """Run independent sub-flows — concurrently if the interpreter can — and return their
     results, in order. They must not depend on each other's effects."""
 
-    flows: tuple
+    flows: tuple[Flow, ...]
 
 
 @dataclass(frozen=True)
@@ -73,7 +81,7 @@ def call(port: str, method: str, *args: Any, **kwargs: Any) -> Flow:
     return (yield Call(port, method, args, kwargs))
 
 
-def parallel(flows: list) -> Flow:
+def parallel(flows: list[Flow]) -> Flow:
     """`yield from parallel([...])`: run independent sub-flows; their results, in order."""
     if not flows:
         return []
@@ -81,7 +89,7 @@ def parallel(flows: list) -> Flow:
 
 
 # --- interpreters -------------------------------------------------------------------------
-async def run_async(flow: Flow, ports: dict[str, Any]) -> Any:
+async def run_async(flow: Flow[T], ports: dict[str, Any]) -> T:
     """Run `flow` with coroutines: `ports` hold async stores/transports."""
     try:
         request = next(flow)
@@ -93,7 +101,7 @@ async def run_async(flow: Flow, ports: dict[str, Any]) -> Any:
             else:
                 request = flow.send(result)
     except StopIteration as stop:
-        return stop.value
+        return cast(T, stop.value)
 
 
 async def _serve_async(request: Any, ports: dict[str, Any]) -> Any:
@@ -114,7 +122,7 @@ async def _serve_async(request: Any, ports: dict[str, Any]) -> Any:
     raise TypeError(f"a flow yielded {request!r}, which is not an IO request")
 
 
-def run_inline(flow: Flow, ports: dict[str, Any]) -> Any:
+def run_inline(flow: Flow[T], ports: dict[str, Any]) -> T:
     """Run `flow` in the caller's thread, without an event loop: `ports` hold sync
     stores/transports. A coroutine action (or `Await`) is refused — there is no loop to await
     it on."""
@@ -128,7 +136,7 @@ def run_inline(flow: Flow, ports: dict[str, Any]) -> Any:
             else:
                 request = flow.send(result)
     except StopIteration as stop:
-        return stop.value
+        return cast(T, stop.value)
 
 
 def _serve_inline(request: Any, ports: dict[str, Any]) -> Any:

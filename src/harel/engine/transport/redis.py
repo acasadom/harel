@@ -151,7 +151,7 @@ class RedisTransport:
         # the groups with messages, a bounded chunk per call (`_BACKLOG_LUA`): Redis serves the
         # other clients between them instead of being held for the whole scan
         cursor: str = "0"
-        chunks: list[list] = []
+        chunks: list[list[Any]] = []
         while True:
             reply = self._backlog_script(keys=[], args=[self._prefix, cursor, _BACKLOG_CHUNK])
             cursor, chunks = _text(reply[0]), [*chunks, reply[1:]]

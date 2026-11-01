@@ -82,7 +82,7 @@ class LibsqlStore:
         self.trace_max = DEFAULT_TRACE_MAX
         self._conn.commit()
 
-    def _write_trace(self, execution_id: str, entry: dict) -> None:
+    def _write_trace(self, execution_id: str, entry: dict[str, Any]) -> None:
         """Append one trace step WITHOUT committing (batches into commit's txn). Two statements:
         `idx` computed inline (MAX+1, monotonic) so no pre-read, then the ring cap. `read_trace`
         takes `index` from the `idx` column."""
@@ -98,11 +98,11 @@ class LibsqlStore:
                 (execution_id, execution_id, self.trace_max),
             )
 
-    def append_trace(self, execution_id: str, entry: dict) -> None:
+    def append_trace(self, execution_id: str, entry: dict[str, Any]) -> None:
         self._write_trace(execution_id, entry)
         self._conn.commit()
 
-    def read_trace(self, execution_id: str) -> list[dict]:
+    def read_trace(self, execution_id: str) -> list[dict[str, Any]]:
         rows = self._conn.execute(
             f"SELECT idx, entry FROM {self._n.trace} WHERE execution_id = ? ORDER BY idx", (execution_id,)
         ).fetchall()
@@ -175,8 +175,8 @@ class LibsqlStore:
         emits: list[tuple[Optional[str], Event]],
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
-        spawns: tuple[tuple[str, str, dict], ...] = (),
-        trace: Optional[dict] = None,
+        spawns: tuple[tuple[str, str, dict[str, Any]], ...] = (),
+        trace: Optional[dict[str, Any]] = None,
         step: Optional[Step] = None,
     ) -> list[int]:
         old = exe.version
@@ -263,8 +263,9 @@ class LibsqlStore:
         self._conn.commit()
 
     def pending_work(self, execution_id: str) -> PendingWork:
-        def rows(template: str) -> list:
-            return self._conn.execute(self._n.sql(template), (execution_id,)).fetchall()
+        def rows(template: str) -> list[Any]:
+            found: list[Any] = self._conn.execute(self._n.sql(template), (execution_id,)).fetchall()
+            return found
 
         return _pending_work(rows(_PENDING_TIMERS_SQL), rows(_PENDING_OUTBOX_SQL), rows(_PENDING_SPAWNS_SQL))
 

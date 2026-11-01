@@ -175,11 +175,11 @@ def _backlog(rows: Iterable[Any]) -> "Backlog":
     )
 
 
-def _mongo_backlog(per_group: Iterable[dict], locks: dict, now: float) -> "Backlog":
+def _mongo_backlog(per_group: Iterable[dict[str, Any]], locks: dict[str, Any], now: float) -> "Backlog":
     """A `Backlog` from the Mongo transport's messages counted per group (`_id`, `n`,
     `oldest`) and its group locks (`routing_key`, `token`, `available_at` — a group is held
     while a token sits on it and its time hasn't come)."""
-    rows: dict = {}
+    rows: dict[str, Any] = {}
     for g in per_group:
         lock = locks.get(g["_id"], {})
         row = rows.setdefault(lock.get("routing_key"), [0, 0, 0, None])
@@ -196,7 +196,7 @@ def _mongo_backlog(per_group: Iterable[dict], locks: dict, now: float) -> "Backl
 _COUNTS = ["ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible"]
 
 
-def _sqs_backlog(attrs: dict) -> "Backlog":
+def _sqs_backlog(attrs: dict[str, Any]) -> "Backlog":
     """The one-row `Backlog` of an SQS queue from its attributes (`_COUNTS`)."""
     waiting = int(attrs.get("ApproximateNumberOfMessages", 0))
     in_flight = int(attrs.get("ApproximateNumberOfMessagesNotVisible", 0))
@@ -204,7 +204,7 @@ def _sqs_backlog(attrs: dict) -> "Backlog":
     return Backlog(machines=[MachineBacklog(None, total)] if total else [], by_machine=False)
 
 
-def _routing_filter(routing_keys: Optional[Iterable[str]], column: str) -> tuple[str, tuple]:
+def _routing_filter(routing_keys: Optional[Iterable[str]], column: str) -> tuple[str, tuple[Any, ...]]:
     """The SQL condition (`AND ...`) and its params restricting a claim to `routing_keys`'
     groups — none when None."""
     if routing_keys is None:
@@ -217,7 +217,7 @@ def _routing_filter(routing_keys: Optional[Iterable[str]], column: str) -> tuple
 
 def _sqlite_claim(
     names: Names, min_priority: int, now: float, routing_keys: Optional[Iterable[str]]
-) -> tuple[str, tuple]:
+) -> tuple[str, tuple[Any, ...]]:
     """The SQLite-dialect claim statement and its params."""
     routing, keys = _routing_filter(routing_keys, "g.routing_key")
     sql = names.sql(_SQLITE_CLAIM_SQL.replace("{routing}", "{{routing}}")).replace("{routing}", routing)
@@ -304,12 +304,12 @@ def _text(v: Any) -> str:
     return v.decode() if isinstance(v, (bytes, bytearray)) else str(v)
 
 
-def _redis_backlog(chunks: list[list]) -> "Backlog":
+def _redis_backlog(chunks: list[list[Any]]) -> "Backlog":
     """A `Backlog` from the `_BACKLOG_LUA` replies of a whole scan (each without its cursor):
     the chunks' rows summed by routing key, the oldest the earliest. A group the scan returns
     twice (`HSCAN` may, when the hash grows while it runs) counts twice: the counts are a
     monitor's, read across several calls while the queue moves."""
-    rows: dict = {}
+    rows: dict[Optional[str], Any] = {}
     for flat in chunks:
         for i in range(0, len(flat), 5):
             key, messages, executions, held, oldest = (_text(v) for v in flat[i : i + 5])

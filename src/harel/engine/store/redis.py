@@ -98,8 +98,8 @@ class RedisStore:
         emits: list[tuple[Optional[str], Event]],
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
-        spawns: tuple[tuple[str, str, dict], ...] = (),
-        trace: Optional[dict] = None,
+        spawns: tuple[tuple[str, str, dict[str, Any]], ...] = (),
+        trace: Optional[dict[str, Any]] = None,
         step: Optional[Step] = None,
     ) -> list[int]:
         # fast path: an event that only advances state (no emits/spawns/timers/trace) commits
@@ -178,14 +178,14 @@ class RedisStore:
     def is_processed(self, execution_id: str, event_id: str) -> bool:
         return bool(self._r.sismember(self._k(f"processed:{execution_id}"), event_id))
 
-    def append_trace(self, execution_id: str, entry: dict) -> None:
+    def append_trace(self, execution_id: str, entry: dict[str, Any]) -> None:
         idx = int(self._r.incr(self._k(f"trace:seq:{execution_id}"))) - 1
         tkey = self._k(f"trace:{execution_id}")
         self._r.rpush(tkey, json.dumps({**entry, "index": entry.get("index", idx)}))
         if self.trace_max:
             self._r.ltrim(tkey, -self.trace_max, -1)
 
-    def read_trace(self, execution_id: str) -> list[dict]:
+    def read_trace(self, execution_id: str) -> list[dict[str, Any]]:
         return [json.loads(x) for x in self._r.lrange(self._k(f"trace:{execution_id}"), 0, -1)]
 
     def pending_spawns(self) -> list[SpawnEntry]:

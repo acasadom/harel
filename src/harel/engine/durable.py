@@ -23,13 +23,13 @@ a running event loop is refused with a clear error, in either mode).
 from __future__ import annotations
 
 import time
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional, cast
 
 from harel.definition.model import Definition
 from harel.engine.aio import facade
 from harel.engine.aio.durable import AsyncDurableRunner
 from harel.engine.execution import Execution
-from harel.engine.flow import Flow, run_inline
+from harel.engine.flow import Flow, T, run_inline
 from harel.engine.hosting import DurableLogic, check_execution
 from harel.engine.resolve import MachineResolver
 from harel.engine.store import ExecutionStore
@@ -43,7 +43,7 @@ class _InlineDurable(DurableLogic):
         super().__init__(*args, **kwargs)
         self._ports = {"store": store}
 
-    def serve(self, flow: Flow) -> Any:
+    def serve(self, flow: Flow[T]) -> T:
         facade._guard_no_running_loop()
         return run_inline(flow, self._ports)
 
@@ -60,8 +60,8 @@ class DurableRunner:
         execution: str = "background",
         on_action_error: str = "fail",
         action_modules: Iterable[str] = (),
-        actions: Optional[dict] = None,
-        guards: Optional[dict] = None,
+        actions: Optional[dict[str, Any]] = None,
+        guards: Optional[dict[str, Any]] = None,
     ) -> None:
         """`execution` is `"background"` or `"inline"` (see the module docstring);
         `on_action_error` is `"fail"` (dead-letter the execution) or `"raise"` (the
@@ -107,15 +107,15 @@ class DurableRunner:
 
     @staticmethod
     async def _build(
-        store,
-        definitions,
-        clock,
-        resolver,
-        trace=False,
-        on_action_error="fail",
-        action_modules=(),
-        actions=None,
-        guards=None,
+        store: Any,
+        definitions: dict[str, Definition],
+        clock: Callable[[], float],
+        resolver: Optional[MachineResolver],
+        trace: bool = False,
+        on_action_error: str = "fail",
+        action_modules: tuple[str, ...] = (),
+        actions: Optional[dict[str, Any]] = None,
+        guards: Optional[dict[str, Any]] = None,
     ) -> AsyncDurableRunner:
         return AsyncDurableRunner(
             facade.as_async_store(store),
@@ -139,7 +139,7 @@ class DurableRunner:
     def create(
         self,
         definition_id: str,
-        context: Optional[dict] = None,
+        context: Optional[dict[str, Any]] = None,
         execution_id: Optional[str] = None,
         priority: int = 0,
         *,
@@ -154,46 +154,48 @@ class DurableRunner:
         single-process runner has no transport to weight). `version` runs that version of
         the machine (it must be loaded) instead of the highest.
         """
-        return self._do("create", definition_id, context, execution_id, priority, version=version)
+        return cast(
+            Execution, self._do("create", definition_id, context, execution_id, priority, version=version)
+        )
 
     def process(self, execution_id: str, event: Event) -> Execution:
         """Load a persisted Execution, feed it one event, return the committed state."""
-        return self._do("process", execution_id, event)
+        return cast(Execution, self._do("process", execution_id, event))
 
     def recover(self, definition_id: str) -> None:
         """Drain the durable outbox for `definition_id`'s Executions (relay on restart)."""
-        return self._do("recover", definition_id)
+        self._do("recover", definition_id)
 
     def fire_due_timers(self) -> int:
         """Deliver every timer due now inline; returns how many fired."""
-        return self._do("fire_due_timers")
+        return cast(int, self._do("fire_due_timers"))
 
     # --- control plane (lifecycle commands; bypass the event queue) ---------
-    def cancel(self, execution_id: str, *, reason: Optional[dict] = None) -> Execution:
+    def cancel(self, execution_id: str, *, reason: Optional[dict[str, Any]] = None) -> Execution:
         """Cancel (cooperative if the model has `on: Cancel`, else forceful); the
         cooperative cleanup runs inline. `reason` is an opaque payload on the `Cancel`."""
-        return self._do("cancel", execution_id, reason=reason)
+        return cast(Execution, self._do("cancel", execution_id, reason=reason))
 
     def terminate(self, execution_id: str) -> Execution:
         """Forcefully cancel `execution_id` now (no cleanup, no hooks)."""
-        return self._do("terminate", execution_id)
+        return cast(Execution, self._do("terminate", execution_id))
 
     def suspend(self, execution_id: str) -> Execution:
         """Pause `execution_id` (reversible; state and backlog preserved)."""
-        return self._do("suspend", execution_id)
+        return cast(Execution, self._do("suspend", execution_id))
 
     def resume(self, execution_id: str) -> Execution:
         """Resume a suspended `execution_id`, continuing where it stopped."""
-        return self._do("resume", execution_id)
+        return cast(Execution, self._do("resume", execution_id))
 
-    def purge(self, execution_id: str, *, archive: Optional[Callable[[dict], Any]] = None) -> bool:
+    def purge(self, execution_id: str, *, archive: Optional[Callable[[dict[str, Any]], Any]] = None) -> bool:
         """Permanently delete a finished execution tree (root, regions, invokes and all
         their store rows), passing it to `archive` first if given. Refuses a child or a
         tree with a member not DONE/CANCELLED. False if it no longer exists."""
-        return self._do("purge", execution_id, archive=archive)
+        return cast(bool, self._do("purge", execution_id, archive=archive))
 
     def redrive(self, execution_id: str, target_path: str) -> Execution:
         """Force a dead-lettered (FAILED) `execution_id` back to RUNNING at
         `target_path` (a leaf state you choose). Use once the bug that failed it is
         fixed; context is untouched. No-op if not FAILED."""
-        return self._do("redrive", execution_id, target_path)
+        return cast(Execution, self._do("redrive", execution_id, target_path))

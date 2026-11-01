@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import uuid
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 import pydantic
 
@@ -49,7 +49,7 @@ class ChildState(pydantic.BaseModel):
     root_path: str
     finished: bool = False
     outcome: Optional[str] = None  # the region's terminal outcome, carried on its `Finished`
-    result: dict = {}  # the region's `carry`-projected context, carried on its `Finished`
+    result: dict[str, Any] = {}  # the region's `carry`-projected context, carried on its `Finished`
     submachine: bool = False  # True for an `invoke` child (a different Definition; not broadcast to)
     key: str = ""  # stable region key for `region_results` (decoupled from the seq'd child id)
 
@@ -73,8 +73,8 @@ class Execution(pydantic.BaseModel):
     #                                None = plain completion. Orthogonal to `status` (lifecycle).
     error: Optional[str] = None  # set with status FAILED: the unhandled action exception (type: message)
     active_path: Optional[str] = None  # full_path of the active leaf (None before start)
-    history: dict = {}  # composite_path -> last active child path
-    context: dict = {}  # global user execution context
+    history: dict[str, Any] = {}  # composite_path -> last active child path
+    context: dict[str, Any] = {}  # global user execution context
     processed_events: int = 0
     version: int = 0  # optimistic-concurrency token: a save commits version+1 iff the
     #                   stored row is still at `version` (single-writer per Execution)
@@ -156,7 +156,7 @@ class ExecutionSummary(pydantic.BaseModel):
         )
 
     @classmethod
-    def from_data(cls, raw: dict, version: int) -> "ExecutionSummary":
+    def from_data(cls, raw: dict[str, Any], version: int) -> "ExecutionSummary":
         """Project from a parsed Execution-JSON dict (the path used by backends that store
         the Execution as an opaque JSON blob `data` plus a broken-out `version` column)."""
         return cls(

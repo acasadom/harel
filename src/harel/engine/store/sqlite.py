@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
-from typing import Iterable, Optional, Union
+from typing import Any, Iterable, Optional, Union
 
 from harel.engine._sqlite import enable_wal
 from harel.engine.execution import Execution, ExecutionPage, Status
@@ -61,7 +61,7 @@ class SqliteStore:
         self.trace_max = DEFAULT_TRACE_MAX
         self._conn.commit()
 
-    def _write_trace(self, execution_id: str, entry: dict) -> None:
+    def _write_trace(self, execution_id: str, entry: dict[str, Any]) -> None:
         """Append one trace step WITHOUT committing (so it batches into commit's txn). Two
         statements: `idx` computed inline (MAX+1, monotonic — survives the ring delete) so no
         pre-read, then the ring keeps only the last `trace_max` steps. `read_trace` takes `index`
@@ -78,12 +78,12 @@ class SqliteStore:
                 (execution_id, execution_id, self.trace_max),
             )
 
-    def append_trace(self, execution_id: str, entry: dict) -> None:
+    def append_trace(self, execution_id: str, entry: dict[str, Any]) -> None:
         """The demo/test seam: append a trace step and commit it on its own."""
         self._write_trace(execution_id, entry)
         self._conn.commit()
 
-    def read_trace(self, execution_id: str) -> list[dict]:
+    def read_trace(self, execution_id: str) -> list[dict[str, Any]]:
         rows = self._conn.execute(
             f"SELECT idx, entry FROM {self._n.trace} WHERE execution_id = ? ORDER BY idx", (execution_id,)
         ).fetchall()
@@ -149,8 +149,8 @@ class SqliteStore:
         emits: list[tuple[Optional[str], Event]],
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
-        spawns: tuple[tuple[str, str, dict], ...] = (),
-        trace: Optional[dict] = None,
+        spawns: tuple[tuple[str, str, dict[str, Any]], ...] = (),
+        trace: Optional[dict[str, Any]] = None,
         step: Optional[Step] = None,
     ) -> list[int]:
         old = exe.version
@@ -240,7 +240,7 @@ class SqliteStore:
         self._conn.commit()
 
     def pending_work(self, execution_id: str) -> PendingWork:
-        def rows(template: str) -> list:
+        def rows(template: str) -> list[Any]:
             return self._conn.execute(self._n.sql(template), (execution_id,)).fetchall()
 
         return _pending_work(rows(_PENDING_TIMERS_SQL), rows(_PENDING_OUTBOX_SQL), rows(_PENDING_SPAWNS_SQL))

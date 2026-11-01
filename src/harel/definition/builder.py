@@ -42,7 +42,7 @@ class BuildError(Exception):
     when known (the DSL loader stashes it as `__pos__`), so the loader can re-raise
     a located error; it is None on the raw-config path."""
 
-    def __init__(self, message: str, pos: Optional[tuple] = None) -> None:
+    def __init__(self, message: str, pos: Optional[tuple[int, int]] = None) -> None:
         super().__init__(message)
         self.pos = pos
 
@@ -50,7 +50,7 @@ class BuildError(Exception):
 # --- small helpers (mirror the relevant bits of build.py) ---------------------
 
 
-def _resolve_function_path(data: dict, global_context: Optional[dict]) -> dict:
+def _resolve_function_path(data: dict[str, Any], global_context: Optional[dict[str, Any]]) -> dict[str, Any]:
     data = dict(data)
     if global_context:
         module_path = global_context.get("module_path", None)
@@ -66,7 +66,7 @@ def _resolve_function_path(data: dict, global_context: Optional[dict]) -> dict:
     return data
 
 
-def _build_action(data: Any, global_context: Optional[dict]) -> Optional[ActionRef]:
+def _build_action(data: Any, global_context: Optional[dict[str, Any]]) -> Optional[ActionRef]:
     if data is None:
         return None
     if isinstance(data, str):
@@ -86,7 +86,7 @@ def _build_action(data: Any, global_context: Optional[dict]) -> Optional[ActionR
 _COMBINATORS = {"all", "any", "not", "__ref__"}
 
 
-def _parse_predicate(data: dict) -> Optional[Predicate]:
+def _parse_predicate(data: dict[str, Any]) -> Optional[Predicate]:
     """Parse a predicate node: combinator keys (`all`/`any` -> list of nodes,
     `not` -> a single node) and/or flat `field__op -> value` leaves. Multiple
     keys at one level are AND-ed."""
@@ -118,7 +118,7 @@ def _parse_predicate(data: dict) -> Optional[Predicate]:
     return nodes[0] if len(nodes) == 1 else Predicate(node="all", children=nodes)
 
 
-def _event_filter(kind: str, data: dict) -> EventFilter:
+def _event_filter(kind: str, data: dict[str, Any]) -> EventFilter:
     """Build an EventFilter from a `kind` and a data dict that may mix flat
     `field__op` leaves (kept in `predicates` for back-compat/PlantUML) with the
     composable combinators `all`/`any`/`not` (parsed into `predicate`)."""
@@ -129,7 +129,7 @@ def _event_filter(kind: str, data: dict) -> EventFilter:
     )
 
 
-def _build_event_filter(data: dict) -> EventFilter:
+def _build_event_filter(data: dict[str, Any]) -> EventFilter:
     return _event_filter(data["type"], {k: v for k, v in data.items() if k != "type"})
 
 
@@ -143,7 +143,7 @@ def _build_field_spec(data: Any) -> FieldSpec:
     )
 
 
-def _build_events(config: dict) -> dict[str, EventType]:
+def _build_events(config: dict[str, Any]) -> dict[str, EventType]:
     """Parse the optional top-level `events:` block: name -> {field: spec}."""
     raw = config.get("events") or {}
     return {
@@ -152,7 +152,7 @@ def _build_events(config: dict) -> dict[str, EventType]:
     }
 
 
-def _build_selector(data: dict, global_context: Optional[dict]) -> Selector:
+def _build_selector(data: dict[str, Any], global_context: Optional[dict[str, Any]]) -> Selector:
     data = dict(data)
     mapper = {str(k): v for k, v in data.pop("mapper").items()}
     default = data.pop("default", None)
@@ -166,12 +166,12 @@ def _build_selector(data: dict, global_context: Optional[dict]) -> Selector:
 
 
 def _build_node(
-    norm: dict,
+    norm: dict[str, Any],
     parent: Optional[Node],
-    global_context: Optional[dict],
-    index: dict,
-    pending: list,
-    submachines: dict,
+    global_context: Optional[dict[str, Any]],
+    index: dict[str, Any],
+    pending: list[Any],
+    submachines: dict[str, Any],
     mach_name: str,
 ) -> Node:
     norm = dict(norm)
@@ -220,7 +220,9 @@ def _build_node(
     return node
 
 
-def _build_transition(scope: Node, raw: dict, global_context: Optional[dict]) -> Transition:
+def _build_transition(
+    scope: Node, raw: dict[str, Any], global_context: Optional[dict[str, Any]]
+) -> Transition:
     raw = dict(raw)
     pos = raw.get("__pos__")  # (line, column) from the DSL loader, for located errors
     to = raw.get("to")
@@ -249,7 +251,7 @@ def _build_transition(scope: Node, raw: dict, global_context: Optional[dict]) ->
     )
 
 
-def _build_choice(scope: Node, raw: dict, pos: Any) -> Choice:
+def _build_choice(scope: Node, raw: dict[str, Any], pos: Any) -> Choice:
     """A `choose`: each branch's guard and target, targets resolved now (like a `to`)."""
 
     def target(name: str) -> Node:
@@ -278,7 +280,7 @@ def _build_assignments(raw: Any) -> tuple[Assign, ...]:
     return tuple(Assign(field=a["field"], expr=_build_expr(a["expr"])) for a in raw)
 
 
-def _build_expr(raw: dict) -> Expr:
+def _build_expr(raw: dict[str, Any]) -> Expr:
     """An assignment's right-hand side: `{ref: {source, field}}`, `{lit: value}` or
     `{arith: {op, left, right}}`."""
     if "ref" in raw:
@@ -292,8 +294,8 @@ def _build_expr(raw: dict) -> Expr:
 
 
 def build_definition(
-    config: dict,
-    global_context: Optional[dict],
+    config: dict[str, Any],
+    global_context: Optional[dict[str, Any]],
     name: str,
     definition_id: Optional[str] = None,
     validate: bool = False,
@@ -302,9 +304,9 @@ def build_definition(
     # the root is the StateMachine: parallel, empty full_path (children are unprefixed)
     root_norm = {**config, "name": name, "full_path": "", "type": NodeKind.PARALLEL.value}
 
-    index: dict = {}
-    pending: list = []
-    submachines: dict = {}
+    index: dict[str, Any] = {}
+    pending: list[Any] = []
+    submachines: dict[str, Any] = {}
     root = _build_node(root_norm, None, global_context, index, pending, submachines, name)
     for node, raw_transitions in pending:
         for raw in raw_transitions:

@@ -82,17 +82,17 @@ class AsyncRqliteTransport:
                 await anyio.sleep(retry_delay)
         raise last if last is not None else RuntimeError("rqlite connect failed")
 
-    async def _execute(self, statements: list, transaction: bool = False) -> list:
+    async def _execute(self, statements: list[Any], transaction: bool = False) -> list[dict[str, Any]]:
         url = f"{self._base}/db/execute" + ("?transaction" if transaction else "")
         resp = await self._client.post(url, json=statements, timeout=self._timeout)
         resp.raise_for_status()
-        results = resp.json()["results"]
+        results: list[dict[str, Any]] = resp.json()["results"]
         for res in results:
             if "error" in res:
                 raise RuntimeError(f"rqlite execute error: {res['error']}")
         return results
 
-    async def _query(self, sql: str, params: tuple) -> list:
+    async def _query(self, sql: str, params: tuple[Any, ...]) -> list[Any]:
         resp = await self._client.post(
             f"{self._base}/db/query",
             params={"level": "strong"},

@@ -13,7 +13,7 @@ from typing import Any, Callable, Iterable, Optional
 
 from harel.definition.model import Definition
 from harel.engine.execution import Execution
-from harel.engine.flow import Flow, run_async
+from harel.engine.flow import Flow, T, run_async
 from harel.engine.hosting import DurableLogic
 from harel.engine.resolve import MachineResolver
 from harel.spec.states import Event
@@ -30,8 +30,8 @@ class AsyncDurableRunner(DurableLogic):
         on_action_error: str = "fail",
         *,
         action_modules: Iterable[str] = (),
-        actions: Optional[dict] = None,
-        guards: Optional[dict] = None,
+        actions: Optional[dict[str, Any]] = None,
+        guards: Optional[dict[str, Any]] = None,
     ) -> None:
         super().__init__(
             definitions,
@@ -45,13 +45,13 @@ class AsyncDurableRunner(DurableLogic):
         )
         self.store = store
 
-    async def _serve(self, flow: Flow) -> Any:
+    async def _serve(self, flow: Flow[T]) -> T:
         return await run_async(flow, {"store": self.store})
 
     async def create(
         self,
         definition_id: str,
-        context: Optional[dict] = None,
+        context: Optional[dict[str, Any]] = None,
         execution_id: Optional[str] = None,
         priority: int = 0,
         *,
@@ -69,7 +69,7 @@ class AsyncDurableRunner(DurableLogic):
         return await self._serve(self.fire_due_timers_flow())
 
     # --- control plane ------------------------------------------------------
-    async def cancel(self, execution_id: str, *, reason: Optional[dict] = None) -> Execution:
+    async def cancel(self, execution_id: str, *, reason: Optional[dict[str, Any]] = None) -> Execution:
         return await self._serve(self.cancel_flow(execution_id, reason))
 
     async def terminate(self, execution_id: str) -> Execution:
@@ -81,7 +81,9 @@ class AsyncDurableRunner(DurableLogic):
     async def resume(self, execution_id: str) -> Execution:
         return await self._serve(self.resume_flow(execution_id))
 
-    async def purge(self, execution_id: str, *, archive: Optional[Callable[[dict], Any]] = None) -> bool:
+    async def purge(
+        self, execution_id: str, *, archive: Optional[Callable[[dict[str, Any]], Any]] = None
+    ) -> bool:
         """Permanently delete a finished execution tree, archiving it first if `archive`
         is given — see `control.purge`. False if it no longer exists."""
         return await self._serve(self.purge_flow(execution_id, archive))

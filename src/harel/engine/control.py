@@ -62,7 +62,7 @@ from typing import Any, Callable, Iterable, Optional
 from harel import engine
 from harel.definition.model import Definition, NodeKind, is_descendant
 from harel.engine.execution import Execution, ExecutionSummary, Status, stamp
-from harel.engine.flow import Await, Flow, call, parallel, run_inline
+from harel.engine.flow import Await, Flow, T, call, parallel, run_inline
 from harel.engine.store import ExecutionStore, Step, StoreConflict, TimerOp
 from harel.spec.states import Event
 
@@ -76,7 +76,7 @@ def _store(method: str, *args: Any, **kwargs: Any) -> Flow:
     return (yield from call("store", method, *args, **kwargs))
 
 
-def _inline(flow: Flow, store: ExecutionStore) -> Any:
+def _inline(flow: Flow[T], store: ExecutionStore) -> T:
     return run_inline(flow, {"store": store})
 
 
@@ -194,7 +194,7 @@ def cancel_flow(
     defn: Definition,
     execution_id: str,
     *,
-    reason: Optional[dict] = None,
+    reason: Optional[dict[str, Any]] = None,
     clock: Callable[[], float] = time.time,
 ) -> Flow:
     """Cancel respecting the machine: cooperative if the active state models a
@@ -383,7 +383,9 @@ def _check_purgeable(root: Execution, tree: list[Execution]) -> None:
         raise PurgeRefused(f"purge refused: not finished: {listed}{hint}")
 
 
-def _archive_bundle(root: Execution, tree: list[Execution], traces: dict[str, list[dict]]) -> dict:
+def _archive_bundle(
+    root: Execution, tree: list[Execution], traces: dict[str, list[dict[str, Any]]]
+) -> dict[str, Any]:
     """What `purge` hands the archiver: the whole tree, root first, plus each trace."""
     return {
         "root_id": root.id,
@@ -433,7 +435,7 @@ def _collect_tree_flow(root: Execution) -> Flow:
     return _tree_of(root, found)
 
 
-def purge_flow(execution_id: str, *, archive: Optional[Callable[[dict], Any]] = None) -> Flow:
+def purge_flow(execution_id: str, *, archive: Optional[Callable[[dict[str, Any]], Any]] = None) -> Flow[bool]:
     """Permanently delete a finished execution tree — the root, every region/invoke
     descendant, and everything the store keys by them (dedupe, trace, timers, pending
     outbox/spawns). Returns False if no such execution exists (already purged).
@@ -517,12 +519,12 @@ def purge_finished_flow(
     *,
     older_than: float,
     statuses: Iterable[Status] = _PURGEABLE,
-    archive: Optional[Callable[[dict], Any]] = None,
+    archive: Optional[Callable[[dict[str, Any]], Any]] = None,
     include_undated: bool = False,
     limit: Optional[int] = None,
     dry_run: bool = False,
     now: Optional[float] = None,
-) -> Flow:
+) -> Flow[PurgeReport]:
     """Purge every root tree that finished more than `older_than` seconds ago (see `purge`).
 
     Candidates are the roots in `statuses` (a subset of DONE/CANCELLED) whose
@@ -579,7 +581,7 @@ def cancel(
     defn: Definition,
     execution_id: str,
     *,
-    reason: Optional[dict] = None,
+    reason: Optional[dict[str, Any]] = None,
     clock: Callable[[], float] = time.time,
 ) -> None:
     """`cancel_flow` over `store`."""
@@ -609,7 +611,7 @@ def redrive(
 
 
 def purge(
-    store: ExecutionStore, execution_id: str, *, archive: Optional[Callable[[dict], None]] = None
+    store: ExecutionStore, execution_id: str, *, archive: Optional[Callable[[dict[str, Any]], None]] = None
 ) -> bool:
     """`purge_flow` over `store`: `archive` must be a plain function."""
     return _inline(purge_flow(execution_id, archive=archive), store)
@@ -620,7 +622,7 @@ def purge_finished(
     *,
     older_than: float,
     statuses: Iterable[Status] = _PURGEABLE,
-    archive: Optional[Callable[[dict], None]] = None,
+    archive: Optional[Callable[[dict[str, Any]], None]] = None,
     include_undated: bool = False,
     limit: Optional[int] = None,
     dry_run: bool = False,

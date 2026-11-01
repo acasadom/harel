@@ -13,7 +13,7 @@ What they do:
 
 import copy
 import itertools
-from typing import Dict
+from typing import Any, Dict
 
 # Valid values for a state's "type" discriminator (kept here to avoid coupling
 # normalization to the object/schema layer).
@@ -29,7 +29,7 @@ class NormalizeError(Exception):
     pass
 
 
-def normalize_transitions(data: Dict, **kwargs) -> Dict:
+def normalize_transitions(data: Dict[str, Any], **kwargs: Any) -> Dict[str, Any]:
     transitions = data.pop("transitions", []) or []
 
     if transitions and isinstance(transitions[0], (list, tuple)):
@@ -54,12 +54,12 @@ def normalize_transitions(data: Dict, **kwargs) -> Dict:
     return data
 
 
-def normalize_states(data: Dict, **kwargs) -> Dict:
+def normalize_states(data: Dict[str, Any], **kwargs: Any) -> Dict[str, Any]:
     states = data.get("states", None) or None
     if states is None:
         raise NormalizeError("No state has been defined...")
 
-    def check(value):
+    def check(value: Any) -> bool:
         if value is not None:
             if value not in STATE_TYPE_NAMES:
                 raise NormalizeError(f" State type '{value}' not a valid type ({STATE_TYPE_NAMES})")
