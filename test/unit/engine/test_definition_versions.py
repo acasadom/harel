@@ -397,6 +397,20 @@ def test_a_region_left_in_the_spawn_outbox_runs_on_its_parents_machine():
     assert runner.process(parent.id, Event(kind="Go")).status is Status.DONE
 
 
+def test_the_sync_driver_builds_a_left_region_from_its_parents_machine():
+    """The parity oracle drains the spawn outbox like the hosted drivers do."""
+    store = DictStore()
+    split = _v(REGIONS.replace("{v}", "1"), "split")
+    parent = Execution(definition_id=split.id)
+    _NoFlushDriver(split, store).start(parent)
+
+    other = _v(REGIONS.replace("{v}", "1").replace("split", "other").replace("A1", "X1"), "other")
+    _SyncDriver(other, store, definitions=definition_registry([split, other])).recover()
+    assert store.pending_spawns() == []
+    for child_id in store.load(parent.id).children:
+        assert store.load(child_id).definition_id == "split"
+
+
 INVOKER = """
 event Go {}
 machine parent version {v} {

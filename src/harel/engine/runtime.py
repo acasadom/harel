@@ -338,25 +338,32 @@ class _SyncDriver:
         """Create + start one pending child Execution, idempotently: if the child
         already exists (a crash-and-retry re-runs the fork), skip — its progress is
         kept. The child's own emits (e.g. an immediate `Finished`) go to the outbox.
-        An orthogonal region shares this driver's `Definition`; a submachine `invoke`
-        child runs another, named by the `__invoke_fqn__` riding in its context (so
-        the durable spawn schema is untouched) — the runner resolves it."""
+        The spawn outbox holds every execution's pending children, so the child is built
+        from its parent's `Definition`, not this driver's: an orthogonal region runs the
+        parent's own; a submachine `invoke` child runs the one named by the
+        `__invoke_fqn__` riding in its context (so the durable spawn schema is untouched)."""
         if self.store.load(entry.child_id) is not None:
             return
+        # a child inherits the parent's priority (regions/invoke carry the work) — mirror
+        # of the async driver; without it the child defaulted to 0.
+        parent = self.store.load(entry.parent_id) if entry.parent_id is not None else None
+        parent_defn = self._definition_for(parent) if parent is not None else self.defn
         context = dict(entry.context)
         fqn = context.pop("__invoke_fqn__", None)
         if fqn is not None:
-            if self.resolve_machine is None:
+            # an inline target (or one its file imports) is the parent's own
+            own = parent_defn.submachines.get(fqn)
+            if own is not None:
+                child_defn = own
+            elif self.resolve_machine is None:
                 raise ResolveError(f"invoke {fqn!r} but this runner has no machine resolver")
-            child_defn = self.resolve_machine(fqn)
+            else:
+                child_defn = self.resolve_machine(fqn)
             # an invoked machine starts with its own context defaults; a region (the same
             # machine) starts with only what the fork passes down
             context = with_defaults(child_defn.context_schema, context)
         else:
-            child_defn = self.defn
-        # a child inherits the parent's priority (regions/invoke carry the work) — mirror
-        # of the async driver; without it the child defaulted to 0.
-        parent = self.store.load(entry.parent_id) if entry.parent_id is not None else None
+            child_defn = parent_defn
         child = Execution(
             id=entry.child_id,
             definition_id=child_defn.id,
