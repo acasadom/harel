@@ -16,10 +16,10 @@ from harel.definition.model import Definition
 from harel.engine import control
 from harel.engine.control import _PURGEABLE, PurgeRefused, PurgeReport  # noqa: F401 (re-exported)
 from harel.engine.execution import Status
-from harel.engine.flow import Flow, run_async
+from harel.engine.flow import Flow, T, run_async
 
 
-async def _serve(flow: Flow, store: Any) -> Any:
+async def _serve(flow: Flow[T], store: Any) -> T:
     return await run_async(flow, {"store": store})
 
 
@@ -33,7 +33,7 @@ async def cancel(
     defn: Definition,
     execution_id: str,
     *,
-    reason: Optional[dict] = None,
+    reason: Optional[dict[str, Any]] = None,
     clock: Callable[[], float] = time.time,
 ) -> None:
     """`control.cancel_flow` over `store`."""
@@ -62,7 +62,9 @@ async def redrive(
     await _serve(control.redrive_flow(defn, execution_id, target_path, clock=clock), store)
 
 
-async def purge(store: Any, execution_id: str, *, archive: Optional[Callable[[dict], Any]] = None) -> bool:
+async def purge(
+    store: Any, execution_id: str, *, archive: Optional[Callable[[dict[str, Any]], Any]] = None
+) -> bool:
     """`control.purge_flow` over `store`."""
     return await _serve(control.purge_flow(execution_id, archive=archive), store)
 
@@ -72,7 +74,7 @@ async def purge_finished(
     *,
     older_than: float,
     statuses: Iterable[Status] = _PURGEABLE,
-    archive: Optional[Callable[[dict], Any]] = None,
+    archive: Optional[Callable[[dict[str, Any]], Any]] = None,
     include_undated: bool = False,
     limit: Optional[int] = None,
     dry_run: bool = False,

@@ -133,18 +133,18 @@ class DynamoDBStore:
                 if exc.response["Error"]["Code"] != "ResourceInUseException":
                     raise  # already exists is fine; anything else is real
 
-    def _raw(self, item: dict) -> dict:
+    def _raw(self, item: dict[str, Any]) -> dict[str, Any]:
         """A native dict → DynamoDB's typed attribute-value form."""
         return {k: self._ser.serialize(v) for k, v in item.items()}
 
-    def _item(self, raw: dict) -> dict:
+    def _item(self, raw: dict[str, Any]) -> dict[str, Any]:
         """DynamoDB's typed form → a native dict (numbers come back as Decimal)."""
         return {k: self._deser.deserialize(v) for k, v in raw.items()}
 
-    def _scan(self, table: str, **params: Any) -> list[dict]:
+    def _scan(self, table: str, **params: Any) -> list[dict[str, Any]]:
         """Scan a table, following `LastEvaluatedKey` to drain every page (a single Scan
         returns at most 1MB). `params` adds scan options such as a `FilterExpression`."""
-        items: list[dict] = []
+        items: list[dict[str, Any]] = []
         kwargs: dict[str, Any] = {"TableName": self._t(table), **params}
         while True:
             resp = self._db.scan(**kwargs)
@@ -242,19 +242,21 @@ class DynamoDBStore:
         emits: list[tuple[Optional[str], Event]],
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
-        spawns: tuple[tuple[str, str, dict], ...] = (),
-        trace: Optional[dict] = None,  # execution-trace deferred for this backend (accepted, ignored)
+        spawns: tuple[tuple[str, str, dict[str, Any]], ...] = (),
+        trace: Optional[
+            dict[str, Any]
+        ] = None,  # execution-trace deferred for this backend (accepted, ignored)
         step: Optional[Step] = None,
     ) -> list[int]:
         # allocate monotonic seqs up front (a seq wasted by a cancelled txn is harmless)
-        outbox: list[dict] = []
+        outbox: list[dict[str, Any]] = []
         if emits:
             base = self._next_seq("outbox", len(emits))
             outbox = [
                 {"seq": base + i, "target_id": t, "event": e.model_dump_json()}
                 for i, (t, e) in enumerate(emits)
             ]
-        spawn: list[dict] = []
+        spawn: list[dict[str, Any]] = []
         if spawns:
             base = self._next_seq("spawn", len(spawns))
             spawn = [
@@ -286,7 +288,9 @@ class DynamoDBStore:
                 "ConditionExpression": "version = :ov",
                 "ExpressionAttributeValues": {":ov": {"N": str(old)}},
             }
-        txn: list[dict] = [{"Put": {"TableName": self._t("executions"), "Item": self._raw(exe_item), **cas}}]
+        txn: list[dict[str, Any]] = [
+            {"Put": {"TableName": self._t("executions"), "Item": self._raw(exe_item), **cas}}
+        ]
         for o in outbox:
             txn.append({"Put": {"TableName": self._t("outbox"), "Item": self._raw(o)}})
         for s in spawn:
@@ -367,7 +371,7 @@ class DynamoDBStore:
         )
         return "Item" in resp
 
-    def append_trace(self, execution_id: str, entry: dict) -> None:
+    def append_trace(self, execution_id: str, entry: dict[str, Any]) -> None:
         idx = entry.get("index", self._max_trace_idx(execution_id) + 1)
         self._db.put_item(
             TableName=self._t("trace"),
@@ -379,7 +383,7 @@ class DynamoDBStore:
                 Key=self._raw({"execution_id": execution_id, "idx": idx - self.trace_max}),
             )
 
-    def read_trace(self, execution_id: str) -> list[dict]:
+    def read_trace(self, execution_id: str) -> list[dict[str, Any]]:
         resp = self._db.query(
             TableName=self._t("trace"),
             KeyConditionExpression="execution_id = :e",
@@ -450,7 +454,7 @@ class DynamoDBStore:
                 break
             kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
 
-        def addressed(table: str, attr: str) -> list[dict]:  # outbox/spawns drain: a filtered Scan
+        def addressed(table: str, attr: str) -> list[dict[str, Any]]:  # outbox/spawns drain: a filtered Scan
             rows = self._scan(
                 table,
                 FilterExpression="#a = :v",
@@ -533,7 +537,7 @@ class DynamoDBStore:
             self._delete_keys(table, [self._raw({"seq": r["seq"]}) for r in rows])
         return deleted
 
-    def _partition_keys(self, table: str, sort_key: str, execution_id: str) -> list[dict]:
+    def _partition_keys(self, table: str, sort_key: str, execution_id: str) -> list[dict[str, Any]]:
         """Every raw key in `table` whose partition is `execution_id` (Query, all pages)."""
         kwargs: dict[str, Any] = {
             "TableName": self._t(table),
@@ -542,7 +546,7 @@ class DynamoDBStore:
             "ProjectionExpression": "execution_id, #sk",
             "ExpressionAttributeNames": {"#sk": sort_key},
         }
-        keys: list[dict] = []
+        keys: list[dict[str, Any]] = []
         while True:
             resp = self._db.query(**kwargs)
             keys.extend(resp.get("Items", []))
@@ -551,7 +555,7 @@ class DynamoDBStore:
                 return keys
             kwargs["ExclusiveStartKey"] = start
 
-    def _delete_keys(self, table: str, keys: list[dict]) -> None:
+    def _delete_keys(self, table: str, keys: list[dict[str, Any]]) -> None:
         """Delete items by raw key, 25 per BatchWriteItem, re-sending any unprocessed."""
         for i in range(0, len(keys), 25):
             pending = {self._t(table): [{"DeleteRequest": {"Key": k}} for k in keys[i : i + 25]]}

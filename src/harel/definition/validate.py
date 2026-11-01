@@ -18,6 +18,7 @@ from typing import Any, Optional
 
 from harel.definition.events import RESERVED_EVENTS, value_fits
 from harel.definition.model import (
+    Assign,
     Definition,
     EventFilter,
     Expr,
@@ -59,12 +60,12 @@ class ValidationError(Exception):
 # --- predicate helpers --------------------------------------------------------
 
 
-def _flat_fields(predicates: dict) -> set[str]:
+def _flat_fields(predicates: dict[str, Any]) -> set[str]:
     """Field names referenced by the flat `field__op -> value` predicates."""
     return {key.split("__")[0] for key in predicates}
 
 
-def _flat_leaves(predicates: dict) -> list[tuple[str, str]]:
+def _flat_leaves(predicates: dict[str, Any]) -> list[tuple[str, str]]:
     """(field, op) pairs from the flat predicates (op defaults to eq)."""
     out = []
     for key in predicates:
@@ -237,7 +238,7 @@ def _check_reachability(defn: Definition, issues: list[Issue]) -> None:
 
 
 def _check_event(
-    node: Node, ef: EventFilter, defn: Definition, issues: list[Issue], extra: tuple = ()
+    node: Node, ef: EventFilter, defn: Definition, issues: list[Issue], extra: tuple[Any, ...] = ()
 ) -> None:
     # Every referenced event must be declared (or be a RESERVED_EVENT): an undeclared
     # event is an error, so a typo can't slip through. (Reserved engine events and
@@ -351,7 +352,7 @@ def _expr_type(expr: Expr, defn: Definition) -> Optional[str]:
     return None
 
 
-def _all_assignments(t: Transition) -> tuple:
+def _all_assignments(t: Transition) -> tuple[Assign, ...]:
     """Every `set` a transition can apply: its own, and each of its `choose` branches'."""
     if t.choice is None:
         return t.assignments

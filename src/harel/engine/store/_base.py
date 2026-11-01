@@ -11,7 +11,7 @@ from __future__ import annotations
 import base64
 import json
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Optional, Protocol, runtime_checkable
+from typing import Any, Collection, Iterable, Optional, Protocol, runtime_checkable
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.spec.states import Event
@@ -85,7 +85,12 @@ def _decode_offset(cursor: Optional[str]) -> int:
         return 0
 
 
-def _matches(summary: ExecutionSummary, status, definition_id, roots_only) -> bool:
+def _matches(
+    summary: ExecutionSummary,
+    status: Optional[Collection[Status]],
+    definition_id: Optional[str],
+    roots_only: bool,
+) -> bool:
     """Client-side filter shared by the backends that can't filter inside the JSON blob."""
     if status is not None and summary.status not in status:
         return False
@@ -119,7 +124,7 @@ def _listing_sql_sqlite(
     roots_only: bool,
     limit: int,
     off: int,
-) -> tuple[str, tuple]:
+) -> tuple[str, tuple[Any, ...]]:
     """The listing query over the executions `table` for the SQLite dialect (SQLite, libSQL,
     rqlite) and its params."""
     where, params = ["1=1"], []
@@ -146,11 +151,11 @@ def _listing_sql_pg(
     roots_only: bool,
     limit: int,
     off: int,
-) -> tuple[str, tuple]:
+) -> tuple[str, tuple[Any, ...]]:
     """The listing query over the executions `table` for Postgres (`data` is TEXT, cast to
     jsonb) and its params."""
     where: list[str] = ["TRUE"]
-    params: list = []
+    params: list[Any] = []
     if definition_id is not None:
         where.append("definition_id = %s")
         params.append(definition_id)
@@ -166,7 +171,7 @@ def _listing_sql_pg(
     return sql, (*params, limit + 1, off)
 
 
-def _listing_page(rows: list, limit: int, off: int) -> ExecutionPage:
+def _listing_page(rows: list[Any], limit: int, off: int) -> ExecutionPage:
     """An `ExecutionPage` from the rows of a listing query (the extra row means more): each
     `(id, definition_id, version, status, outcome, active_path, parent_id, finished_at)`,
     optionally followed by `definition_version, updated_at`."""
@@ -209,7 +214,7 @@ class SpawnEntry:
     parent_id: str
     child_id: str
     root_path: str
-    context: dict
+    context: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -281,7 +286,7 @@ def _pg_params(sql: str) -> str:
     return sql.replace("?", "%s")
 
 
-def _pending_work(timers: list, outbox: list, spawns: list) -> PendingWork:
+def _pending_work(timers: list[Any], outbox: list[Any], spawns: list[Any]) -> PendingWork:
     """A `PendingWork` from the rows of the three `_PENDING_*` queries."""
     return PendingWork(
         timers=[(path, float(fire_at)) for path, fire_at in timers],
@@ -326,10 +331,10 @@ class DefinitionRecord:
     definition_id: str
     version: int
     digest: str
-    source: dict
+    source: dict[str, Any]
     published_at: Optional[float] = None
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "definition_id": self.definition_id,
             "version": self.version,
@@ -339,7 +344,7 @@ class DefinitionRecord:
         }
 
     @classmethod
-    def from_dict(cls, raw: dict) -> "DefinitionRecord":
+    def from_dict(cls, raw: dict[str, Any]) -> "DefinitionRecord":
         return cls(
             definition_id=raw["definition_id"],
             version=int(raw["version"]),
@@ -360,7 +365,7 @@ class DefinitionRecord:
 _DEFINITION_COLUMNS = "definition_id, version, digest, source, published_at"
 
 
-def _definition_params(record: DefinitionRecord) -> tuple:
+def _definition_params(record: DefinitionRecord) -> tuple[Any, ...]:
     return (
         record.definition_id,
         record.version,
@@ -447,8 +452,8 @@ class ExecutionStore(Protocol):
         emits: list[tuple[Optional[str], Event]],
         processed_event_id: Optional[str] = None,
         timers: "tuple[TimerOp, ...]" = (),
-        spawns: "tuple[tuple[str, str, dict], ...]" = (),
-        trace: "Optional[dict]" = None,
+        spawns: "tuple[tuple[str, str, dict[str, Any]], ...]" = (),
+        trace: "Optional[dict[str, Any]]" = None,
         step: "Optional[Step]" = None,
     ) -> list[int]:
         """Atomically `save` the Execution, enqueue its emitted events into the
@@ -477,7 +482,7 @@ class ExecutionStore(Protocol):
         at-least-once delivery)."""
         ...
 
-    def read_trace(self, execution_id: str) -> list[dict]:
+    def read_trace(self, execution_id: str) -> list[dict[str, Any]]:
         """The execution's recorded trace steps, oldest first (empty if none)."""
         ...
 

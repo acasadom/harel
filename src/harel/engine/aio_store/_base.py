@@ -4,7 +4,7 @@ The outbox/spawn/timer dataclasses are reused from the sync `harel.engine.store`
 
 from __future__ import annotations
 
-from typing import Iterable, Optional, Protocol, runtime_checkable
+from typing import Any, Iterable, Optional, Protocol, runtime_checkable
 
 from harel.engine.execution import Execution, ExecutionPage, Status
 from harel.engine.store import (
@@ -44,14 +44,14 @@ class AsyncExecutionStore(Protocol):
         emits: list[tuple[Optional[str], Event]],
         processed_event_id: Optional[str] = None,
         timers: "tuple[TimerOp, ...]" = (),
-        spawns: "tuple[tuple[str, str, dict], ...]" = (),
-        trace: "Optional[dict]" = None,
+        spawns: "tuple[tuple[str, str, dict[str, Any]], ...]" = (),
+        trace: "Optional[dict[str, Any]]" = None,
         step: "Optional[Step]" = None,
     ) -> list[int]: ...
 
     async def is_processed(self, execution_id: str, event_id: str) -> bool: ...
 
-    async def read_trace(self, execution_id: str) -> list[dict]: ...
+    async def read_trace(self, execution_id: str) -> list[dict[str, Any]]: ...
 
     async def pending_outbox(self) -> list[OutboxEntry]: ...
 

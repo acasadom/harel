@@ -57,7 +57,7 @@ class AsyncSqliteStore:
         self._lock = asyncio.Lock()
         self.trace_max = DEFAULT_TRACE_MAX
 
-    async def _execute_and_commit(self, sql: str, params: tuple) -> None:
+    async def _execute_and_commit(self, sql: str, params: tuple[Any, ...]) -> None:
         async with self._lock:
             try:
                 await self._conn.execute(sql, params)
@@ -82,7 +82,7 @@ class AsyncSqliteStore:
         await conn.commit()
         return cls(conn, prefix=prefix)
 
-    async def _write_trace(self, execution_id: str, entry: dict) -> None:
+    async def _write_trace(self, execution_id: str, entry: dict[str, Any]) -> None:
         """Append one trace step WITHOUT committing (batches into commit's txn). Two statements:
         `idx` computed inline (MAX+1, monotonic) so no pre-read, then the ring cap. `read_trace`
         takes `index` from the `idx` column."""
@@ -98,7 +98,7 @@ class AsyncSqliteStore:
                 (execution_id, execution_id, self.trace_max),
             )
 
-    async def append_trace(self, execution_id: str, entry: dict) -> None:
+    async def append_trace(self, execution_id: str, entry: dict[str, Any]) -> None:
         async with self._lock:
             try:
                 await self._write_trace(execution_id, entry)
@@ -107,12 +107,12 @@ class AsyncSqliteStore:
                 await self._conn.rollback()
                 raise
 
-    async def _fetchall(self, sql: str, params: tuple = ()) -> list:
+    async def _fetchall(self, sql: str, params: tuple[Any, ...] = ()) -> list[Any]:
         async with self._lock:
             cur = await self._conn.execute(sql, params)
             return list(await cur.fetchall())
 
-    async def read_trace(self, execution_id: str) -> list[dict]:
+    async def read_trace(self, execution_id: str) -> list[dict[str, Any]]:
         rows = await self._fetchall(
             f"SELECT idx, entry FROM {self._n.trace} WHERE execution_id = ? ORDER BY idx", (execution_id,)
         )
@@ -187,8 +187,8 @@ class AsyncSqliteStore:
         emits: list[tuple[Optional[str], Event]],
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
-        spawns: tuple[tuple[str, str, dict], ...] = (),
-        trace: Optional[dict] = None,
+        spawns: tuple[tuple[str, str, dict[str, Any]], ...] = (),
+        trace: Optional[dict[str, Any]] = None,
         step: Optional[Step] = None,
     ) -> list[int]:
         async with self._lock:
@@ -270,7 +270,7 @@ class AsyncSqliteStore:
         )
 
     async def pending_work(self, execution_id: str) -> PendingWork:
-        async def rows(template: str) -> list:
+        async def rows(template: str) -> list[Any]:
             return await self._fetchall(self._n.sql(template), (execution_id,))
 
         return _pending_work(

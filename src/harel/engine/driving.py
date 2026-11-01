@@ -16,12 +16,12 @@ from typing import Any, Callable, Optional
 
 from harel import engine
 from harel.definition.events import with_defaults
-from harel.definition.model import Definition
+from harel.definition.model import Definition, Node
 from harel.engine.execution import Execution, Status, routing_key, stamp
-from harel.engine.flow import CallAction, Flow, call, parallel, run_inline
+from harel.engine.flow import CallAction, Flow, T, call, parallel, run_inline
 from harel.engine.resolve import DefinitionNotLoaded, ResolveError, find_definition
-from harel.engine.runtime import _CONTROL, _action_name, _ActionKeys, _Proxy, _resolve, _trace_step
-from harel.engine.store import Step, TimerOp
+from harel.engine.runtime import _CONTROL, Drive, _action_name, _ActionKeys, _Proxy, _resolve, _trace_step
+from harel.engine.store import SpawnEntry, Step, TimerOp
 from harel.spec.states import Event
 
 logger = logging.getLogger(__name__)
@@ -92,7 +92,7 @@ class DriverLogic:
     def _proxy(self, exe: Execution) -> Any:
         return _Proxy(exe.context)
 
-    def _before_action(self, exe: Execution, node) -> None:
+    def _before_action(self, exe: Execution, node: Node) -> None:
         pass
 
     def _on_action_error(self, exe: Execution, exc: Exception) -> None:
@@ -100,8 +100,8 @@ class DriverLogic:
 
     # --- core --------------------------------------------------------------
     def _run_flow(
-        self, exe: Execution, gen, event_id: Optional[str] = None, event: Optional[Event] = None
-    ) -> Flow:
+        self, exe: Execution, gen: engine.Step, event_id: Optional[str] = None, event: Optional[Event] = None
+    ) -> Flow[bool]:
         """Drive the engine's effects for one event and commit. Returns whether the commit
         enqueued anything for the relay (outbox emits or child spawns), so the caller can skip
         the relay round-trips when there is nothing to deliver."""
@@ -120,9 +120,10 @@ class DriverLogic:
             # back) — rather than the engine hitting a missing node
             gen.close()
             self._on_action_error(exe, engine.DefinitionChanged(problem))
-            emits, timer_ops, spawns, actions, assigned = [], [], [], [], {}
+            drive: Drive = ([], [], [], [], {})
         else:
-            emits, timer_ops, spawns, actions, assigned = yield from self._drive_flow(exe, gen, keys=keys)
+            drive = yield from self._drive_flow(exe, gen, keys=keys)
+        emits, timer_ops, spawns, actions, assigned = drive
         step = (
             _trace_step(event, from_path, exe, actions, self._clock(), assigned)
             if self._trace_enabled
@@ -152,7 +153,7 @@ class DriverLogic:
 
     def _expression_error_flow(
         self, exe: Execution, exc: Exception, original_exc: Optional[Exception], keys: "_ActionKeys"
-    ) -> Flow:
+    ) -> Flow[Drive]:
         """The engine couldn't evaluate a model expression (a `set`): routed exactly like an
         action error — to an `on error` in scope (`_error` + the error event carry it),
         else the runner's policy. It is raised before the transition leaves any state, so
@@ -174,10 +175,10 @@ class DriverLogic:
     def _drive_flow(
         self,
         exe: Execution,
-        gen,
+        gen: engine.Step,
         original_exc: Optional[Exception] = None,
         keys: Optional[_ActionKeys] = None,
-    ) -> Flow:
+    ) -> Flow[Drive]:
         """Run the engine generator `gen` to its end for `exe`, serving its effects: call the
         actions (routing a raise to `on error` or the runner's policy) and collect what the
         step commits — emits, timer ops, spawns, the actions run, what a `set` wrote. `keys`
@@ -186,9 +187,9 @@ class DriverLogic:
             keys = _ActionKeys(exe.id, "start")
         emits: list[tuple[Optional[str], Event]] = []
         timer_ops: list[TimerOp] = []
-        spawns: list[tuple[str, str, dict]] = []
+        spawns: list[tuple[str, str, dict[str, Any]]] = []
         actions: list[str] = []
-        assigned: dict = {}  # context values a `set` wrote this step (for the trace)
+        assigned: dict[str, Any] = {}  # context values a `set` wrote this step (for the trace)
         proxy = self._proxy(exe)
         try:
             effect = next(gen)
@@ -246,13 +247,9 @@ class DriverLogic:
                     emits.append((effect.to, effect.event))
                     effect = gen.send(None)
                 elif isinstance(effect, engine.ScheduleTimer):
-                    # delay is either literal or read from context (a dynamic/backoff
-                    # value the state's on_enter just computed, run above this effect)
-                    delay = (
-                        effect.delay
-                        if effect.delay is not None
-                        else float(exe.context.get(effect.context_key, 0.0))
-                    )
+                    # the delay is literal or read from context (a dynamic/backoff value the
+                    # state's on_enter just computed, run above this effect)
+                    delay = effect.seconds(exe.context)
                     fire_at = self._clock() + delay
                     timer_ops.append(TimerOp("schedule", effect.path, fire_at))
                     effect = gen.send(fire_at)
@@ -270,7 +267,7 @@ class DriverLogic:
             return (yield from self._expression_error_flow(exe, exc, original_exc, keys))
         return emits, timer_ops, spawns, actions, assigned
 
-    def _create_spawn_flow(self, entry) -> Flow:
+    def _create_spawn_flow(self, entry: SpawnEntry) -> Flow[None]:
         """Create and start one pending child Execution, idempotently: if the child already
         exists (a crash-and-retry re-runs the fork), skip — its progress is kept. The spawn
         outbox holds every execution's pending children, so the child is built from its
@@ -354,7 +351,7 @@ class DriverLogic:
             )
             yield from self._flush_flow()
 
-    def fire_due_timers_flow(self) -> Flow:
+    def fire_due_timers_flow(self) -> Flow[int]:
         """Deliver every timer due now (a `Timeout` to its execution) and remove it.
         Returns how many fired.
 
@@ -555,7 +552,7 @@ class _InlineDriver(DriverLogic):
     def store_flow(method: str, *args: Any) -> Flow:
         return store(method, *args)
 
-    def serve(self, flow: Flow) -> Any:
+    def serve(self, flow: Flow[T]) -> T:
         from harel.engine.aio import facade
 
         facade._guard_no_running_loop()

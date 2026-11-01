@@ -137,7 +137,7 @@ class MongoStore:
         # live inside the `data` JSON string (filtered client-side). Project only
         # {definition_id, version, data} — never the embedded outbox/spawns/timers arrays.
         status = set(status) if status is not None else None
-        query: dict = {} if definition_id is None else {"definition_id": definition_id}
+        query: dict[str, Any] = {} if definition_id is None else {"definition_id": definition_id}
         off = _decode_offset(cursor)
         items: list[ExecutionSummary] = []
         # over-fetch so client-side status/roots filtering still fills the page; if we
@@ -163,20 +163,22 @@ class MongoStore:
         emits: list[tuple[Optional[str], Event]],
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
-        spawns: tuple[tuple[str, str, dict], ...] = (),
-        trace: Optional[dict] = None,  # execution-trace deferred for this backend (accepted, ignored)
+        spawns: tuple[tuple[str, str, dict[str, Any]], ...] = (),
+        trace: Optional[
+            dict[str, Any]
+        ] = None,  # execution-trace deferred for this backend (accepted, ignored)
         step: Optional[Step] = None,
     ) -> list[int]:
         # allocate monotonic seqs up front (one find_one_and_update each; a seq
         # wasted by a lost CAS is harmless), then build the embedded entries
-        outbox_entries: list[dict] = []
+        outbox_entries: list[dict[str, Any]] = []
         if emits:
             base = self._next_seq("outbox", len(emits))
             outbox_entries = [
                 {"seq": base + i, "target_id": t, "event": e.model_dump_json()}
                 for i, (t, e) in enumerate(emits)
             ]
-        spawn_entries: list[dict] = []
+        spawn_entries: list[dict[str, Any]] = []
         if spawns:
             base = self._next_seq("spawn", len(spawns))
             spawn_entries = [
@@ -184,7 +186,7 @@ class MongoStore:
                 for i, (cid, rp, ctx) in enumerate(spawns)
             ]
         # per-execution 0-based trace index; the array is ring-trimmed with $push/$slice
-        trace_step: Optional[dict] = None
+        trace_step: Optional[dict[str, Any]] = None
         if trace is not None:
             trace_step = {**trace, "index": self._next_seq("trace:" + exe.id, 1) - 1}
 
@@ -247,13 +249,13 @@ class MongoStore:
     def is_processed(self, execution_id: str, event_id: str) -> bool:
         return self._exes.find_one({"_id": execution_id, "processed": event_id}, {"_id": 1}) is not None
 
-    def append_trace(self, execution_id: str, entry: dict) -> None:
+    def append_trace(self, execution_id: str, entry: dict[str, Any]) -> None:
         idx = entry.get("index", self._next_seq("trace:" + execution_id, 1) - 1)
         step = {**entry, "index": idx}
         push = {"$each": [step], **({"$slice": -self.trace_max} if self.trace_max else {})}
         self._exes.update_one({"_id": execution_id}, {"$push": {"trace": push}}, upsert=True)
 
-    def read_trace(self, execution_id: str) -> list[dict]:
+    def read_trace(self, execution_id: str) -> list[dict[str, Any]]:
         doc = self._exes.find_one({"_id": execution_id}, {"trace": 1})
         return list(doc.get("trace", [])) if doc is not None else []
 

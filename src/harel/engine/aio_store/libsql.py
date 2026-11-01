@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Iterable, Optional
+from typing import TYPE_CHECKING, Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, Status
 from harel.engine.schema import DEFAULT_PREFIX
 from harel.engine.store import DefinitionRecord, OutboxEntry, PendingWork, SpawnEntry, TimerOp, WorkerRecord
 from harel.engine.store._base import Step
 from harel.spec.states import Event
+
+if TYPE_CHECKING:
+    from harel.engine.store.libsql import LibsqlStore
 
 
 class AsyncLibsqlStore:
@@ -22,7 +25,7 @@ class AsyncLibsqlStore:
     local for tests, or an embedded replica / Turso via `sync_url` + `auth_token`. Build with
     `await AsyncLibsqlStore.create(database, sync_url=..., auth_token=...)`."""
 
-    def __init__(self, sync_store: Any) -> None:
+    def __init__(self, sync_store: LibsqlStore) -> None:
         self._s = sync_store
         self._lock = asyncio.Lock()
 
@@ -97,8 +100,8 @@ class AsyncLibsqlStore:
         emits: list[tuple[Optional[str], Event]],
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
-        spawns: tuple[tuple[str, str, dict], ...] = (),
-        trace: Optional[dict] = None,
+        spawns: tuple[tuple[str, str, dict[str, Any]], ...] = (),
+        trace: Optional[dict[str, Any]] = None,
         step: Optional[Step] = None,
     ) -> list[int]:
         async with self._lock:
@@ -113,11 +116,11 @@ class AsyncLibsqlStore:
                 step=step,
             )
 
-    async def append_trace(self, execution_id: str, entry: dict) -> None:
+    async def append_trace(self, execution_id: str, entry: dict[str, Any]) -> None:
         async with self._lock:
             await asyncio.to_thread(self._s.append_trace, execution_id, entry)
 
-    async def read_trace(self, execution_id: str) -> list[dict]:
+    async def read_trace(self, execution_id: str) -> list[dict[str, Any]]:
         async with self._lock:
             return await asyncio.to_thread(self._s.read_trace, execution_id)
 

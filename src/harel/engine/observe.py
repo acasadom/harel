@@ -50,11 +50,11 @@ class ObservedStore:
         emits: list[tuple[Optional[str], Event]],
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
-        spawns: tuple[tuple[str, str, dict], ...] = (),
-        trace: Optional[dict] = None,
+        spawns: tuple[tuple[str, str, dict[str, Any]], ...] = (),
+        trace: Optional[dict[str, Any]] = None,
         step: Optional[Step] = None,
     ) -> list[int]:
-        seqs = self.store.commit(
+        seqs: list[int] = self.store.commit(
             exe,
             emits,
             processed_event_id=processed_event_id,
@@ -87,11 +87,11 @@ class AsyncObservedStore:
         emits: list[tuple[Optional[str], Event]],
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
-        spawns: tuple[tuple[str, str, dict], ...] = (),
-        trace: Optional[dict] = None,
+        spawns: tuple[tuple[str, str, dict[str, Any]], ...] = (),
+        trace: Optional[dict[str, Any]] = None,
         step: Optional[Step] = None,
     ) -> list[int]:
-        seqs = await self.store.commit(
+        seqs: list[int] = await self.store.commit(
             exe,
             emits,
             processed_event_id=processed_event_id,

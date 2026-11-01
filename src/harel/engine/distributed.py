@@ -26,11 +26,11 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Callable, Iterable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional, cast
 
 from harel.definition.model import Definition
 from harel.engine.execution import Execution
-from harel.engine.flow import Flow, run_inline
+from harel.engine.flow import Flow, T, run_inline
 from harel.engine.hosting import (  # noqa: F401 (re-exported)
     SenderLogic,
     WorkerLogic,
@@ -44,6 +44,9 @@ from harel.engine.hosting import (  # noqa: F401 (re-exported)
 from harel.engine.resolve import MachineResolver
 from harel.engine.transport import Lease
 from harel.spec.states import Event
+
+if TYPE_CHECKING:
+    from harel.engine.aio.distributed import AsyncDistributedRunner, AsyncWorker
 
 
 class Worker:
@@ -71,8 +74,8 @@ class Worker:
         machines: Optional[Iterable[str]] = None,
         heartbeat: float = 10.0,
         action_modules: Iterable[str] = (),
-        actions: Optional[dict] = None,
-        guards: Optional[dict] = None,
+        actions: Optional[dict[str, Any]] = None,
+        guards: Optional[dict[str, Any]] = None,
     ) -> None:
         """`machines`, when given, are the only machines this worker claims work for (see
         `WorkerLogic`)."""
@@ -125,27 +128,27 @@ class Worker:
 
     @staticmethod
     def _portal_build(
-        store,
-        transport,
-        definitions,
-        worker_id,
-        visibility,
-        suspend_recheck,
-        clock,
-        resolver,
-        concurrency,
-        high_ratio=0.0,
-        priority_threshold=1,
-        trace=False,
-        action_modules=(),
-        actions=None,
-        guards=None,
-        machines=None,
-        heartbeat=10.0,
-    ):
+        store: Any,
+        transport: Any,
+        definitions: dict[str, Definition],
+        worker_id: str,
+        visibility: float,
+        suspend_recheck: float,
+        clock: Callable[[], float],
+        resolver: Optional[MachineResolver],
+        concurrency: int,
+        high_ratio: float = 0.0,
+        priority_threshold: int = 1,
+        trace: bool = False,
+        action_modules: tuple[str, ...] = (),
+        actions: Optional[dict[str, Any]] = None,
+        guards: Optional[dict[str, Any]] = None,
+        machines: Optional[Iterable[str]] = None,
+        heartbeat: float = 10.0,
+    ) -> AsyncWorker:
         from harel.engine.aio import facade
 
-        async def build():
+        async def build() -> AsyncWorker:
             from harel.engine.aio.distributed import AsyncWorker
 
             return AsyncWorker(
@@ -170,7 +173,7 @@ class Worker:
 
         return facade.run(build)
 
-    def _serve_inline(self, flow: Flow) -> Any:
+    def _serve_inline(self, flow: Flow[T]) -> T:
         from harel.engine.aio import facade
 
         facade._guard_no_running_loop()
@@ -223,8 +226,8 @@ class Worker:
             return
         from harel.engine.aio import facade
 
-        async def run():
-            return await self._async._serve(getattr(self._async, f"{name}_flow")())
+        async def run() -> None:
+            await self._async._serve(getattr(self._async, f"{name}_flow")())
 
         facade.run(run)
 
@@ -296,8 +299,8 @@ class DistributedRunner:
         *,
         execution: str = "background",
         action_modules: Iterable[str] = (),
-        actions: Optional[dict] = None,
-        guards: Optional[dict] = None,
+        actions: Optional[dict[str, Any]] = None,
+        guards: Optional[dict[str, Any]] = None,
     ) -> None:
         """`execution` is `"background"` (the shared background event loop, the default)
         or `"inline"` (the caller's own thread, no event loop: create/start/send and the
@@ -334,19 +337,19 @@ class DistributedRunner:
 
     @staticmethod
     def _portal_build(
-        store,
-        transport,
-        definitions,
-        clock,
-        resolver,
-        trace=False,
-        action_modules=(),
-        actions=None,
-        guards=None,
-    ):
+        store: Any,
+        transport: Any,
+        definitions: dict[str, Definition],
+        clock: Callable[[], float],
+        resolver: Optional[MachineResolver],
+        trace: bool = False,
+        action_modules: tuple[str, ...] = (),
+        actions: Optional[dict[str, Any]] = None,
+        guards: Optional[dict[str, Any]] = None,
+    ) -> AsyncDistributedRunner:
         from harel.engine.aio import facade
 
-        async def build():
+        async def build() -> AsyncDistributedRunner:
             from harel.engine.aio.distributed import AsyncDistributedRunner
 
             return AsyncDistributedRunner(
@@ -376,7 +379,7 @@ class DistributedRunner:
     def create(
         self,
         definition_id: str,
-        context: Optional[dict] = None,
+        context: Optional[dict[str, Any]] = None,
         execution_id: Optional[str] = None,
         priority: int = 0,
         start_on_create: bool = True,
@@ -388,11 +391,14 @@ class DistributedRunner:
         also publishes `Start`, so a worker picks it up right away; pass `False`
         to defer that and call `start(execution_id)` yourself later. `version` runs that
         version of the machine (it must be loaded) instead of the highest."""
-        return self._do(
-            "create", definition_id, context, execution_id, priority, start_on_create, version=version
+        return cast(
+            Execution,
+            self._do(
+                "create", definition_id, context, execution_id, priority, start_on_create, version=version
+            ),
         )
 
-    def start(self, execution_id: str, data: Optional[dict] = None) -> None:
+    def start(self, execution_id: str, data: Optional[dict[str, Any]] = None) -> None:
         """Publish a `Start` for `execution_id` — a worker runs it, not this caller.
         No-op (logged) if it's already been started. `data`, when given, seeds the
         context before the machine runs (start-with-parameters) — the only
@@ -441,7 +447,7 @@ class DistributedRunner:
         )
 
     # --- control plane (lifecycle commands; bypass the event queue) ---------
-    def cancel(self, execution_id: str, *, reason: Optional[dict] = None) -> None:
+    def cancel(self, execution_id: str, *, reason: Optional[dict[str, Any]] = None) -> None:
         self._do("cancel", execution_id, reason=reason)
 
     def terminate(self, execution_id: str) -> None:
@@ -453,11 +459,11 @@ class DistributedRunner:
     def resume(self, execution_id: str) -> None:
         self._do("resume", execution_id)
 
-    def purge(self, execution_id: str, *, archive: Optional[Callable[[dict], Any]] = None) -> bool:
+    def purge(self, execution_id: str, *, archive: Optional[Callable[[dict[str, Any]], Any]] = None) -> bool:
         """Permanently delete a finished execution tree (root, regions, invokes and all
         their store rows), passing it to `archive` first if given. Refuses a child or a
         tree with a member not DONE/CANCELLED. False if it no longer exists."""
-        return self._do("purge", execution_id, archive=archive)
+        return cast(bool, self._do("purge", execution_id, archive=archive))
 
     def redrive(self, execution_id: str, target_path: str) -> None:
         """Force a dead-lettered (FAILED) `execution_id` back to RUNNING at

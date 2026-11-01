@@ -96,8 +96,8 @@ class AsyncRedisStore:
         emits: list[tuple[Optional[str], Event]],
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
-        spawns: tuple[tuple[str, str, dict], ...] = (),
-        trace: Optional[dict] = None,
+        spawns: tuple[tuple[str, str, dict[str, Any]], ...] = (),
+        trace: Optional[dict[str, Any]] = None,
         step: Optional[Step] = None,
     ) -> list[int]:
         # fast path: an event that only advances state (no emits/spawns/timers/trace) commits
@@ -173,14 +173,14 @@ class AsyncRedisStore:
     async def is_processed(self, execution_id: str, event_id: str) -> bool:
         return bool(await self._r.sismember(self._k(f"processed:{execution_id}"), event_id))
 
-    async def append_trace(self, execution_id: str, entry: dict) -> None:
+    async def append_trace(self, execution_id: str, entry: dict[str, Any]) -> None:
         idx = int(await self._r.incr(self._k(f"trace:seq:{execution_id}"))) - 1
         tkey = self._k(f"trace:{execution_id}")
         await self._r.rpush(tkey, json.dumps({**entry, "index": entry.get("index", idx)}))
         if self.trace_max:
             await self._r.ltrim(tkey, -self.trace_max, -1)
 
-    async def read_trace(self, execution_id: str) -> list[dict]:
+    async def read_trace(self, execution_id: str) -> list[dict[str, Any]]:
         return [json.loads(x) for x in await self._r.lrange(self._k(f"trace:{execution_id}"), 0, -1)]
 
     async def pending_spawns(self) -> list[SpawnEntry]:

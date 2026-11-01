@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from harel.engine.transport._base import _PARKED, Backlog, Lease, _backlog
 from harel.spec.states import Event
@@ -16,9 +16,9 @@ class InMemoryTransport:
     SQLite write-lock does across processes."""
 
     def __init__(self, clock: Callable[[], float] = time.time) -> None:
-        self._messages: list[dict] = []
+        self._messages: list[dict[str, Any]] = []
         self._seq = 0
-        self._groups: dict[str, dict] = {}  # group_id → {last_claimed_at, priority, routing_key}
+        self._groups: dict[str, dict[str, Any]] = {}  # group_id → {last_claimed_at, priority, routing_key}
         self._lock = threading.Lock()
         self._clock = clock
 
@@ -84,7 +84,7 @@ class InMemoryTransport:
     def backlog(self) -> Backlog:
         with self._lock:
             now = self._clock()
-            rows: dict = {}
+            rows: dict[Optional[str], Any] = {}
             for m in self._messages:
                 key = self._groups.get(m["group_id"], {}).get("routing_key")
                 row = rows.setdefault(key, {"messages": 0, "groups": set(), "held": set(), "oldest": None})

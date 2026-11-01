@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 from harel.engine.execution import Execution, ExecutionPage, ExecutionSummary, Status
 from harel.engine.store import (
@@ -32,7 +32,7 @@ class AsyncDictStore:
         self._processed: set[tuple[str, str]] = set()
         self._timers: dict[tuple[str, str], float] = {}
         self._spawns: list[SpawnEntry] = []
-        self._trace: dict[str, list[dict]] = {}
+        self._trace: dict[str, list[dict[str, Any]]] = {}
         self._trace_idx: dict[str, int] = {}
         self.trace_max = DEFAULT_TRACE_MAX
         self._seq = 0
@@ -41,7 +41,7 @@ class AsyncDictStore:
         self._definitions: dict[tuple[str, int], DefinitionRecord] = {}
         self._workers: dict[str, WorkerRecord] = {}
 
-    def _record_trace(self, execution_id: str, entry: dict) -> None:
+    def _record_trace(self, execution_id: str, entry: dict[str, Any]) -> None:
         idx = self._trace_idx.get(execution_id, 0)
         self._trace_idx[execution_id] = idx + 1
         steps = self._trace.setdefault(execution_id, [])
@@ -51,10 +51,10 @@ class AsyncDictStore:
         if self.trace_max and len(steps) > self.trace_max:
             del steps[: len(steps) - self.trace_max]
 
-    async def append_trace(self, execution_id: str, entry: dict) -> None:
+    async def append_trace(self, execution_id: str, entry: dict[str, Any]) -> None:
         self._record_trace(execution_id, entry)
 
-    async def read_trace(self, execution_id: str) -> list[dict]:
+    async def read_trace(self, execution_id: str) -> list[dict[str, Any]]:
         return list(self._trace.get(execution_id, []))
 
     async def load(self, execution_id: str) -> Optional[Execution]:
@@ -96,8 +96,8 @@ class AsyncDictStore:
         emits: list[tuple[Optional[str], Event]],
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
-        spawns: tuple[tuple[str, str, dict], ...] = (),
-        trace: Optional[dict] = None,
+        spawns: tuple[tuple[str, str, dict[str, Any]], ...] = (),
+        trace: Optional[dict[str, Any]] = None,
         step: Optional[Step] = None,
     ) -> list[int]:
         await self.save(exe)  # CAS first: raises before any emit is enqueued

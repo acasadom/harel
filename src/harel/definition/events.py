@@ -62,7 +62,9 @@ def value_fits(type_: str, value: object) -> bool:
     return False
 
 
-def schema_problems(schema: dict[str, FieldSpec], values: dict, *, check_required: bool = True) -> list[str]:
+def schema_problems(
+    schema: dict[str, FieldSpec], values: dict[str, Any], *, check_required: bool = True
+) -> list[str]:
     """What in `values` breaks `schema`: a declared field of the wrong type (`None` is only
     accepted for an optional one), or — with `check_required` — a required field absent.
     Undeclared keys are allowed: the schema types what it names and leaves room for the
@@ -81,7 +83,7 @@ def schema_problems(schema: dict[str, FieldSpec], values: dict, *, check_require
     return problems
 
 
-def with_defaults(schema: dict[str, FieldSpec], context: dict) -> dict:
+def with_defaults(schema: dict[str, FieldSpec], context: dict[str, Any]) -> dict[str, Any]:
     """`context` with every field of `schema` it lacks that declares a `default` added
     (a copy of the default, so a list default is never shared between executions)."""
     filled = dict(context)
@@ -95,7 +97,9 @@ class ContextError(ValueError):
     """An execution context that doesn't fit its machine's declared `context` schema."""
 
 
-def check_context(schema: dict[str, FieldSpec], context: dict, *, check_required: bool = True) -> None:
+def check_context(
+    schema: dict[str, FieldSpec], context: dict[str, Any], *, check_required: bool = True
+) -> None:
     """Raise `ContextError` if `context` doesn't fit `schema` (see `schema_problems`)."""
     problems = schema_problems(schema, context, check_required=check_required)
     if problems:
@@ -106,7 +110,7 @@ class EventError(ValueError):
     """An event whose data doesn't fit the event's declared fields."""
 
 
-def check_event(events: dict[str, EventType], kind: str, data: dict) -> None:
+def check_event(events: dict[str, EventType], kind: str, data: dict[str, Any]) -> None:
     """Raise `EventError` if `data` doesn't fit the declaration of event `kind` in `events`
     (see `schema_problems`). An undeclared kind, or one of the engine's own (`Timeout`,
     `Cancel`, …), isn't checked."""

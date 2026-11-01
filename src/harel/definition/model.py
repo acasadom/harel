@@ -30,8 +30,8 @@ class NodeKind(Enum):
 class ActionRef:
     """Reference to a user function (resolved lazily) plus bound inputs."""
 
-    function: Union[str, Callable]
-    inputs: dict = field(default_factory=dict)
+    function: Union[str, Callable[..., Any]]
+    inputs: dict[str, Any] = field(default_factory=dict)
     package: Optional[str] = None
 
 
@@ -64,7 +64,7 @@ class EventFilter:
     absent from its namespace, or whose value can't be compared, fails."""
 
     kind: str
-    predicates: dict = field(default_factory=dict)
+    predicates: dict[str, Any] = field(default_factory=dict)
     predicate: Optional[Predicate] = None
 
 
@@ -77,9 +77,9 @@ class Selector:
     selector may return — the validator checks the mapper covers them."""
 
     action: ActionRef
-    mapper: dict = field(default_factory=dict)  # result(str) -> target node name
+    mapper: dict[str, Any] = field(default_factory=dict)  # result(str) -> target node name
     default: Optional[str] = None  # `else` target name; None => an unmatched result is an error
-    enum: Optional[list] = None  # declared result values (validation only)
+    enum: Optional[list[Any]] = None  # declared result values (validation only)
 
 
 @dataclass
@@ -149,7 +149,9 @@ class Node:
     on_enter: Optional[ActionRef] = None
     on_activity: Optional[ActionRef] = None
     on_exit: Optional[ActionRef] = None
-    timeout: Optional[Union[int, dict]] = None  # literal seconds, or {context: key} (dynamic/backoff)
+    timeout: Optional[Union[int, dict[str, Any]]] = (
+        None  # literal seconds, or {context: key} (dynamic/backoff)
+    )
     outcome: Optional[str] = None  # result label recorded on the Execution when this state is a terminal
     carry: tuple[str, ...] = ()  # context keys a region propagates on its `Finished` (besides `outcome`)
     defer: frozenset[str] = frozenset()  # event kinds held (not dropped) while unhandled in this node's scope

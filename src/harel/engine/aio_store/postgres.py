@@ -70,7 +70,7 @@ class AsyncPostgresStore:
                 await conn.commit()
         return cls(pool, prefix=prefix)
 
-    async def _write_trace(self, cur: Any, execution_id: str, entry: dict) -> None:
+    async def _write_trace(self, cur: Any, execution_id: str, entry: dict[str, Any]) -> None:
         """Append one trace step on the given cursor (inside commit's txn). Two statements:
         `idx` computed inline (MAX+1, monotonic) so no pre-read, then the ring cap. `read_trace`
         takes `index` from the `idx` column."""
@@ -86,13 +86,13 @@ class AsyncPostgresStore:
                 (execution_id, execution_id, self.trace_max),
             )
 
-    async def append_trace(self, execution_id: str, entry: dict) -> None:
+    async def append_trace(self, execution_id: str, entry: dict[str, Any]) -> None:
         async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
                 await self._write_trace(cur, execution_id, entry)
             await conn.commit()
 
-    async def read_trace(self, execution_id: str) -> list[dict]:
+    async def read_trace(self, execution_id: str) -> list[dict[str, Any]]:
         async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
@@ -156,8 +156,8 @@ class AsyncPostgresStore:
         emits: list[tuple[Optional[str], Event]],
         processed_event_id: Optional[str] = None,
         timers: tuple[TimerOp, ...] = (),
-        spawns: tuple[tuple[str, str, dict], ...] = (),
-        trace: Optional[dict] = None,
+        spawns: tuple[tuple[str, str, dict[str, Any]], ...] = (),
+        trace: Optional[dict[str, Any]] = None,
         step: Optional[Step] = None,
     ) -> list[int]:
         # fast path: a state-only event (no emits/spawns/timers/trace) commits in ONE atomic
@@ -319,9 +319,10 @@ class AsyncPostgresStore:
         async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
 
-                async def rows(template: str) -> list:
+                async def rows(template: str) -> list[Any]:
                     await cur.execute(_pg_params(self._n.sql(template)), (execution_id,))
-                    return await cur.fetchall()
+                    found: list[Any] = await cur.fetchall()
+                    return found
 
                 timers = await rows(_PENDING_TIMERS_SQL)
                 outbox = await rows(_PENDING_OUTBOX_SQL)

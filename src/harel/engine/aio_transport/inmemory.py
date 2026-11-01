@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from harel.engine.transport import _PARKED, Backlog, Lease
 from harel.engine.transport._base import _backlog
@@ -17,9 +17,9 @@ class AsyncInMemoryTransport:
     sync transport's `threading.Lock` does across threads."""
 
     def __init__(self, clock: Callable[[], float] = time.time) -> None:
-        self._messages: list[dict] = []
+        self._messages: list[dict[str, Any]] = []
         self._seq = 0
-        self._groups: dict[str, dict] = {}  # group_id → {last_claimed_at, priority, routing_key}
+        self._groups: dict[str, dict[str, Any]] = {}  # group_id → {last_claimed_at, priority, routing_key}
         self._clock = clock
 
     async def publish(
@@ -77,7 +77,7 @@ class AsyncInMemoryTransport:
 
     async def backlog(self) -> Backlog:
         now = self._clock()
-        rows: dict = {}
+        rows: dict[Optional[str], Any] = {}
         for m in self._messages:
             key = self._groups.get(m["group_id"], {}).get("routing_key")
             row = rows.setdefault(key, {"messages": 0, "groups": set(), "held": set(), "oldest": None})
